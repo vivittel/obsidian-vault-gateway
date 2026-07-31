@@ -1,3 +1,9 @@
+Status: Completed
+
+Phase 1 was implemented and verified on OMV.
+The original ChatGPT Actions direction was superseded by the MCP architecture
+described in docs/MCP_IMPLEMENTATION_PLAN.md.
+
 # Obsidian Vault Gateway — Phase 1 実装プラン
 
 `docs/IMPLEMENTATION_PLAN.md` の Phase 1（§16「最小API」）に対する詳細設計。
