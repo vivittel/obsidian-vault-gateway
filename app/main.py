@@ -27,19 +27,24 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.routing import Mount, Route
+from starlette.middleware import Middleware
+from starlette.routing import Mount
 
-from app.config import API_PREFIX, get_settings
+from app.config import API_PREFIX, MCP_PREFIX, get_settings
 from app.exceptions import ErrorCode, GatewayError, error_envelope
 from app.mcp_server import build_mcp_transport, mcp
 from app.middleware import AccessLogMiddleware, RequestSizeLimitMiddleware
 from app.routers import health, inbox, notes, search
+
+if TYPE_CHECKING:
+    from starlette.types import Receive, Scope, Send
 
 logger = logging.getLogger("obsidian_gateway")
 
@@ -135,26 +140,43 @@ async def _lifespan(_app: Starlette) -> AsyncIterator[None]:
         yield
 
 
-async def _redirect_bare_mcp_path(_request: Request) -> RedirectResponse:
-    # Mount("/mcp", ...) below can only ever match "/mcp/..." — Starlette
-    # builds its path regex as f"{path}/{{path:path}}", so the bare "/mcp"
-    # (no trailing slash) structurally never matches it (confirmed against
-    # Mount.matches() directly). Without this explicit route, an outer
-    # Router's usual redirect-slash fallback never gets a chance to fire
-    # either: Mount("/", app=rest_app) below greedily matches "/mcp" first
-    # (it matches *any* path), so the request would silently fall through to
-    # a REST 404 instead of reaching the MCP transport at all.
-    return RedirectResponse(url="/mcp/", status_code=307)
+class _NormalizeBareMcpPath:
+    """Rewrite the bare ``/mcp`` path to ``/mcp/`` before routing runs.
+
+    ``Mount(MCP_PREFIX, ...)`` below can only ever match ``"/mcp/..."`` —
+    Starlette builds its path regex as ``f"{path}/{{path:path}}"``, so the
+    bare ``/mcp`` (no trailing slash) structurally never matches it
+    (confirmed against ``Mount.matches()`` directly). A 307-redirect fixed
+    this for clients that follow redirects, but left every request that
+    reached the bare path *unauthenticated* — the redirect route sat outside
+    ``McpBearerAuthMiddleware``, which only wraps the mounted app — and
+    limited to `GET/POST/DELETE`, so any other verb (`OPTIONS`, `PATCH`,
+    `PUT`, ...) fell through to ``Mount("/", app=rest_app)`` below, which
+    matches any path, and came back as a REST 404 envelope instead of an MCP
+    response. Rewriting the scope before the router ever sees it makes
+    ``/mcp`` byte-identical to ``/mcp/`` for every method, so both go through
+    the same auth check and the same MCP transport unconditionally.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["path"] == MCP_PREFIX:
+            normalized_path = f"{MCP_PREFIX}/"
+            scope = {
+                **scope,
+                "path": normalized_path,
+                "raw_path": normalized_path.encode("utf-8"),
+            }
+        await self.app(scope, receive, send)
 
 
 app = Starlette(
     routes=[
-        # Order matters: the bare-path redirect and /mcp mount must both be
-        # listed before the catch-all "/" mount, or the latter — which
-        # matches any path — would claim "/mcp" first.
-        Route("/mcp", endpoint=_redirect_bare_mcp_path, methods=["GET", "POST", "DELETE"]),
-        Mount("/mcp", app=_mcp_app_with_auth),
+        Mount(MCP_PREFIX, app=_mcp_app_with_auth),
         Mount("/", app=rest_app),
     ],
+    middleware=[Middleware(_NormalizeBareMcpPath)],
     lifespan=_lifespan,
 )

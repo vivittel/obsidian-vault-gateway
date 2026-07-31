@@ -1,9 +1,7 @@
 """MCP server and tool definitions (MCP_IMPLEMENTATION_PLAN sections 9-14).
 
-Not mounted anywhere yet — app/main.py wires ``/mcp`` up in a later slice.
-This module only has to be importable and independently testable: every tool
-calls the same :class:`~app.application.GatewayApplication` the REST routers
-do, so behaviour can never diverge between transports.
+Every tool calls the same :class:`~app.application.GatewayApplication` the
+REST routers do, so behaviour can never diverge between transports.
 
 Error handling is the one place this module earns its keep beyond "call the
 application layer". The SDK's own fallback for a tool that raises anything

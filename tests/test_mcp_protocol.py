@@ -303,6 +303,122 @@ def test_both_mcp_and_trailing_slash_variant_connect(
     }
 
 
+# --- bare "/mcp" is normalized onto "/mcp/" before routing, not redirected ----
+#
+# A 307-redirect previously handled the bare path, but sat outside
+# McpBearerAuthMiddleware (which only wraps the *mounted* app at "/mcp/") and
+# was registered for GET/POST/DELETE only. Any other verb fell through to the
+# catch-all "/" Mount(app=rest_app) and came back as a REST error envelope.
+# The tests below drive httpx with follow_redirects=False specifically so a
+# stray 307 (rather than a direct MCP-shaped response) makes the assertion
+# fail loudly instead of being silently swallowed by redirect-following.
+
+
+def test_unauthenticated_post_bare_mcp_is_401_not_a_redirect(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    headers = {k: v for k, v in mcp_headers.items() if k != "Authorization"}
+    response = mcp_client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        headers=headers,
+        follow_redirects=False,
+    )
+    assert response.status_code == 401
+    assert response.json() == {
+        "error": "invalid_token",
+        "error_description": "A valid bearer token is required.",
+    }
+
+
+@pytest.mark.parametrize("method", ["post", "get", "delete", "options", "patch", "put"])
+def test_unauthenticated_bare_and_slash_mcp_get_the_same_status(
+    mcp_client: TestClient, mcp_headers: dict, method: str
+) -> None:
+    headers = {k: v for k, v in mcp_headers.items() if k != "Authorization"}
+    bare = getattr(mcp_client, method)("/mcp", headers=headers, follow_redirects=False)
+    slashed = getattr(mcp_client, method)("/mcp/", headers=headers, follow_redirects=False)
+    assert bare.status_code == slashed.status_code
+    assert bare.status_code != 307
+
+
+@pytest.mark.parametrize("method", ["options", "patch", "put"])
+def test_authenticated_unsupported_methods_never_return_a_rest_error_envelope(
+    mcp_client: TestClient, mcp_headers: dict, method: str
+) -> None:
+    # These verbs are not handled by the MCP transport's own routes either,
+    # but the response must still come from the MCP side (or the auth
+    # middleware) — never app/main.py's REST exception handlers, which would
+    # shape the body as {"error": {"code": ..., "message": ...}} with a
+    # NOTE_NOT_FOUND/INTERNAL_ERROR code rather than MCP's own error shape.
+    response = getattr(mcp_client, method)(
+        "/mcp", headers=mcp_headers, follow_redirects=False
+    )
+    body = response.json()
+    # REST's envelope (app/exceptions.py's error_envelope) is exactly
+    # {"error": {"code": <ErrorCode string>, "message": ...}} with no
+    # "jsonrpc" key at all. MCP's own JSON-RPC error shape always carries
+    # "jsonrpc" and an integer error.code (e.g. -32600) — checking for that
+    # key is what actually distinguishes "the MCP side answered" from "the
+    # request fell through to rest_app and got REST's envelope instead".
+    assert body.get("jsonrpc") == "2.0"
+    assert isinstance(body["error"]["code"], int)
+
+
+def test_authenticated_post_bare_and_slash_mcp_return_equivalent_mcp_responses(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    bare = mcp_client.post("/mcp", json=body, headers=mcp_headers, follow_redirects=False)
+    slashed = mcp_client.post("/mcp/", json=body, headers=mcp_headers, follow_redirects=False)
+    assert bare.status_code == slashed.status_code == 200
+    assert {t["name"] for t in bare.json()["result"]["tools"]} == {
+        t["name"] for t in slashed.json()["result"]["tools"]
+    }
+
+
+def test_bare_mcp_rejects_a_host_outside_the_allowlist(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    # env's MCP_ALLOWED_HOSTS is "testserver,127.0.0.1:*,localhost:*" (see
+    # conftest.py); overriding the Host header directly proves normalization
+    # runs before, not instead of, the SDK's own DNS-rebinding check.
+    headers = {**mcp_headers, "Host": "evil.example.net"}
+    response = mcp_client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        headers=headers,
+        follow_redirects=False,
+    )
+    assert response.status_code == 421
+
+
+def test_bare_mcp_query_string_survives_normalization(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    # The rewrite must only touch scope["path"]/scope["raw_path"] — a query
+    # string on the bare path must reach the MCP transport unchanged.
+    response = mcp_client.post(
+        "/mcp?foo=bar",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        headers=mcp_headers,
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert {t["name"] for t in response.json()["result"]["tools"]} == {
+        "get_health",
+        "search_notes",
+        "read_note",
+        "create_inbox_note",
+    }
+
+
+def test_rest_health_unaffected_by_bare_mcp_path_normalization(client: TestClient) -> None:
+    response = client.get("/api/v1/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "vault_readable": True, "inbox_writable": True}
+
+
 # --- malformed input / unknown tool / bad arguments / oversized / concurrent --
 
 

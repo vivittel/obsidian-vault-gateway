@@ -23,6 +23,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # section 15) so the two can't drift apart.
 API_PREFIX = "/api/v1"
 
+# The MCP mount point, for the same reason: app/main.py both mounts the
+# Streamable HTTP transport here and normalizes the bare path onto it, so
+# the two can't drift apart either.
+MCP_PREFIX = "/mcp"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
