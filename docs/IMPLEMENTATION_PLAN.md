@@ -1,53 +1,138 @@
-# Obsidian Vault API 実装計画
+# Obsidian Vault Gateway 実装計画
+
+> Status: Active  
+> Revision: 2026-07-31  
+> Repository: `vivittel/obsidian-vault-gateway`  
+> Primary interface: MCP  
+> Secondary interface: REST API  
+> Architecture decision: [`docs/adr/0001-switch-primary-interface-to-mcp.md`](adr/0001-switch-primary-interface-to-mcp.md)
 
 ## 1. 目的
 
-OMV上で稼働するDockerコンテナとして、Obsidian VaultをChatGPTから検索・参照・保存できるREST APIを実装する。
+OMV上で稼働するDockerコンテナとして、Obsidian VaultをChatGPTデスクトップアプリおよびCodexから安全に検索・参照・保存できるゲートウェイを実装する。
 
-### 必須要件
+当初はChatGPT Actions向けの公開REST APIを主経路として計画したが、実際の必須要件は次のとおりである。
 
-* Vault内のMarkdownファイルを全文検索できる
-* Vault内のMarkdownファイルを読み取れる
-* Vaultのディレクトリ構成を取得できる
-* Vault全体は読み取り専用とする
-* 書き込み先は指定ディレクトリだけに限定する
-* ChatGPT Actionsから呼び出せるOpenAPI仕様を提供する
-* Bearer Tokenで認証する
-* Self-hosted LiveSyncのVaultを直接使用する
-* Docker ComposeでOMV上に配置する
-* 破壊的操作は実装しない
+- ChatGPTデスクトップアプリから利用できること
+- Codex CLIおよびCodex IDE拡張からも利用できること
+- Gatewayを公開インターネットへ露出しないこと
+- Vault全体は読み取り専用とすること
+- 書き込み先は`00_Inbox/ChatGPT`だけに限定すること
 
----
+この要件に合わせ、MCPを主インターフェースとする。既存のREST APIは削除せず、ヘルスチェック、curlによる診断、回帰試験、非MCPクライアント向けの互換インターフェースとして維持する。
 
-## 2. 対象構成
+## 2. 現在の状態
+
+### Phase 1: 完了
+
+以下は実装・テスト・OMV実機確認済みである。
+
+- FastAPIアプリケーション
+- Bearer Token認証
+- Vault全文検索
+- ノート読み取り
+- `00_Inbox/ChatGPT`への新規ノート作成
+- Vault全体のread-onlyマウント
+- Inboxのみread-writeマウント
+- パストラバーサル対策
+- シンボリックリンク拒否
+- 隠しファイル拒否
+- 原子的かつ非上書きのノート作成
+- DockerイメージのGHCR公開
+- OMV Composeへの配置
+- Caddy経由のHTTPS
+- Self-hosted LiveSync CLIとの同期
+- PC側Obsidianへの反映
+
+詳細は[`docs/PHASE1_PLAN.md`](PHASE1_PLAN.md)を参照する。
+
+### 次の作業
+
+旧Phase 2へ進む前に、Phase 1.5としてMCPトランスポートを追加する。
+
+詳細は[`docs/MCP_IMPLEMENTATION_PLAN.md`](MCP_IMPLEMENTATION_PLAN.md)を参照する。
+
+## 3. 対象構成
 
 ```text
-ChatGPT Custom GPT
+ChatGPTデスクトップアプリ
+Codex CLI
+Codex IDE拡張
         │
-        │ HTTPS / GPT Actions
+        │ MCP / Streamable HTTP / Bearer Token
+        │ 同一CodexホストのMCP設定を共有
+        ▼
+https://obsidian-api.example.com/mcp
+        │
+        │ LANまたはTailscale内のみ
         ▼
 Caddy
         │
         ▼
 obsidian-api コンテナ
-        │
-        ├── Vault全体：read-only
-        └── ChatGPT Inbox：read-write
+        ├── MCP adapter
+        ├── REST adapter
+        └── 共通application/service layer
                 │
-                ▼
-        Self-hosted LiveSync CLI
-                │
-                ▼
-             CouchDB
+                ├── Vault全体: read-only
+                └── ChatGPT Inbox: read-write
+                        │
+                        ▼
+                Self-hosted LiveSync CLI
+                        │
+                        ▼
+                     CouchDB
+                        │
+                        ▼
+                 PC / iPhone Obsidian
 ```
 
----
+### 対象外
 
-## 3. 権限設計
+ChatGPT WebはローカルCodexホストの`~/.codex/config.toml`を読み取らないため、この計画の直接対象外とする。
+
+公開Web版ChatGPTから利用する場合は、将来別途以下を検討する。
+
+- ChatGPT Plugin
+- リモートMCP
+- Secure MCP Tunnel
+- 公開可能範囲を分離した専用Gateway
+
+現時点では公開インターネットへの露出を行わない。
+
+## 4. 必須要件
+
+### 機能要件
+
+- Vault内のMarkdownファイルを全文検索できる
+- Vault内のMarkdownファイルを読み取れる
+- Vaultのディレクトリ構成を段階的に取得できる
+- Vault概要を取得できる
+- Inboxへ新規ノートを作成できる
+- Inbox内のGateway作成ノートへ追記できる
+- ChatGPTデスクトップアプリからMCPツールとして利用できる
+- Codex CLIおよびIDE拡張から同じMCPツールを利用できる
+- REST APIによる診断を継続できる
+- Self-hosted LiveSyncのVaultを直接使用する
+
+### セキュリティ要件
+
+- Vault全体はread-only
+- 書き込みは`00_Inbox/ChatGPT`のみ
+- 削除、移動、名前変更、任意パス書き込みは禁止
+- `.obsidian`、`.git`、`.trash`、隠しファイルを対象外とする
+- 絶対パスを応答へ含めない
+- Bearer Tokenをログへ出さない
+- ノート本文をログへ出さない
+- 検索語をログへ出さない
+- rootユーザーで実行しない
+- Linux capabilitiesを付与しない
+- コンテナルートFSをread-onlyとする
+- Gatewayを公開インターネットへ露出しない
+
+## 5. 権限設計
 
 ### 読み取り可能範囲
-
-Vault全体のMarkdownファイル。
 
 ```text
 /vault-ro/**/*.md
@@ -62,17 +147,15 @@ Vault全体のMarkdownファイル。
 **/.*
 ```
 
-添付ファイルは初期バージョンでは対象外とする。
+初期段階では添付ファイルを対象外とする。
 
 ### 書き込み可能範囲
-
-初期版では次の1ディレクトリだけとする。
 
 ```text
 00_Inbox/ChatGPT/**
 ```
 
-コンテナ内では以下にマウントする。
+コンテナ内:
 
 ```text
 /vault-write/inbox
@@ -80,498 +163,312 @@ Vault全体のMarkdownファイル。
 
 ### 実装しない操作
 
-* ファイル削除
-* 任意パスへの書き込み
-* ファイル移動
-* ファイル名変更
-* Vault全体への更新
-* `.obsidian`の読み書き
-* シェルコマンド実行
-* Git操作
-* CouchDBへの直接アクセス
+- ファイル削除
+- 任意パスへの書き込み
+- ファイル移動
+- ファイル名変更
+- Vault全体への更新
+- `.obsidian`の読み書き
+- シェルコマンド実行
+- Git操作
+- CouchDBへの直接アクセス
 
----
+## 6. 技術構成
 
-## 4. 技術構成
+### ランタイム
 
-### バックエンド
+- Python 3.13
+- FastAPI
+- Uvicorn
+- Pydantic
+- pydantic-settings
+- PyYAML
+- MCP Python SDK
+- `pathlib`および必要な`os`レベルAPI
 
-* Python 3.13
-* FastAPI
-* Uvicorn
-* Pydantic
-* PyYAML
-* python-frontmatter
-* Markdown解析用ライブラリ
-* `pathlib`によるパス処理
+### MCP
 
-### 検索
+- Transport: Streamable HTTP
+- Endpoint: `/mcp`
+- Authentication: Bearer Token
+- Mode: stateless HTTP
+- Response: JSON response
+- Primary clients:
+  - ChatGPT desktop app
+  - Codex CLI
+  - Codex IDE extension
 
-初期版は以下を使用する。
+MCP Python SDKは安定版を厳密に固定する。v2系が安定化・互換性確認されるまでは、安定したv1系を使用する。
 
-* Pythonによるファイル走査
-* 大文字・小文字を区別しない本文検索
-* ファイル名検索
-* タイトル検索
-* YAMLタグ検索
+### REST
 
-Vault規模が大きくなった場合は、SQLite FTS5へ移行できる構成にする。
-
-### 認証
-
-```http
-Authorization: Bearer <API_TOKEN>
-```
-
-APIトークンは環境変数またはDocker Secretから取得する。
-
----
-
-## 5. ディレクトリ構成
+既存エンドポイントを維持する。
 
 ```text
-obsidian-api/
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── config.py
-│   ├── auth.py
-│   ├── models.py
-│   ├── exceptions.py
-│   │
-│   ├── routers/
-│   │   ├── health.py
-│   │   ├── search.py
-│   │   ├── notes.py
-│   │   ├── vault.py
-│   │   └── inbox.py
-│   │
-│   └── services/
-│       ├── path_security.py
-│       ├── markdown_parser.py
-│       ├── search_service.py
-│       ├── vault_service.py
-│       └── inbox_service.py
-│
-├── tests/
-│   ├── fixtures/
-│   │   └── vault/
-│   ├── test_auth.py
-│   ├── test_path_security.py
-│   ├── test_search.py
-│   ├── test_notes.py
-│   ├── test_vault.py
-│   └── test_inbox.py
-│
-├── Dockerfile
-├── compose.yaml
-├── pyproject.toml
-├── .env.example
-├── .gitignore
-├── README.md
-├── AGENTS.md
-└── openapi.json
-```
-
----
-
-## 6. API仕様
-
-### 6.1 ヘルスチェック
-
-```http
-GET /api/v1/health
-```
-
-認証不要。
-
-レスポンス例：
-
-```json
-{
-  "status": "ok",
-  "vault_readable": true,
-  "inbox_writable": true
-}
-```
-
----
-
-### 6.2 Vault検索
-
-```http
-GET /api/v1/search
-```
-
-クエリパラメータ：
-
-```text
-q
-folder
-tags
-limit
-cursor
-```
-
-例：
-
-```http
-GET /api/v1/search?q=RTX%205070&limit=20
-```
-
-レスポンス：
-
-```json
-{
-  "results": [
-    {
-      "id": "Knowledge/PC/GPU/RTX 5070.md",
-      "path": "Knowledge/PC/GPU/RTX 5070.md",
-      "title": "RTX 5070",
-      "excerpt": "RTX 5070 MSI GAMING TRIO...",
-      "tags": ["gpu", "nvidia"],
-      "modified_at": "2026-07-29T21:00:00+09:00"
-    }
-  ],
-  "next_cursor": null
-}
-```
-
-### 検索仕様
-
-以下を検索対象とする。
-
-* ファイル名
-* YAML `title`
-* YAML `tags`
-* Markdown本文
-* 見出し
-
-検索結果は最大50件に制限する。
-
----
-
-### 6.3 ノート読み取り
-
-```http
-GET /api/v1/notes/{note_id}
-```
-
-`note_id`はVaultルートからの相対パスをURLエンコードしたものとする。
-
-レスポンス：
-
-```json
-{
-  "id": "Knowledge/PC/GPU/RTX 5070.md",
-  "path": "Knowledge/PC/GPU/RTX 5070.md",
-  "title": "RTX 5070",
-  "frontmatter": {
-    "tags": ["gpu", "nvidia"]
-  },
-  "content": "# RTX 5070\n...",
-  "modified_at": "2026-07-29T21:00:00+09:00"
-}
-```
-
-1ファイルの最大応答サイズを設定する。
-
-巨大ファイルの場合は切り詰め情報を返す。
-
-```json
-{
-  "truncated": true
-}
-```
-
----
-
-### 6.4 ディレクトリ一覧
-
-```http
-GET /api/v1/vault/tree
-```
-
-パラメータ：
-
-```text
-path
-depth
-include_notes
-```
-
-例：
-
-```http
-GET /api/v1/vault/tree?depth=3&include_notes=false
-```
-
-返却項目：
-
-* ディレクトリ名
-* 相対パス
-* ノート数
-* サブディレクトリ数
-* 最終更新日時
-
----
-
-### 6.5 Vault概要
-
-```http
-GET /api/v1/vault/summary
-```
-
-返却項目：
-
-```json
-{
-  "total_notes": 2500,
-  "total_folders": 65,
-  "total_markdown_bytes": 125000000,
-  "notes_without_frontmatter": 800,
-  "duplicate_titles": 15,
-  "last_scan_at": "2026-07-30T06:00:00+09:00"
-}
-```
-
----
-
-### 6.6 Inboxノート作成
-
-```http
+GET  /api/v1/health
+GET  /api/v1/search
+GET  /api/v1/notes
 POST /api/v1/inbox/notes
 ```
 
-リクエスト：
+将来追加:
 
-```json
-{
-  "title": "ChatGPTとObsidian Vaultの連携",
-  "content": "# ChatGPTとObsidian Vaultの連携\n...",
-  "frontmatter": {
-    "tags": ["chatgpt", "obsidian"],
-    "source": "chatgpt"
-  }
-}
+```text
+GET  /api/v1/vault/tree
+GET  /api/v1/vault/summary
+POST /api/v1/inbox/notes/{note_id}/append
 ```
 
-保存先はAPI側で固定する。
+### 検索
+
+初期版はPythonによる線形走査を使用する。
+
+- ファイル名
+- YAML `title`
+- YAML `tags`
+- Markdown本文
+- 見出し
+- NFKC正規化
+- casefold
+- 関連度順
+- 更新日時順
+
+Vault規模または応答時間が要件を超えた場合はSQLite FTS5へ移行する。
+
+## 7. レイヤー構成
+
+RESTとMCPで実処理を重複させない。
+
+```text
+Transport adapters
+├── REST routers
+└── MCP tools
+        │
+        ▼
+Application layer
+├── health
+├── search_notes
+├── read_note
+├── create_inbox_note
+├── get_vault_tree
+├── get_vault_summary
+└── append_inbox_note
+        │
+        ▼
+Services
+├── path_security
+├── markdown_parser
+├── search_service
+├── note_service
+├── inbox_service
+├── vault_service
+└── filenames
+        │
+        ▼
+Filesystem
+```
+
+### 原則
+
+- MCPからREST APIを内部HTTP呼び出ししない
+- RESTからMCPを呼び出さない
+- 両transportは同じapplication/service関数を呼ぶ
+- ファイルアクセス規則はservice層に一元化する
+- transport固有の認証、エラー変換、ログだけをadapterに置く
+
+## 8. 目標ディレクトリ構成
+
+```text
+app/
+├── __init__.py
+├── main.py
+├── config.py
+├── auth.py
+├── application.py
+├── models.py
+├── exceptions.py
+├── middleware.py
+├── mcp_server.py
+│
+├── routers/
+│   ├── health.py
+│   ├── search.py
+│   ├── notes.py
+│   ├── vault.py
+│   └── inbox.py
+│
+└── services/
+    ├── path_security.py
+    ├── markdown_parser.py
+    ├── search_service.py
+    ├── note_service.py
+    ├── vault_service.py
+    ├── inbox_service.py
+    └── filenames.py
+
+tests/
+├── fixtures/vault/
+├── test_auth.py
+├── test_path_security.py
+├── test_search.py
+├── test_notes.py
+├── test_inbox.py
+├── test_vault.py
+├── test_mcp_auth.py
+├── test_mcp_tools.py
+├── test_mcp_protocol.py
+└── test_rest_regression.py
+
+scripts/
+├── export_openapi.py
+└── mcp_smoke_test.py
+
+docs/
+├── IMPLEMENTATION_PLAN.md
+├── MCP_IMPLEMENTATION_PLAN.md
+├── PHASE1_PLAN.md
+├── adr/
+│   └── 0001-switch-primary-interface-to-mcp.md
+└── caddy/
+    └── obsidian-api.Caddyfile
+```
+
+## 9. MCPツール計画
+
+### Phase 1.5
+
+```text
+get_health
+search_notes
+read_note
+create_inbox_note
+```
+
+### Phase 2
+
+```text
+get_vault_tree
+get_vault_summary
+append_inbox_note
+```
+
+### Phase 4
+
+```text
+audit_vault
+find_broken_links
+find_orphan_notes
+find_duplicate_titles
+find_stale_inbox_notes
+```
+
+### ツール分類
+
+| Tool | 種別 | 書き込み | 承認方針 |
+|---|---|---:|---|
+| `get_health` | read | No | auto |
+| `search_notes` | read | No | auto |
+| `read_note` | read | No | auto |
+| `get_vault_tree` | read | No | auto |
+| `get_vault_summary` | read | No | auto |
+| `create_inbox_note` | write | Yes | prompt/writes |
+| `append_inbox_note` | write | Yes | prompt/writes |
+| `audit_vault` | read | No | auto |
+
+MCPツールのread/writeメタデータを正確に設定し、Codex側で`default_tools_approval_mode = "writes"`を使用できるようにする。
+
+## 10. 認証
+
+### 共通トークン検証
+
+現在のFastAPI dependency内にある検証ロジックを純粋関数へ抽出する。
+
+```python
+def verify_token(provided: str, expected: str) -> bool:
+    ...
+```
+
+利用箇所:
+
+- RESTのFastAPI dependency
+- MCP endpointのASGI middleware
+
+要件:
+
+- `secrets.compare_digest()`を使用
+- 16文字未満のトークンを設定段階で拒否
+- 推奨値は`openssl rand -hex 32`
+- トークンをログへ出さない
+- 認証エラーは固定メッセージとする
+- RESTとMCPで同一の`API_TOKEN`を使用する
+
+## 11. パスセキュリティ
+
+以下を必須とする。
+
+- 空文字を拒否
+- null byteを拒否
+- 絶対パスを拒否
+- Windowsドライブレターを拒否
+- `..`を拒否
+- `.`パス要素を拒否
+- バックスラッシュを拒否
+- 二重URLデコード攻撃を拒否
+- 隠しファイル・隠しディレクトリを拒否
+- シンボリックリンクを拒否
+- `.md`以外を拒否
+- 許可ルート外を拒否
+- 通常ファイル以外を拒否
+- 応答はVault相対パスのみ
+
+読み取り:
+
+```python
+resolved_path.is_relative_to(VAULT_READ_ROOT.resolve())
+```
+
+書き込み:
+
+```python
+resolved_path.is_relative_to(VAULT_INBOX_ROOT.resolve())
+```
+
+MCP tool wrapperで独自の簡易パス検証を追加せず、既存の共通serviceを必ず通す。
+
+## 12. ノート作成
+
+### 保存先
 
 ```text
 /vault-write/inbox/{sanitized-title}.md
 ```
 
-クライアントから保存パスは受け取らない。
+クライアントから保存パスを受け取らない。
 
 ### 同名ファイル
 
 既存ファイルを上書きしない。
 
 ```text
-ChatGPTとObsidian Vaultの連携.md
-ChatGPTとObsidian Vaultの連携-2.md
+Title.md
+Title-2.md
+Title-3.md
 ```
 
-のように連番を付ける。
+### 原子性
 
----
+- Inbox内に隠し一時ファイルを作成
+- `fsync`
+- `os.link()`で候補名へ原子的に配置
+- 既存ファイルがあれば次の連番へ進む
+- 一時ファイルを必ず削除
+- ディレクトリを`fsync`
 
-### 6.7 Inboxノートへの追記
-
-```http
-POST /api/v1/inbox/notes/{note_id}/append
-```
-
-対象はInbox APIで作成されたファイルだけに限定する。
-
-リクエスト：
-
-```json
-{
-  "content": "\n## 追記\n..."
-}
-```
-
----
-
-## 7. パスセキュリティ
-
-以下を必須とする。
-
-* 絶対パスを受け付けない
-* `..`を含むパスを拒否
-* URLデコード後にも再検証
-* バックスラッシュを拒否
-* `Path.resolve()`で実体パスを検証
-* 許可ルート外のパスを拒否
-* シンボリックリンクを拒否
-* Markdownファイル以外を拒否
-* 隠しファイルを拒否
-* null byteを拒否
-
-読み取り時：
-
-```python
-resolved_path.is_relative_to(VAULT_READ_ROOT.resolve())
-```
-
-書き込み時：
-
-```python
-resolved_path.is_relative_to(VAULT_INBOX_ROOT.resolve())
-```
-
-を必ず確認する。
-
----
-
-## 8. ファイル名のサニタイズ
-
-次を除去または置換する。
-
-```text
-/
-\
-:
-*
-?
-"
-<
->
-|
-制御文字
-```
-
-追加制約：
-
-* 最大100文字
-* 先頭ピリオド禁止
-* 空文字禁止
-* 拡張子はAPI側で`.md`を付与
-* Windows予約名を拒否
-* Unicode正規化を実施
-
----
-
-## 9. Docker構成
-
-### compose.yaml
-
-```yaml
-services:
-  obsidian-api:
-    build:
-      context: .
-    container_name: obsidian-api
-    restart: unless-stopped
-
-    environment:
-      TZ: Asia/Tokyo
-      API_TOKEN: ${API_TOKEN}
-      VAULT_READ_ROOT: /vault-ro
-      VAULT_INBOX_ROOT: /vault-write/inbox
-      MAX_SEARCH_RESULTS: 50
-      MAX_NOTE_SIZE_BYTES: 1048576
-
-    volumes:
-      - /srv/dev-disk-by-uuid-75100e60-4e37-476c-990c-3f763ca7e141/compose/data/obsidian-vault:/vault-ro:ro
-      - /srv/dev-disk-by-uuid-75100e60-4e37-476c-990c-3f763ca7e141/compose/data/obsidian-vault/00_Inbox/ChatGPT:/vault-write/inbox:rw
-
-    networks:
-      - caddy
-
-    security_opt:
-      - no-new-privileges:true
-
-    cap_drop:
-      - ALL
-
-    read_only: true
-
-    tmpfs:
-      - /tmp:size=64m
-
-networks:
-  caddy:
-    external: true
-```
-
-ホスト側のVaultパスは、実際の構成を確認して必要に応じて修正する。
-
----
-
-## 10. Dockerfile要件
-
-* Python slimイメージを使用
-* バージョンを固定
-* rootユーザーで実行しない
-* 依存関係のバージョンを固定
-* ビルドキャッシュを考慮
-* ヘルスチェックを定義
-* コンテナ内にVaultデータをコピーしない
-
----
-
-## 11. Caddy連携
-
-専用ホスト名を使用する。
-
-```text
-obsidian-api.example.com
-```
-
-Caddyからコンテナのポートへリバースプロキシする。
-
-要件：
-
-* HTTPS必須
-* HTTPからHTTPSへリダイレクト
-* API以外のパスは拒否
-* リクエストサイズ制限
-* アクセスログ
-* CouchDB用ホスト名とは分離
-
-例：
-
-```caddyfile
-obsidian-api.example.com {
-    reverse_proxy obsidian-api:8000
-}
-```
-
-Bearer Token認証はアプリケーション側で行う。
-
----
-
-## 12. OpenAPI / ChatGPT Actions対応
-
-FastAPIが生成するOpenAPI仕様をベースに、ChatGPT Actions向けに以下を調整する。
-
-* `operationId`を明示
-* 各Actionの用途を明確に記述
-* パラメータ説明を付ける
-* レスポンススキーマを固定
-* 必須フィールドを明示
-* エラー形式を統一
-* APIキー認証スキーマを定義
-
-想定する`operationId`：
-
-```text
-searchNotes
-readNote
-getVaultTree
-getVaultSummary
-createInboxNote
-appendInboxNote
-```
-
----
+`os.replace()`は既存ファイルを上書きするため使用しない。
 
 ## 13. エラー仕様
 
-共通形式：
+### REST
 
 ```json
 {
@@ -582,10 +479,20 @@ appendInboxNote
 }
 ```
 
-主なエラーコード：
+### MCP
+
+- Gatewayの既存エラーコードを維持する
+- MCP tool errorとして返す
+- スタックトレースをクライアントへ返さない
+- 絶対パスを返さない
+- 内部例外メッセージを返さない
+- 入力エラーと内部エラーを区別する
+
+主なエラーコード:
 
 ```text
 UNAUTHORIZED
+VALIDATION_ERROR
 INVALID_PATH
 PATH_OUTSIDE_VAULT
 NOTE_NOT_FOUND
@@ -597,194 +504,259 @@ RATE_LIMITED
 INTERNAL_ERROR
 ```
 
-内部の絶対パスやスタックトレースは返さない。
-
----
-
 ## 14. ログ
 
-記録する項目：
+記録する項目:
 
-* リクエスト日時
-* HTTPメソッド
-* エンドポイント
-* ステータスコード
-* 処理時間
-* 読み取ったノートの相対パス
-* 作成したInboxノートの相対パス
+- 日時
+- transport: `rest`または`mcp`
+- operation/tool名
+- ステータス
+- 処理時間
+- 読み取ったノートの相対パス
+- 作成したノートの相対パス
+- 検索語の長さ
+- 結果件数
 
-記録しない項目：
+記録しない項目:
 
-* Bearer Token
-* ノート本文
-* frontmatterの全文
-* クエリに含まれる機密情報
+- Bearer Token
+- Authorizationヘッダー
+- ノート本文
+- frontmatter全文
+- 検索語
+- MCP request body
+- MCP response body
+- ホスト側絶対パス
 
----
+## 15. Docker構成
 
-## 15. テスト計画
+### 原則
 
-### 単体テスト
+- GHCRイメージをOMVでpullする
+- ホストへ8000番を公開しない
+- Caddyと同一のDockerネットワークへ接続
+- Vault全体をread-onlyマウント
+- Inboxだけread-writeマウント
+- `read_only: true`
+- `cap_drop: ALL`
+- `no-new-privileges:true`
+- 非root UID/GIDで実行
+- `/tmp`はtmpfs
+- Vaultデータをイメージへコピーしない
 
-* 正常なノート検索
-* 日本語検索
-* 大文字・小文字を無視した検索
-* タグ検索
-* frontmatter解析
-* WikiLinkを含むノートの読み取り
-* 同名ノート作成時の連番
-* 日本語ファイル名
-* 無効なBearer Token
-* Token未指定
+### ネットワーク
 
-### セキュリティテスト
+現在は既存Dockerネットワーク`br0`を使用する。
 
-以下をすべて拒否すること。
-
-```text
-../secret.md
-../../.obsidian/config
-%2e%2e%2fsecret.md
-..\secret.md
-/vault/secret.md
-symlink-to-outside
-test.txt
-.hidden.md
+```yaml
+networks:
+  br0:
+    external: true
 ```
 
-### Docker権限テスト
-
-コンテナ内から以下を確認する。
-
-* `/vault-ro`には書き込めない
-* `/vault-write/inbox`には書き込める
-* Inbox以外には書き込めない
-* root権限を持たない
-* Linux Capabilityが付与されていない
-
-### LiveSync確認
-
-APIでInboxノートを作成し、以下を確認する。
-
-1. サーバー上のVaultに生成される
-2. livesync-cliが変更を検出する
-3. CouchDBへ同期される
-4. PCのObsidianへ反映される
-5. iPhoneのObsidianへ反映される
-
----
-
-## 16. 実装フェーズ
-
-### Phase 1：最小API
-
-* FastAPIプロジェクト作成
-* 設定読み込み
-* Bearer認証
-* ヘルスチェック
-* ノート検索
-* ノート読み取り
-* Inboxノート作成
-* Dockerfile
-* Compose
-* 基本テスト
-
-### Phase 1 完了条件
-
-* ChatGPT Actionsを使わず、curlで全APIを確認できる
-* Vault全体を検索できる
-* Inboxへノートを作成できる
-* Inbox以外へ書き込めない
-* LiveSyncで同期される
-
----
-
-### Phase 2：Vault構造参照
-
-* ディレクトリツリー
-* Vault概要
-* frontmatter集計
-* タグ集計
-* ページング
-* 大規模Vault向けの処理改善
-
-### Phase 2 完了条件
-
-* ChatGPTがVault全体の構成を段階的に把握できる
-* 大きなレスポンスを一括送信しない
-* 数千ノートでもタイムアウトしない
-
----
-
-### Phase 3：ChatGPT Actions
-
-* OpenAPI仕様整理
-* `operationId`設定
-* ChatGPT専用の説明文作成
-* Custom GPTへAction登録
-* Bearer Token設定
-* ChatGPTから検索テスト
-* ChatGPTからInbox保存テスト
-
-### Phase 3 完了条件
-
-ChatGPTで以下が成功する。
+### 公開範囲
 
 ```text
-「RTX 5070に関する既存ノートを検索して」
+OMV host port 8000: 非公開
+Caddy HTTPS 443: LAN / private DNS経由
+MCP endpoint: /mcp
+REST endpoint: /api/v1/*
 ```
+
+## 16. Caddy
+
+専用ホスト名:
 
 ```text
-「この会話をObsidianのInboxへ保存して」
+obsidian-api.example.com
 ```
 
----
+要件:
 
-### Phase 4：Vault監査
+- HTTPS
+- Private DNSまたはTailscaleでのみ到達
+- `/mcp`をobsidian-apiへ転送
+- `/api/v1/*`を診断用に維持
+- リクエストサイズ制限
+- アクセスログ
+- Bearer Tokenをログへ出さない
+- CouchDB用ホスト名と分離
 
-* 孤立ノート検出
-* リンク切れ検出
-* 重複タイトル検出
-* frontmatter欠落検出
-* 古いInboxノート検出
-* Vault監査レポート生成
+例:
 
-このフェーズは初期運用後に実装する。
+```caddyfile
+@obsidian_api host obsidian-api.example.com
+handle @obsidian_api {
+    reverse_proxy http://obsidian-api:8000
+}
+```
 
----
+## 17. テスト計画
 
-## 17. 非機能要件
+### 既存REST回帰
 
-* API起動時間：10秒以内
-* 検索応答：通常3秒以内
-* APIのメモリ使用量：初期状態で256MB以内を目標
-* 検索結果：最大50件
-* ノート読み取り：標準最大1MB
-* リクエスト本文：標準最大2MB
-* タイムゾーン：Asia/Tokyo
-* 文字コード：UTF-8
-* 改行コード：既存ノートを尊重する
-* Vaultを変更する処理は原子的に実行する
+- health
+- 認証なし401
+- 無効トークン401
+- 日本語検索
+- NFKC検索
+- タグ検索
+- folder検索
+- ノート読み取り
+- 大容量ノート切り詰め
+- Inbox作成
+- 同名連番
+- frontmatter
+- パストラバーサル拒否
+- symlink拒否
+- Inbox外書き込み拒否
 
-ノート作成時は一時ファイルへ書き込み後、`os.replace()`で配置する。
+### MCP単体
 
----
+- tool一覧
+- toolスキーマ
+- server instructions
+- read/write annotations
+- `search_notes`
+- `read_note`
+- `create_inbox_note`
+- tool error変換
+- 構造化レスポンス
 
-## 18. Codexへの作業ルール
+### MCP transport
 
-Codexは以下を遵守すること。
+- initialize
+- tools/list
+- tools/call
+- Bearerなし拒否
+- 無効Bearer拒否
+- 正常Bearer許可
+- 大きすぎるrequest拒否
+- セッション終了後の後始末
+- 複数リクエスト
+- RESTとの同居
+
+### 実機
+
+1. MCP Inspectorから接続
+2. ChatGPTデスクトップアプリへ登録
+3. `/mcp`で接続状態確認
+4. Vault検索
+5. 検索結果からノート読み取り
+6. Inboxへノート作成
+7. LiveSync CLIが検出
+8. PC Obsidianへ同期
+9. iPhone Obsidianへ同期
+10. REST curlテストが継続成功
+
+## 18. 実装フェーズ
+
+### Phase 1: 共通コア + REST
+
+Status: Completed
+
+- FastAPI
+- 設定
+- Bearer認証
+- health
+- search
+- read note
+- create inbox note
+- Docker
+- Compose
+- Caddy
+- GHCR
+- LiveSync
+- 基本テスト
+
+### Phase 1.5: MCP MVP
+
+Status: Next
+
+- MCP SDK導入
+- application layer抽出
+- token検証共通化
+- Streamable HTTP `/mcp`
+- 4つのMCP tool
+- tool annotations
+- server instructions
+- MCP認証
+- MCPテスト
+- MCP Inspector
+- ChatGPTデスクトップ接続
+- Codex CLI接続
+- IDE拡張接続
+- OMV実機確認
+
+### Phase 2: Vault構造参照
+
+- `get_vault_tree`
+- `get_vault_summary`
+- frontmatter集計
+- タグ集計
+- ページング
+- `append_inbox_note`
+- 大規模Vault向け改善
+
+### Phase 3: 運用強化
+
+- レート制限
+- 同時実行制限
+- タイムアウト
+- メトリクス
+- 監視
+- 401急増検知
+- ツール利用ログ
+- バックプレッシャー
+- SDK更新手順
+- MCP互換性試験
+
+### Phase 4: Vault監査
+
+- 孤立ノート
+- リンク切れ
+- 重複タイトル
+- frontmatter欠落
+- 古いInboxノート
+- 監査レポート
+
+## 19. 非機能要件
+
+- 起動時間: 10秒以内
+- 通常検索: 3秒以内を目標
+- 初期メモリ: 256MB以内を目標
+- 検索結果: 最大50件
+- 読み取り: 標準最大1MB
+- リクエスト: 標準最大2MB
+- MCP request body: SDK既定より小さい値を検討し、必要最小限に固定
+- タイムゾーン: Asia/Tokyo
+- 文字コード: UTF-8
+- 既存ノートの改行を尊重
+- 新規ノートはLF
+- 書き込みは原子的
+- 公開インターネット非依存
+- RESTとMCPで同一のセキュリティ規則
+
+## 20. Codexへの作業ルール
 
 ### 必須
 
-* 各Phaseを小さなコミットに分ける
-* 実装前にテストを書くか、実装と同時に追加する
-* 各変更後にテストを実行する
-* `README.md`を常に更新する
-* セキュリティ制約を緩めない
-* 絶対パスをレスポンスへ含めない
-* 依存関係を固定する
-* `docker compose config`を確認する
-* Compose起動前にdry-run相当の確認を行う
+- 作業ブランチを作る
+- 各変更を小さなコミットに分ける
+- 実装と同時にテストを追加する
+- 各変更後にpytestを実行する
+- ruffを実行する
+- OpenAPI回帰を確認する
+- REST回帰を確認する
+- MCP protocolテストを実行する
+- READMEを更新する
+- `.env.example`を更新する
+- 依存関係を厳密に固定する
+- `requirements.lock`を更新する
+- セキュリティ制約を緩めない
+- 絶対パスを応答へ含めない
+- Vault fixture以外の実Vaultへテストで触れない
 
 ### 禁止
 
@@ -792,72 +764,76 @@ Codexは以下を遵守すること。
 git reset --hard
 git clean -fd
 force push
-Vault内の既存ファイル変更
-Vault内の既存ファイル削除
+Vault既存ファイル変更
+Vault既存ファイル削除
 CouchDBへのアクセス
 LiveSync設定変更
-.obsidianの変更
+.obsidian変更
+公開インターネットへのGateway露出
+MCPからRESTへの内部HTTP呼び出し
+同じ処理のREST/MCP二重実装
 ```
 
----
+## 21. Phase 1.5の完了条件
 
-## 19. 最初にCodexへ依頼する内容
+以下をすべて満たすこと。
 
-```text
-この計画に従って、まずPhase 1だけを実装してください。
+- `pytest -q`成功
+- `ruff check .`成功
+- OpenAPIチェック成功
+- REST API回帰成功
+- MCP initialize成功
+- MCP tools/list成功
+- 4ツールのtools/call成功
+- Bearerなし接続拒否
+- 無効Bearer拒否
+- ChatGPTデスクトップアプリで接続成功
+- Codex CLIで接続成功
+- IDE拡張で接続成功
+- ChatGPTからVault検索成功
+- ChatGPTからノート読み取り成功
+- ChatGPTからInbox保存成功
+- LiveSyncでPC Obsidianへ同期
+- Inbox以外へ書き込めない
+- Gatewayが公開インターネットから到達不能
+- ドキュメント更新完了
 
-作業前に以下を行ってください。
-
-1. リポジトリ構成案を提示する
-2. 採用する依存関係と理由を提示する
-3. セキュリティ上のリスクを整理する
-4. 実装タスクを細分化する
-5. その後に実装を開始する
-
-要件:
-- Python 3.13
-- FastAPI
-- Docker Compose
-- Bearer Token認証
-- Vault全体はread-only
-- 00_Inbox/ChatGPTだけread-write
-- 削除・移動・任意書き込みAPIは禁止
-- パストラバーサルとシンボリックリンクを拒否
-- pytestによるテストを付ける
-- READMEと.env.exampleを作成する
-- OpenAPI operationIdを明示する
-- rootlessコンテナとして実行する
-
-Vaultの既存ファイルには一切変更を加えないでください。
-Phase 1完了後、変更ファイル一覧、テスト結果、未解決事項を報告してください。
-```
-
----
-
-## 20. 最終成果物
-
-Phase 1で以下を揃える。
+## 22. 最終成果物
 
 ```text
 Dockerfile
 compose.yaml
 .env.example
-FastAPIアプリケーション
-pytestテスト
+FastAPI REST application
+MCP Streamable HTTP application
+共通application/service layer
+pytest test suite
 README.md
 AGENTS.md
-OpenAPI仕様
-curlによる動作確認例
+OpenAPI specification
+MCP接続手順
+ChatGPT desktop接続手順
+Codex CLI接続手順
 Caddy設定例
+OMV検証手順
+ADR
 ```
 
-最終的に以下の操作ができる状態を目標とする。
+最終的に次の操作を実現する。
 
 ```text
-ChatGPT
+ChatGPTデスクトップ / Codex
   ├── Vault全体を検索
   ├── 対象ノートを読み取り
-  ├── Vaultの構成を確認
-  └── 00_Inbox/ChatGPTへMarkdownを保存
+  ├── Vault構造を確認
+  ├── Vault概要を確認
+  ├── 00_Inbox/ChatGPTへMarkdownを保存
+  └── 明示的な承認後にInboxノートへ追記
 ```
+
+## 23. 参考資料
+
+- [OpenAI: Model Context Protocol](https://learn.chatgpt.com/docs/extend/mcp)
+- [MCP Python SDK](https://py.sdk.modelcontextprotocol.io/)
+- [MCP Python SDK: Building Servers](https://py.sdk.modelcontextprotocol.io/server/)
 
