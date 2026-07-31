@@ -1,4 +1,7 @@
-"""IMPLEMENTATION_PLAN section 12: stable OpenAPI contract for ChatGPT Actions."""
+"""IMPLEMENTATION_PLAN section 12: a stable OpenAPI contract for the REST API,
+kept for curl-based diagnostics, regression tests, and non-MCP clients now
+that MCP (app/mcp_server.py) is the primary interface.
+"""
 
 from __future__ import annotations
 

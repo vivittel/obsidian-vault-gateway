@@ -1,27 +1,146 @@
 # Obsidian Vault Gateway
 
-Read-mostly REST gateway over an Obsidian vault, built for ChatGPT Actions:
-full-vault search, note reads, and note creation restricted to one directory.
+A secure gateway over a private Obsidian vault: full-vault search, note
+reads, and note creation restricted to one directory. **MCP is the primary
+interface** — for the ChatGPT desktop app, Codex CLI, and the Codex IDE
+extension, all sharing one MCP server configuration on the same Codex host,
+without exposing the Gateway to the public internet. A secondary REST API
+is kept for health checks, curl-based diagnostics, and regression tests.
 
-This is **Phase 1** of `docs/IMPLEMENTATION_PLAN.md` — see `docs/PHASE1_PLAN.md`
-for the detailed design and the points where this implementation deviates from
-that plan (each one justified). Phases 2–4 (directory tree / vault summary /
-append-to-note / vault audit / ChatGPT Actions registration) are not
-implemented yet.
+This is **Phase 1.5** of `docs/IMPLEMENTATION_PLAN.md`. See
+`docs/adr/0001-switch-primary-interface-to-mcp.md` for why MCP replaced the
+original ChatGPT Actions plan, `docs/adr/0002-use-mcp-python-sdk-v2.md` for
+why this runs on the MCP Python SDK's v2 line, and
+`docs/MCP_IMPLEMENTATION_PLAN.md` for the MCP design in full. Phase 1 (the
+REST-only predecessor) is documented as completed history in
+`docs/PHASE1_PLAN.md`.
 
 ## Security invariants
 
-These hold regardless of what future phases add (see `AGENTS.md`):
+These hold regardless of what future phases add (see `AGENTS.md`), for both
+transports:
 
 - The whole vault is mounted **read-only**.
-- Only `00_Inbox/ChatGPT` is writable, and only through `POST /api/v1/inbox/notes`.
-- There is no delete, move, rename, or arbitrary-path write endpoint.
+- Only `00_Inbox/ChatGPT` is writable, and only through the `create_inbox_note`
+  MCP tool or `POST /api/v1/inbox/notes`.
+- There is no delete, move, rename, or arbitrary-path write endpoint or tool.
 - Every path is validated against traversal, absolute paths, hidden files, and
   symlinks before touching the filesystem (`app/services/path_security.py`).
 - Responses and logs never contain an absolute host path, a bearer token, or
   note content — only vault-relative paths.
+- The Gateway is not exposed to the public internet — reachable only over a
+  private LAN or Tailscale address, behind Caddy.
 
-## Endpoints
+MCP and REST call the same `app/application.py` and service functions
+(`app/services/`); neither transport calls the other over HTTP, so they can
+never diverge in behaviour for the same operation.
+
+## MCP (primary interface)
+
+Endpoint: `/mcp`, Streamable HTTP transport, Bearer token authentication
+(same `API_TOKEN` as REST). Stateless (`stateless_http=True`): no session is
+tracked across requests, so terminating one (`DELETE`) is a no-op, not an
+error.
+
+### Tools
+
+| Tool | Type | Approval |
+|---|---|---|
+| `get_health` | read | auto |
+| `search_notes` | read | auto |
+| `read_note` | read | auto |
+| `create_inbox_note` | write | **prompt** |
+
+`search_notes` before `read_note` when the exact path is unknown — search
+results' `path` can be passed directly to `read_note`. `create_inbox_note`
+always writes a new file under `00_Inbox/ChatGPT`; it cannot overwrite,
+delete, move, or rename notes, and does not accept a path from the caller.
+
+**Write approval is not left to `ToolAnnotations` alone.** The
+`create_inbox_note` tool is annotated `readOnlyHint: false`, which is a
+signal a client's own policy can choose to ignore — the Codex configuration
+below sets an explicit approval policy (`default_tools_approval_mode`, plus a
+per-tool override) so a write actually prompts for confirmation rather than
+depending on the client interpreting the annotation the way this Gateway
+intends.
+
+### ChatGPT desktop app
+
+```text
+Settings → MCP servers → Add server
+  Name:            Obsidian Vault
+  Type:            Streamable HTTP
+  URL:             https://obsidian-api.example.com/mcp
+  Authentication:  Bearer token
+```
+
+Restart the app after saving. Confirm the connection in the composer with
+`/mcp`. Read tools (`get_health`, `search_notes`, `read_note`) run without
+confirmation; `create_inbox_note` prompts before writing.
+
+### Codex CLI / Codex IDE extension
+
+Both share the same Codex host configuration
+(`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.obsidian_vault]
+url = "https://obsidian-api.example.com/mcp"
+bearer_token_env_var = "OBSIDIAN_VAULT_MCP_TOKEN"
+default_tools_approval_mode = "writes"
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+enabled = true
+required = true
+
+[mcp_servers.obsidian_vault.tools.create_inbox_note]
+approval_mode = "prompt"
+```
+
+```bash
+export OBSIDIAN_VAULT_MCP_TOKEN='...'   # never write the token into config.toml
+```
+
+Verify:
+
+```bash
+codex mcp list
+```
+
+or, inside the Codex TUI, `/mcp`. A prompt like:
+
+> Obsidian VaultからSelf-hosted LiveSync CLIに関するノートを検索し、
+> 最も関連するノートを読んで要約してください。
+
+should run `search_notes`/`read_note` without a prompt. A save request:
+
+> この検証結果を「MCP接続テスト」というタイトルでObsidian Inboxへ保存してください。
+
+should prompt for approval before `create_inbox_note` runs, and Codex should
+only report the note as saved after the tool call actually returns success.
+
+### MCP Inspector
+
+```bash
+npx -y @modelcontextprotocol/inspector
+```
+
+Connect to `https://obsidian-api.example.com/mcp` (Streamable HTTP),
+set the Bearer token, and confirm all four tools are listed and callable.
+
+### Configuration
+
+`MCP_ALLOWED_HOSTS` (required) is a comma-separated Host-header allowlist for
+the transport's DNS-rebinding protection. Without it, the SDK defaults to
+allowing only `localhost`/`127.0.0.1`, which silently rejects every request
+Caddy forwards with a real Host header — set it to whatever hostname(s) the
+Gateway is actually reached by, e.g. `obsidian-api.example.com`. See
+`.env.example`.
+
+## REST (secondary interface)
+
+Kept for `docker healthcheck`, curl-based diagnostics, regression tests, and
+any non-MCP client.
 
 | Method | Path | operationId | Auth |
 |---|---|---|---|
@@ -46,8 +165,8 @@ cp .env.example .env
 openssl rand -hex 32   # use the output as API_TOKEN
 ```
 
-See `.env.example` for every variable. The two you must set for a real
-deployment are `API_TOKEN` and `VAULT_HOST_PATH` / `INBOX_HOST_PATH`.
+See `.env.example` for every variable. Required for a real deployment:
+`API_TOKEN`, `MCP_ALLOWED_HOSTS`, `VAULT_HOST_PATH` / `INBOX_HOST_PATH`.
 
 ## Running locally (no Docker)
 
@@ -56,6 +175,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 
 API_TOKEN=$(openssl rand -hex 32) \
+MCP_ALLOWED_HOSTS=localhost,127.0.0.1 \
 VAULT_READ_ROOT=/path/to/a/test/vault \
 VAULT_INBOX_ROOT=/path/to/a/test/vault/00_Inbox/ChatGPT \
   .venv/bin/uvicorn app.main:app --reload
@@ -63,6 +183,21 @@ VAULT_INBOX_ROOT=/path/to/a/test/vault/00_Inbox/ChatGPT \
 
 **Never point `VAULT_READ_ROOT` at a real vault for anything other than
 manual, careful checking.** Automated tests never do this — see Testing below.
+
+Smoke-test both transports:
+
+```bash
+curl -fsS http://127.0.0.1:8000/api/v1/health
+
+curl -fsS -X POST http://127.0.0.1:8000/mcp/ \
+     -H "Authorization: Bearer $API_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+(`/mcp/` with the trailing slash avoids a redirect round trip; `/mcp` also
+works.)
 
 ## Testing
 
@@ -77,6 +212,13 @@ Every test runs against a disposable vault built under `tmp_path`
 plain committed files; symlinks and oversized notes needed for edge-case tests
 are generated at test time, not committed.
 
+MCP tests (`tests/test_mcp_*.py`) mostly share one session-scoped `mcp_client`
+fixture rather than one per test: the SDK's session manager can only be
+started once per process, matching how a real server runs. `test_mcp_tools.py`
+covers the four tools directly, unmounted; `test_mcp_lifespan.py` and two
+tests in `test_mcp_protocol.py` that need their own event loop build an
+independent, throwaway MCP server instead.
+
 ## Docker / Compose
 
 ```bash
@@ -86,7 +228,9 @@ docker compose up -d --build
 
 The image is a non-root, `read_only: true` container with all Linux
 capabilities dropped (see `Dockerfile` / `compose.yaml`). The vault is never
-copied into the image — it is bind-mounted at runtime.
+copied into the image — it is bind-mounted at runtime. The container's own
+port (8000) is never published to the host; only Caddy, on the existing
+`PROXY_NETWORK` Docker network, reaches it.
 
 > **Not verified in this repository's automated tests.** The development
 > environment this code was written in has no Docker installed, so
@@ -104,27 +248,36 @@ docker compose config
 
 docker compose up -d --build
 
-BASE=https://obsidian-api.example.com/api/v1
+BASE=https://obsidian-api.example.com
 
-curl -fsS "$BASE/health"
+curl -fsS "$BASE/api/v1/health"
 
-curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/search" \
+curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/search" \
      --data-urlencode 'q=RTX 5070' --data-urlencode 'limit=5'
 
-curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/notes" \
+curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/notes" \
      --data-urlencode 'path=Knowledge/PC/GPU/RTX 5070.md'
 
 curl -fsS -X POST -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
      -d '{"title":"Gateway smoke test","content":"# Gateway smoke test\n"}' \
-     "$BASE/inbox/notes"
+     "$BASE/api/v1/inbox/notes"
+
+# MCP: no Bearer → 401; tools/list → 4 tools
+curl -i -X POST "$BASE/mcp/" -H 'Content-Type: application/json' \
+     -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+
+curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
+     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
-**The `POST` above creates a real note in `00_Inbox/ChatGPT` on your vault.**
-Phase 1 has no delete endpoint (by design — see Security invariants above), so
-the gateway itself cannot remove it. After confirming it synced correctly,
-delete `00_Inbox/ChatGPT/Gateway smoke test.md` manually, from Obsidian or
-directly on the OMV host. Do the same for any note created while checking
-LiveSync below.
+**The `POST /api/v1/inbox/notes` and any `create_inbox_note` calls above
+create a real note in `00_Inbox/ChatGPT` on your vault.** There is no delete
+endpoint or tool (by design — see Security invariants above), so the Gateway
+itself cannot remove it. After confirming it synced correctly, delete the
+note manually, from Obsidian or directly on the OMV host. Do the same for any
+note created while checking LiveSync below.
 
 Container permission checks:
 
@@ -139,8 +292,8 @@ docker compose exec obsidian-api sh -c '
 Expect: a non-root uid/gid, the `/vault-ro` write to fail, and the
 `/vault-write/inbox` write/remove to succeed.
 
-LiveSync check — with the container running, use the smoke-test `POST` above
-(or the ChatGPT-facing flow once Phase 3 wires it up) and confirm, in order:
+LiveSync check — with the container running, use a smoke-test write above (or
+`create_inbox_note` from an actual client) and confirm, in order:
 
 1. The note appears on the server's vault filesystem.
 2. `livesync-cli` detects the change.
@@ -150,16 +303,28 @@ LiveSync check — with the container running, use the smoke-test `POST` above
 
 Then delete the test note as noted above.
 
+Client checks: MCP Inspector connects and lists all four tools; ChatGPT
+desktop connects and a read tool runs without a prompt; Codex CLI connects
+(`codex mcp list`) and a write tool prompts for approval before running.
+
 ## Caddy
 
 Example site block: `docs/caddy/obsidian-api.Caddyfile`. Requirements it
-covers: HTTPS-only, only `/api/v1/*` served on this host name, a request-size
-cap, and access logging. Bearer token checking stays inside the application.
+covers: HTTPS-only, only `/mcp` (primary) and `/api/v1/*` (diagnostics)
+served on this host name, a request-size cap matching `MAX_REQUEST_BYTES`
+exactly, and access logging. Bearer token checking stays inside the
+application. `MCP_ALLOWED_HOSTS` on the container must include this host
+name, or the MCP transport's own DNS-rebinding protection rejects every
+request Caddy forwards.
 
 ## Known gaps (tracked for later phases)
 
-- `GET /api/v1/vault/tree`, `GET /api/v1/vault/summary` — Phase 2.
-- `POST /api/v1/inbox/notes/{note_id}/append` — Phase 2.
+- `GET /api/v1/vault/tree`, `GET /api/v1/vault/summary`, an
+  `append_inbox_note` MCP tool / `POST /api/v1/inbox/notes/{note_id}/append`
+  — Phase 2.
 - Search pagination (`cursor`) — the response always has `next_cursor: null`.
-- ChatGPT Actions registration and Custom-GPT-facing descriptions — Phase 3.
+- Rate limiting, concurrency limits, metrics, MCP compatibility testing
+  across SDK updates — Phase 3.
 - Vault audit (orphan notes, broken links, stale Inbox notes) — Phase 4.
+- MCP resources, prompts, OAuth, a public/tunnelled deployment — out of scope
+  for the foreseeable future; see ADR-0001's "Review conditions".

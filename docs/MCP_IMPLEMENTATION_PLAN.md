@@ -114,25 +114,34 @@ Streamable HTTP
 
 ## 5. SDK決定
 
-### 初期実装
+### 確定（実装時に本節の初期方針から変更）
 
-MCP Python SDKの安定したv1系を使用し、厳密に固定する。
-
-初期候補:
+初期方針はv1系（`mcp==1.28.1`）の固定だったが、本節自身が要求する「実装開始時に
+PyPI上の最新安定版を確認する」を実行した結果、確認時点でのPyPI安定版はv2系
+（`mcp==2.0.0`、2026-07-28公開）であり、v1系はメンテナンスのみの旧系列に
+移行済みだったため、**v2系（`mcp==2.0.0`）に厳密固定する**よう変更した。
+詳細と経緯は`docs/adr/0002-use-mcp-python-sdk-v2.md`を参照する。
 
 ```toml
-mcp==1.28.1
+mcp==2.0.0
 ```
 
-実装開始時に以下を確認する。
+確認済み事項（実装時点）:
 
-1. PyPI上の最新安定版
-2. Streamable HTTPの既知不具合
-3. FastAPI/Starletteとの依存競合
-4. Python 3.13対応
-5. Codexクライアントとの接続確認
+1. PyPI上の最新安定版 → v2.0.0（v1系は1.29.0までメンテナンスのみ）
+2. Streamable HTTPの既知不具合 → なし。ただし`stateless_http=True`時のGET
+   （SSEストリームを開いたまま待機し続ける仕様。ハングではなく仕様どおりの挙動）や
+   DNS rebinding protectionの既定挙動（`host`未指定時にlocalhost限定で自動有効化）
+   はドキュメント化されておらず、SDKソースを直接確認して判明した
+3. FastAPI/Starletteとの依存競合 → なし。`starlette==1.3.1`固定と`mcp`の下限
+   （`starlette>=0.27`、上限なし）は共存する
+4. Python 3.13対応 → 問題なし（`requires-python>=3.10`）
+5. Codexクライアントとの接続確認 → 未実施（実機OMV環境での確認待ち。§26参照）
 
-v2系は仕様・API・transport実装の安定性を評価後に別PRで移行する。Phase 1.5へpre-releaseを混在させない。
+v1系は`docs/IMPLEMENTATION_PLAN.md`のコードには一度も取り込まれていないため、
+「v2への移行」ではなく最初からv2を採用した。本節9の概念コード（`FastMCP`ベース）は
+v1系のAPI形状であり、実装は`mcp.server.mcpserver.MCPServer`ベースのv2 API
+（§9参照）に基づく。
 
 ### lock
 
@@ -258,32 +267,65 @@ Authorization header
 
 ```text
 app/mcp_server.py
+app/mcp_auth.py
 ```
 
-概念コード:
+実装コード（v2 API。§5でv1系から変更したため、当初の`FastMCP`ベースの概念コードを
+実際のクラス・引数配置に置き換えた）:
 
 ```python
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP(
-    name="Obsidian Vault Gateway",
-    instructions=SERVER_INSTRUCTIONS,
-    stateless_http=True,
-    json_response=True,
+mcp = MCPServer(name="Obsidian Vault Gateway", instructions=SERVER_INSTRUCTIONS)
+```
+
+transport引数（`stateless_http` / `json_response` / `streamable_http_path` /
+`max_request_body_size` / `transport_security`）はv1系と異なり**コンストラクタ
+ではなく`streamable_http_app()`呼び出し時**に渡す（`app/mcp_server.py`の
+`build_mcp_transport()`に集約）:
+
+```python
+asgi_app = mcp_server.streamable_http_app(
     streamable_http_path="/",
-    max_request_body_size=2 * 1024 * 1024,
+    json_response=True,
+    stateless_http=True,
+    max_request_body_size=settings.max_request_bytes,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=settings.mcp_allowed_hosts_list,
+        allowed_origins=[],
+    ),
 )
 ```
 
+`transport_security`は当初の概念コードに無かった必須引数（実装時に判明）。
+`host`引数を明示しない場合、SDKは`host`既定値`"127.0.0.1"`を見て
+DNS rebinding protectionをlocalhost限定で**自動的に有効化**するため、
+Caddy経由で届く実際のHostヘッダー（`obsidian-api.example.com`等）を
+`allowed_hosts`へ明示しないと全MCPリクエストが拒否される（U2、`MCP_ALLOWED_HOSTS`
+設定を追加）。
+
 ### endpoint
 
-FastAPIへ次のようにマウントする。
+トップレベルの`Starlette`インスタンス（`app/main.py`の`app`）へ、REST用の
+FastAPIインスタンス（`rest_app`）と対等な`Mount`として組み込む。
 
 ```text
 /mcp
 ```
 
-`streamable_http_path="/"`として、実際の接続URLが`/mcp/mcp`にならないようにする。
+`rest_app.mount("/mcp", ...)`としなかった理由: `rest_app`自身の例外ハンドラ
+（`GatewayError`等）はStarletteの`ExceptionMiddleware`経由で`rest_app`自身の
+routerを包むため、`rest_app`にマウントするとMCPの例外もそのハンドラを通り、
+RESTのエラーエンベロープへ書き換えられてしまう（§15の懸念そのもの）。
+対等な`Mount`として並べることで、MCPリクエストが`rest_app`のrouterへ
+到達する経路自体を無くした。
+
+`streamable_http_path="/"`として、実際の接続URLが`/mcp/mcp`にならないように
+した。ただしStarletteの`Mount`は`{path}/{path:path}`という正規表現でしか
+マッチしないため、末尾スラッシュ無しの`/mcp`単体はどの`Mount`にもマッチしない
+（実装時に発見）。対策として`/mcp`単体を`/mcp/`へ307リダイレクトする明示的な
+`Route`を追加した。
 
 ### lifespan
 
@@ -297,6 +339,16 @@ MCP SDKのsession managerをASGI lifespanへ組み込む。
 - app終了時に確実に終了
 - pytestでlifespanを有効化
 - Docker healthcheckは既存REST healthを継続使用
+
+補足（実装時に判明した制約）:
+
+- `mcp_server.session_manager`プロパティは`streamable_http_app()`を一度も
+  呼んでいない状態でアクセスすると`RuntimeError`になる。モジュール読み込み時に
+  `streamable_http_app()`を呼んでから`session_manager.run()`をlifespanで使う順序を守る
+- `session_manager.run()`は**インスタンスにつき一度しか呼べない**（2回目は
+  `RuntimeError`）。本番は`app/mcp_server.py`の`mcp`をプロセス起動時に一度だけ
+  runするが、pytestで同じ`mcp`シングルトンを複数テストから使う場合は
+  session-scopedなfixtureで一度だけ入る必要がある（テスト構成は§18参照）
 
 ## 10. server instructions
 
@@ -620,14 +672,13 @@ duration_ms=...
 result_count=...
 ```
 
-write:
+write（**U1により`note_path`は実装しない**。下記参照）:
 
 ```text
 transport=mcp
 method=tools/call
 tool=create_inbox_note
 status=success
-note_path=00_Inbox/ChatGPT/...
 duration_ms=...
 ```
 
@@ -647,6 +698,12 @@ status=unauthorized
 - Authorization
 - API token
 - raw MCP message
+- **note_path（U1: 実装時の指示により、読み取り・作成したノートの相対パスは
+  read/write問わずMCPアクセスログへ一切記録しない。本節が当初示していた
+  `note_path=00_Inbox/ChatGPT/...`の例、およびIMPLEMENTATION_PLAN.md §14の
+  「読み取ったノートの相対パス／作成したノートの相対パス」はMCP側には適用しない。
+  RESTのアクセスログは`request.state.accessed_note`/`created_note`経由で
+  引き続き相対パスを記録するため、transport間でログ項目が完全には一致しない）**
 
 ## 17. セキュリティ試験
 
@@ -865,7 +922,20 @@ Compose変更は原則不要。
 ports:
 ```
 
-は追加しない。
+は追加しない（`ports:`は最後まで追加していない — ホスト非公開の原則は維持）。
+
+**A11: 意図的な逸脱**。「Compose変更は原則不要」に反し、`compose.yaml`へ
+2つの環境変数を追加した。
+
+- `MCP_ALLOWED_HOSTS`（U2） — DNS rebinding protectionのallowlist。
+  `Settings`の必須項目としたため、`environment:`に追加しないと
+  コンテナが起動時に設定検証エラーで落ちる
+- `PROXY_NETWORK`（U5、A5） — 外部Dockerネットワークの実名を
+  `networks.proxy.name`で指定するための変数。IMPLEMENTATION_PLAN.md §15の
+  当初案「`br0`」と`compose.yaml`の実際の記述「`caddy`」の不一致を、
+  どちらか一方の決め打ちではなく設定可能にすることで解消した
+
+いずれも`ports:`（ホスト公開）とは無関係で、非公開の原則は変更していない。
 
 ## 23. 実装コミット案
 

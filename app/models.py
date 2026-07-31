@@ -1,8 +1,9 @@
 """Request and response schemas.
 
-Response models are fixed and fully typed on purpose: ChatGPT Actions consumes
-the generated OpenAPI document, and section 12 of the plan requires stable
-schemas with explicit required fields.
+Response models are fixed and fully typed on purpose: section 12 of the plan
+requires stable schemas with explicit required fields, and the same models
+back both the REST responses here and the MCP tools' structured output
+(app/mcp_server.py) — one schema, two transports.
 """
 
 from __future__ import annotations

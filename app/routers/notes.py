@@ -3,7 +3,7 @@
 The path is a query parameter (``?path=...``) rather than a path parameter
 (``/notes/{note_id}``) as section 6.3 literally shows. An encoded path
 parameter has ambiguous semantics for a slash (``%2F``): ASGI servers,
-reverse proxies and the ChatGPT Actions client do not agree on whether it is
+reverse proxies and HTTP clients generally do not agree on whether it is
 decoded before or after routing, which puts uncertainty in front of the path
 validator. A query parameter is decoded exactly once by Starlette, so the
 value :func:`app.services.path_security.resolve_read_path` sees is the same
