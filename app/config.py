@@ -17,6 +17,12 @@ from fastapi import Depends
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The REST mount point. Shared between app/main.py (router prefix) and
+# app/middleware.py (the pure-ASGI scope guard that keeps REST-only
+# logging/size-limiting from ever touching /mcp — MCP_IMPLEMENTATION_PLAN
+# section 15) so the two can't drift apart.
+API_PREFIX = "/api/v1"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")

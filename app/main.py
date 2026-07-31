@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.config import API_PREFIX
 from app.exceptions import ErrorCode, GatewayError, error_envelope
 from app.middleware import AccessLogMiddleware, RequestSizeLimitMiddleware
 from app.routers import health, inbox, notes, search
@@ -67,7 +68,7 @@ async def handle_unexpected_error(_request: Request, _exc: Exception) -> JSONRes
 app.add_middleware(AccessLogMiddleware)
 app.add_middleware(RequestSizeLimitMiddleware)
 
-app.include_router(health.router, prefix="/api/v1")
-app.include_router(search.router, prefix="/api/v1")
-app.include_router(notes.router, prefix="/api/v1")
-app.include_router(inbox.router, prefix="/api/v1")
+app.include_router(health.router, prefix=API_PREFIX)
+app.include_router(search.router, prefix=API_PREFIX)
+app.include_router(notes.router, prefix=API_PREFIX)
+app.include_router(inbox.router, prefix=API_PREFIX)
