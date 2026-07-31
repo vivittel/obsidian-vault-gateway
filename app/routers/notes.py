@@ -16,10 +16,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
 
+from app.application import ApplicationDep
 from app.auth import require_token
-from app.config import SettingsDep
 from app.models import NoteResponse
-from app.services import note_service
 
 router = APIRouter(tags=["notes"], dependencies=[Depends(require_token)])
 
@@ -32,16 +31,11 @@ router = APIRouter(tags=["notes"], dependencies=[Depends(require_token)])
 )
 async def read_note(
     request: Request,
-    settings: SettingsDep,
+    application: ApplicationDep,
     path: Annotated[
         str, Query(description="Vault-relative path, e.g. 'Knowledge/PC/GPU/RTX 5070.md'.")
     ],
 ) -> NoteResponse:
-    response = note_service.read_note(
-        path,
-        read_root=settings.read_root,
-        max_note_bytes=settings.max_note_size_bytes,
-        timezone=settings.timezone,
-    )
+    response = application.read_note(path=path)
     request.state.accessed_note = response.path
     return response
