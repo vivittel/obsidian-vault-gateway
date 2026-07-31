@@ -1,0 +1,30 @@
+# Example Caddy site block for the gateway (IMPLEMENTATION_PLAN.md section 11).
+#
+# Copy the relevant parts into your OMV Caddy configuration (or include this
+# file), replacing the hostname. Requirements this block satisfies:
+#   - HTTPS required, HTTP auto-redirected (Caddy's default behaviour)
+#   - only the API path is served — nothing else on this host name
+#   - request body size is capped, independently of the app's own limit
+#   - access is logged
+#   - kept on its own host name, separate from any CouchDB/LiveSync endpoint
+#
+# Bearer token authentication happens inside the application, not here.
+
+obsidian-api.example.com {
+    log {
+        output file /var/log/caddy/obsidian-api.log
+        format json
+    }
+
+    request_body {
+        max_size 2MB
+    }
+
+    handle /api/v1/* {
+        reverse_proxy obsidian-api:8000
+    }
+
+    handle {
+        respond 404
+    }
+}

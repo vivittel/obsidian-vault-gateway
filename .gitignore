@@ -1,0 +1,19 @@
+# Secrets — never commit (AGENTS.md: "Never commit .env, credentials, tokens,
+# private keys, or production paths").
+.env
+*.pem
+*.key
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

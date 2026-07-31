@@ -1,0 +1,44 @@
+services:
+  obsidian-api:
+    build:
+      context: .
+    container_name: obsidian-api
+    restart: unless-stopped
+
+    environment:
+      TZ: ${TZ:-Asia/Tokyo}
+      API_TOKEN: ${API_TOKEN}
+      VAULT_READ_ROOT: ${VAULT_READ_ROOT:-/vault-ro}
+      VAULT_INBOX_ROOT: ${VAULT_INBOX_ROOT:-/vault-write/inbox}
+      VAULT_INBOX_RELATIVE_PATH: ${VAULT_INBOX_RELATIVE_PATH:-00_Inbox/ChatGPT}
+      MAX_SEARCH_RESULTS: ${MAX_SEARCH_RESULTS:-50}
+      MAX_NOTE_SIZE_BYTES: ${MAX_NOTE_SIZE_BYTES:-1048576}
+      MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-2097152}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+    volumes:
+      # Whole vault, read-only. VAULT_HOST_PATH comes from .env — see
+      # .env.example for how to find the real OMV path.
+      - ${VAULT_HOST_PATH}:/vault-ro:ro
+      # Only 00_Inbox/ChatGPT, read-write. This is the one writable directory
+      # (AGENTS.md security invariant) — INBOX_HOST_PATH must point inside
+      # VAULT_HOST_PATH at the same subdirectory VAULT_INBOX_RELATIVE_PATH names.
+      - ${INBOX_HOST_PATH}:/vault-write/inbox:rw
+
+    networks:
+      - caddy
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    read_only: true
+
+    tmpfs:
+      - /tmp:size=64m
+
+networks:
+  caddy:
+    external: true

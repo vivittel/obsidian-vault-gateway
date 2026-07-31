@@ -1,0 +1,3 @@
+# No Frontmatter
+
+このノートにはYAML frontmatterがありません。

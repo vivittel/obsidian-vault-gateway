@@ -1,0 +1,564 @@
+{
+  "components": {
+    "schemas": {
+      "CreatedNoteResponse": {
+        "properties": {
+          "id": {
+            "description": "Vault-relative path of the created note.",
+            "title": "Id",
+            "type": "string"
+          },
+          "modified_at": {
+            "description": "Creation time in the configured timezone.",
+            "format": "date-time",
+            "title": "Modified At",
+            "type": "string"
+          },
+          "path": {
+            "description": "Vault-relative path of the created note.",
+            "title": "Path",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title as stored (may differ from the request after sanitising).",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "title",
+          "modified_at"
+        ],
+        "title": "CreatedNoteResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "inbox_writable": {
+            "description": "The inbox mount is writable.",
+            "title": "Inbox Writable",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "'degraded' when a mount is missing or has the wrong permissions.",
+            "enum": [
+              "ok",
+              "degraded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "vault_readable": {
+            "description": "The read-only vault mount is readable.",
+            "title": "Vault Readable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "vault_readable",
+          "inbox_writable"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "InboxNoteCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "description": "Markdown body. Written as-is with LF line endings.",
+            "maxLength": 2000000,
+            "title": "Content",
+            "type": "string"
+          },
+          "frontmatter": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "integer"
+                          },
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional YAML frontmatter. Scalars and flat lists of scalars only.",
+            "title": "Frontmatter"
+          },
+          "title": {
+            "description": "Human-readable title. The file name is derived from it by the API; callers cannot choose a path.",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "content"
+        ],
+        "title": "InboxNoteCreateRequest",
+        "type": "object"
+      },
+      "NoteResponse": {
+        "properties": {
+          "content": {
+            "description": "Markdown body with the frontmatter block removed.",
+            "title": "Content",
+            "type": "string"
+          },
+          "frontmatter": {
+            "additionalProperties": true,
+            "description": "Parsed YAML frontmatter. Empty when absent or unparseable.",
+            "title": "Frontmatter",
+            "type": "object"
+          },
+          "id": {
+            "description": "Vault-relative path of the note.",
+            "title": "Id",
+            "type": "string"
+          },
+          "modified_at": {
+            "description": "File mtime in the configured timezone.",
+            "format": "date-time",
+            "title": "Modified At",
+            "type": "string"
+          },
+          "path": {
+            "description": "Vault-relative path of the note.",
+            "title": "Path",
+            "type": "string"
+          },
+          "title": {
+            "description": "Frontmatter `title`, else the file name without .md.",
+            "title": "Title",
+            "type": "string"
+          },
+          "truncated": {
+            "description": "True when the note exceeded MAX_NOTE_SIZE_BYTES and content was cut.",
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "title",
+          "frontmatter",
+          "content",
+          "modified_at",
+          "truncated"
+        ],
+        "title": "NoteResponse",
+        "type": "object"
+      },
+      "SearchResponse": {
+        "properties": {
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Always null in Phase 1. Reserved for pagination so the schema stays stable when it lands.",
+            "title": "Next Cursor"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/SearchResultItem"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "title": "SearchResponse",
+        "type": "object"
+      },
+      "SearchResultItem": {
+        "properties": {
+          "excerpt": {
+            "description": "Short plain-text snippet around the match.",
+            "title": "Excerpt",
+            "type": "string"
+          },
+          "id": {
+            "description": "Vault-relative path; pass it to readNote as `path`.",
+            "title": "Id",
+            "type": "string"
+          },
+          "modified_at": {
+            "description": "File mtime in the configured timezone.",
+            "format": "date-time",
+            "title": "Modified At",
+            "type": "string"
+          },
+          "path": {
+            "description": "Vault-relative path of the note.",
+            "title": "Path",
+            "type": "string"
+          },
+          "tags": {
+            "description": "Frontmatter tags, in file order.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "title": {
+            "description": "Frontmatter `title`, else the file name without .md.",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "title",
+          "excerpt",
+          "tags",
+          "modified_at"
+        ],
+        "title": "SearchResultItem",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "description": "Send `Authorization: Bearer <API_TOKEN>`.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Read-mostly REST gateway over an Obsidian vault: full-vault search, note reads, and note creation restricted to 00_Inbox/ChatGPT.",
+    "title": "Obsidian Vault Gateway",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Report whether the vault mounts are usable",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/v1/inbox/notes": {
+      "post": {
+        "operationId": "createInboxNote",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboxNoteCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedNoteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create a Markdown note in 00_Inbox/ChatGPT",
+        "tags": [
+          "inbox"
+        ]
+      }
+    },
+    "/api/v1/notes": {
+      "get": {
+        "operationId": "readNote",
+        "parameters": [
+          {
+            "description": "Vault-relative path, e.g. 'Knowledge/PC/GPU/RTX 5070.md'.",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "description": "Vault-relative path, e.g. 'Knowledge/PC/GPU/RTX 5070.md'.",
+              "title": "Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NoteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read a note by its vault-relative path",
+        "tags": [
+          "notes"
+        ]
+      }
+    },
+    "/api/v1/search": {
+      "get": {
+        "operationId": "searchNotes",
+        "parameters": [
+          {
+            "description": "Free-text search term.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Free-text search term.",
+              "title": "Q"
+            }
+          },
+          {
+            "description": "Vault-relative folder to restrict the search to.",
+            "in": "query",
+            "name": "folder",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Vault-relative folder to restrict the search to.",
+              "title": "Folder"
+            }
+          },
+          {
+            "description": "Comma-separated frontmatter tags; all must match.",
+            "in": "query",
+            "name": "tags",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated frontmatter tags; all must match.",
+              "title": "Tags"
+            }
+          },
+          {
+            "description": "Maximum number of results.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "description": "Maximum number of results.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Search the vault by file name, title, tags, headings and body",
+        "tags": [
+          "search"
+        ]
+      }
+    }
+  }
+}
