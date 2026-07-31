@@ -12,7 +12,6 @@ value the caller intended — see docs/PHASE1_PLAN.md section 4.5.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -20,8 +19,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from app.auth import require_token
 from app.config import SettingsDep
 from app.models import NoteResponse
-from app.services.markdown_parser import parse_note, read_note_text, to_json_safe
-from app.services.path_security import resolve_read_path
+from app.services import note_service
 
 router = APIRouter(tags=["notes"], dependencies=[Depends(require_token)])
 
@@ -39,24 +37,11 @@ async def read_note(
         str, Query(description="Vault-relative path, e.g. 'Knowledge/PC/GPU/RTX 5070.md'.")
     ],
 ) -> NoteResponse:
-    note = resolve_read_path(path, settings.read_root)
-    request.state.accessed_note = note.relative
-    stat_result = note.path.stat()
-
-    text, truncated = read_note_text(
-        note.path,
-        size_bytes=stat_result.st_size,
-        max_bytes=settings.max_note_size_bytes,
+    response = note_service.read_note(
+        path,
+        read_root=settings.read_root,
+        max_note_bytes=settings.max_note_size_bytes,
+        timezone=settings.timezone,
     )
-    stem = note.relative.rsplit("/", 1)[-1].removesuffix(".md")
-    parsed = parse_note(text, fallback_title=stem)
-
-    return NoteResponse(
-        id=note.relative,
-        path=note.relative,
-        title=parsed.title,
-        frontmatter=to_json_safe(parsed.metadata),
-        content=parsed.body,
-        modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=settings.timezone),
-        truncated=truncated,
-    )
+    request.state.accessed_note = response.path
+    return response

@@ -1,6 +1,9 @@
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
+
+from app.services import note_service
 
 
 def test_read_note_returns_frontmatter_and_content(
@@ -133,3 +136,65 @@ def test_read_note_response_never_contains_absolute_path(
         headers=auth_headers,
     )
     assert str(vault_root) not in response.text
+
+
+# app.services.note_service unit tests — same behaviour, called directly
+# rather than through the REST router, so Phase 1.5's MCP read_note tool can
+# be checked against the identical function.
+
+TOKYO = ZoneInfo("Asia/Tokyo")
+
+
+def test_note_service_parses_frontmatter_and_body(vault_root: Path) -> None:
+    response = note_service.read_note(
+        "Knowledge/PC/GPU/RTX 5070.md",
+        read_root=vault_root,
+        max_note_bytes=1_048_576,
+        timezone=TOKYO,
+    )
+    assert response.id == response.path == "Knowledge/PC/GPU/RTX 5070.md"
+    assert response.title == "RTX 5070"
+    assert response.frontmatter == {"title": "RTX 5070", "tags": ["gpu", "nvidia"]}
+    assert "[[GPU比較]]" in response.content
+
+
+def test_note_service_tolerates_broken_yaml(vault_root: Path) -> None:
+    response = note_service.read_note(
+        "Knowledge/broken_frontmatter.md",
+        read_root=vault_root,
+        max_note_bytes=1_048_576,
+        timezone=TOKYO,
+    )
+    assert response.frontmatter == {}
+    assert response.title == "broken_frontmatter"
+
+
+def test_note_service_preserves_crlf(vault_root: Path) -> None:
+    response = note_service.read_note(
+        "Knowledge/crlf.md",
+        read_root=vault_root,
+        max_note_bytes=1_048_576,
+        timezone=TOKYO,
+    )
+    assert "\r\n" in response.content
+
+
+def test_note_service_sets_truncated_flag_over_size_limit(vault_root: Path) -> None:
+    response = note_service.read_note(
+        "Knowledge/large.md",
+        read_root=vault_root,
+        max_note_bytes=1024,
+        timezone=TOKYO,
+    )
+    assert response.truncated is True
+    assert len(response.content) <= 1024
+
+
+def test_note_service_response_never_contains_absolute_path(vault_root: Path) -> None:
+    response = note_service.read_note(
+        "Knowledge/PC/GPU/RTX 5070.md",
+        read_root=vault_root,
+        max_note_bytes=1_048_576,
+        timezone=TOKYO,
+    )
+    assert str(vault_root) not in response.model_dump_json()
