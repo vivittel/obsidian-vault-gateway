@@ -33,14 +33,16 @@ from types import TracebackType
 from typing import Annotated
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
 from mcp.types import ToolAnnotations
 from mcp_types.jsonrpc import INTERNAL_ERROR, INVALID_PARAMS
 from pydantic import Field
 
 from app.application import GatewayApplication
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.exceptions import GatewayError
+from app.mcp_auth import McpBearerAuthMiddleware
 from app.models import (
     CreatedNoteResponse,
     FrontmatterValue,
@@ -229,3 +231,44 @@ def create_inbox_note(
         return _application().create_inbox_note(
             title=title, content=content, frontmatter=frontmatter
         )
+
+
+def build_mcp_transport(mcp_server: MCPServer, settings: Settings):
+    """Wire an ``MCPServer`` into a bearer-authenticated Streamable HTTP ASGI app.
+
+    Fixed choices here (``stateless_http=True``, ``json_response=True``,
+    ``streamable_http_path="/"``) are this project's, not just the SDK's
+    defaults — see MCP_IMPLEMENTATION_PLAN section 9 and D5. Shared by
+    app/main.py's production mount and by tests that need their own
+    throwaway ``MCPServer`` instance: ``mcp_server.session_manager.run()``
+    can only be entered once per instance (verified against the installed
+    SDK — a second call raises ``RuntimeError``), so anything that needs an
+    independent lifespan (rather than sharing the one production app.main's
+    module-level ``mcp`` singleton enters exactly once) must call this again
+    on a *different* ``MCPServer`` instance, never call
+    ``mcp.streamable_http_app()`` a second time on the shared one — doing
+    that would silently repoint its ``session_manager`` property at a fresh,
+    never-started instance, orphaning the one already wired into whatever
+    ASGI app was mounted from the first call.
+    """
+    asgi_app = mcp_server.streamable_http_app(
+        streamable_http_path="/",
+        json_response=True,
+        stateless_http=True,
+        max_request_body_size=settings.max_request_bytes,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=settings.mcp_allowed_hosts_list,
+            # Empty, not "*": these clients (ChatGPT desktop, Codex CLI/IDE)
+            # are not browsers and send no Origin header, and
+            # TransportSecurityMiddleware treats an absent Origin as
+            # always-allowed (mcp.server.transport_security._validate_origin).
+            # CORS is not needed here (MCP_IMPLEMENTATION_PLAN section 15).
+            allowed_origins=[],
+        ),
+    )
+    # Wraps the transport *before* mounting, so every request reaching it —
+    # including `server/discover` and `initialize` — is checked regardless
+    # of which JSON-RPC method the body names (MCP_IMPLEMENTATION_PLAN
+    # section 8).
+    return McpBearerAuthMiddleware(asgi_app)

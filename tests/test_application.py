@@ -23,6 +23,7 @@ TEST_API_TOKEN = "test-token-0123456789abcdef"  # noqa: S105 - test fixture, not
 def application(vault_root: Path, inbox_root: Path) -> GatewayApplication:
     settings = Settings(
         api_token=TEST_API_TOKEN,
+        mcp_allowed_hosts="testserver,127.0.0.1:*,localhost:*",
         vault_read_root=vault_root,
         vault_inbox_root=inbox_root,
         vault_inbox_relative_path="00_Inbox/ChatGPT",

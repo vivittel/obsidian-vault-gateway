@@ -161,6 +161,7 @@ async def test_request_size_limit_still_rejects_oversized_body_under_api_v1(
     from app.config import get_settings
 
     monkeypatch.setenv("API_TOKEN", "x" * 16)
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "localhost")
     monkeypatch.setenv("MAX_REQUEST_BYTES", "1024")
     get_settings.cache_clear()
     try:

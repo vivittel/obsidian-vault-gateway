@@ -332,7 +332,7 @@
     }
   },
   "info": {
-    "description": "Read-mostly REST gateway over an Obsidian vault: full-vault search, note reads, and note creation restricted to 00_Inbox/ChatGPT.",
+    "description": "Read-mostly gateway over an Obsidian vault: full-vault search, note reads, and note creation restricted to 00_Inbox/ChatGPT. MCP (mounted at /mcp) is the primary interface; this REST API is kept for health checks, curl-based diagnostics, and regression tests.",
     "title": "Obsidian Vault Gateway",
     "version": "0.1.0"
   },

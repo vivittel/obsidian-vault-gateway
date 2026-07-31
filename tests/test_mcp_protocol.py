@@ -1,0 +1,486 @@
+"""``/mcp`` Streamable HTTP protocol — MCP_IMPLEMENTATION_PLAN sections 15-18.
+
+Covers both protocol eras (2026-07-28's ``server/discover`` and the legacy
+``initialize`` handshake), the high-level SDK ``Client``, and the transport
+edge cases the plan calls out: malformed input, an unknown tool, oversized
+requests, concurrent calls, and GET/DELETE.
+
+Wire-level requirements below (the ``Mcp-Method``/``Mcp-Name`` headers and
+the ``params._meta`` envelope for modern requests) were reverse-engineered
+against the installed SDK by hand, not copied from documentation — none of
+the project's planning docs mention them. Getting any of the three wrong
+produces a ``400`` with a message naming exactly which header/key is missing
+or mismatched, which is how each was found.
+
+Most tests below share the session-scoped ``mcp_client`` fixture (see its
+docstring in conftest.py for why session-scoped: ``mcp.session_manager.run()``
+is one-shot per ``MCPServer`` instance, and the shared production singleton
+is built once at import time). The two exceptions — the high-level ``Client``
+test and the GET/SSE test — build their own independent, throwaway
+``MCPServer`` via ``app.mcp_server.build_mcp_transport`` instead, because
+each needs to drive raw async/ASGI calls in *this test's own* event loop,
+which cannot safely share a session manager whose task group lives in
+``mcp_client``'s separate portal thread.
+"""
+
+from __future__ import annotations
+
+import concurrent.futures
+import contextlib
+
+import anyio
+import httpx2
+import pytest
+from fastapi.testclient import TestClient
+from mcp.client.client import Client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
+from starlette.applications import Starlette
+from starlette.routing import Mount
+
+from app.config import Settings, get_settings
+from app.mcp_server import build_mcp_transport, get_health
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+LEGACY_PROTOCOL_VERSION = "2025-06-18"  # any HANDSHAKE_PROTOCOL_VERSIONS member
+
+
+def _modern_meta() -> dict:
+    return {
+        "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "pytest", "version": "0"},
+    }
+
+
+def _modern_headers(
+    mcp_headers: dict[str, str], *, method: str, name: str | None = None
+) -> dict[str, str]:
+    headers = {
+        **mcp_headers,
+        "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
+        "Mcp-Method": method,
+    }
+    if name is not None:
+        headers["Mcp-Name"] = name
+    return headers
+
+
+def _modern_call_tool(
+    mcp_client: TestClient, mcp_headers: dict, *, request_id: int, name: str, arguments: dict
+):
+    return mcp_client.post(
+        "/mcp/",
+        json={
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments, "_meta": _modern_meta()},
+        },
+        headers=_modern_headers(mcp_headers, method="tools/call", name=name),
+    )
+
+
+def _legacy_call_tool(
+    mcp_client: TestClient, mcp_headers: dict, *, request_id: int, name: str, arguments: dict
+):
+    return mcp_client.post(
+        "/mcp/",
+        json={
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+        headers=mcp_headers,
+    )
+
+
+@contextlib.asynccontextmanager
+async def _standalone_mcp_app(settings: Settings):
+    """An independent, single-tool MCP ASGI app for tests that must drive
+    their own event loop directly (see module docstring). Reuses the real
+    ``get_health`` tool function and the real ``build_mcp_transport`` wiring,
+    just on a throwaway ``MCPServer`` instead of the shared singleton.
+    """
+    fresh_mcp = MCPServer(name="standalone-test-server")
+    fresh_mcp.add_tool(
+        get_health,
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+    )
+    mcp_app_with_auth = build_mcp_transport(fresh_mcp, settings)
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: Starlette):
+        async with fresh_mcp.session_manager.run():
+            yield
+
+    test_app = Starlette(routes=[Mount("/mcp", app=mcp_app_with_auth)], lifespan=_lifespan)
+    async with test_app.router.lifespan_context(test_app):
+        yield test_app
+
+
+# --- modern: server/discover -> tools/list -> tools/call (4 tools) -----------
+
+
+def test_modern_discover_returns_instructions_and_capabilities(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    response = mcp_client.post(
+        "/mcp/",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "server/discover",
+            "params": {"_meta": _modern_meta()},
+        },
+        headers=_modern_headers(mcp_headers, method="server/discover"),
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["supportedVersions"] == [MODERN_PROTOCOL_VERSION]
+    assert "read-only" in result["instructions"]
+    assert "tools" in result["capabilities"]
+
+
+def test_modern_tools_list_has_four_tools(mcp_client: TestClient, mcp_headers: dict) -> None:
+    response = mcp_client.post(
+        "/mcp/",
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {"_meta": _modern_meta()},
+        },
+        headers=_modern_headers(mcp_headers, method="tools/list"),
+    )
+    assert response.status_code == 200
+    names = {tool["name"] for tool in response.json()["result"]["tools"]}
+    assert names == {"get_health", "search_notes", "read_note", "create_inbox_note"}
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("get_health", {}),
+        ("search_notes", {"query": "RTX 5070"}),
+        ("read_note", {"path": "Knowledge/PC/GPU/RTX 5070.md"}),
+        ("create_inbox_note", {"title": "Modern flow note", "content": "x\n"}),
+    ],
+)
+def test_modern_tools_call_succeeds(
+    mcp_client: TestClient, mcp_headers: dict, name: str, arguments: dict
+) -> None:
+    response = _modern_call_tool(
+        mcp_client, mcp_headers, request_id=3, name=name, arguments=arguments
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["isError"] is False
+    assert "structuredContent" in result
+
+
+# --- legacy: initialize -> initialized -> tools/list -> tools/call (4 tools) --
+
+
+def test_legacy_initialize_succeeds(mcp_client: TestClient, mcp_headers: dict) -> None:
+    response = mcp_client.post(
+        "/mcp/",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": LEGACY_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0"},
+            },
+        },
+        headers=mcp_headers,
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["protocolVersion"] == LEGACY_PROTOCOL_VERSION
+    assert result["serverInfo"]["name"] == "Obsidian Vault Gateway"
+    assert "read-only" in result["instructions"]
+
+
+def test_legacy_initialized_notification_is_accepted(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    response = mcp_client.post(
+        "/mcp/",
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+        headers=mcp_headers,
+    )
+    assert response.status_code == 202
+
+
+def test_legacy_tools_list_has_four_tools(mcp_client: TestClient, mcp_headers: dict) -> None:
+    response = mcp_client.post(
+        "/mcp/",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        headers=mcp_headers,
+    )
+    assert response.status_code == 200
+    names = {tool["name"] for tool in response.json()["result"]["tools"]}
+    assert names == {"get_health", "search_notes", "read_note", "create_inbox_note"}
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("get_health", {}),
+        ("search_notes", {"query": "RTX 5070"}),
+        ("read_note", {"path": "Knowledge/PC/GPU/RTX 5070.md"}),
+        ("create_inbox_note", {"title": "Legacy flow note", "content": "x\n"}),
+    ],
+)
+def test_legacy_tools_call_succeeds(
+    mcp_client: TestClient, mcp_headers: dict, name: str, arguments: dict
+) -> None:
+    response = _legacy_call_tool(
+        mcp_client, mcp_headers, request_id=3, name=name, arguments=arguments
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["isError"] is False
+
+
+# --- high-level Client(mode="auto") over a real HTTP transport ---------------
+
+
+async def test_high_level_client_auto_mode_over_http(env: None, api_token: str) -> None:
+    """``mode="auto"`` (the default) probes ``server/discover`` and falls
+    back to the initialize handshake — this exercises that probe against a
+    real Streamable HTTP transport (JSON-RPC framing over HTTP), not the
+    in-process no-framing shortcut ``Client`` also supports for a bare
+    ``Server``/``MCPServer`` instance.
+    """
+    async with _standalone_mcp_app(get_settings()) as app:
+        http_client = httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            headers={"Authorization": f"Bearer {api_token}"},
+        )
+        transport = streamable_http_client("http://testserver/mcp/", http_client=http_client)
+        async with Client(transport, mode="auto") as client:
+            result = await client.call_tool("get_health", {})
+            assert result.structured_content["status"] == "ok"
+
+
+# --- both /mcp and /mcp/ must work --------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+def test_both_mcp_and_trailing_slash_variant_connect(
+    mcp_client: TestClient, mcp_headers: dict, path: str
+) -> None:
+    response = mcp_client.post(
+        path,
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        headers=mcp_headers,
+    )
+    assert response.status_code == 200
+    assert {t["name"] for t in response.json()["result"]["tools"]} == {
+        "get_health",
+        "search_notes",
+        "read_note",
+        "create_inbox_note",
+    }
+
+
+# --- malformed input / unknown tool / bad arguments / oversized / concurrent --
+
+
+def test_malformed_jsonrpc_missing_field_is_rejected(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    response = mcp_client.post(
+        "/mcp/",
+        json={"id": 1, "method": "tools/list", "params": {}},  # no "jsonrpc"
+        headers=mcp_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32602
+
+
+def test_non_json_body_is_rejected(mcp_client: TestClient, mcp_headers: dict) -> None:
+    response = mcp_client.post("/mcp/", content=b"not json{{{", headers=mcp_headers)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32700
+
+
+def test_unknown_method_returns_method_not_found(mcp_client: TestClient, mcp_headers: dict) -> None:
+    response = mcp_client.post(
+        "/mcp/",
+        json={"jsonrpc": "2.0", "id": 1, "method": "totally/bogus", "params": {}},
+        headers=mcp_headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32601
+
+
+def test_unknown_tool_is_a_clean_tool_error_not_a_protocol_error(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    response = _legacy_call_tool(
+        mcp_client, mcp_headers, request_id=1, name="not_a_real_tool", arguments={}
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert "not_a_real_tool" in result["content"][0]["text"]
+
+
+def test_missing_required_argument_is_a_tool_error(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    response = _legacy_call_tool(
+        mcp_client, mcp_headers, request_id=1, name="read_note", arguments={}
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is True
+
+
+def test_extra_unexpected_argument_is_ignored_not_rejected(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    # Confirmed against the installed SDK: the auto-generated argument model
+    # silently ignores unrecognised keys rather than rejecting them.
+    response = _legacy_call_tool(
+        mcp_client, mcp_headers, request_id=1, name="get_health", arguments={"bogus": "x"}
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+
+
+def test_argument_type_mismatch_is_a_tool_error(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    response = _legacy_call_tool(
+        mcp_client,
+        mcp_headers,
+        request_id=1,
+        name="search_notes",
+        arguments={"limit": "not-a-number"},
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is True
+
+
+def test_oversized_request_is_rejected(mcp_client: TestClient, mcp_headers: dict) -> None:
+    # Shared MAX_REQUEST_BYTES (U3) — mcp_client's own environment sets 2097152.
+    oversized_content = "x" * (3 * 1024 * 1024)
+    response = _legacy_call_tool(
+        mcp_client,
+        mcp_headers,
+        request_id=1,
+        name="create_inbox_note",
+        arguments={"title": "too big", "content": oversized_content},
+    )
+    assert response.status_code == 413
+
+
+def test_concurrent_tool_calls_do_not_interfere(mcp_client: TestClient, mcp_headers: dict) -> None:
+    # stateless_http=True means a fresh transport per request — this proves
+    # that holds under real overlap, not just sequential calls.
+    def call(i: int):
+        return _legacy_call_tool(
+            mcp_client, mcp_headers, request_id=i, name="get_health", arguments={}
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        responses = list(executor.map(call, range(5)))
+
+    assert all(r.status_code == 200 for r in responses)
+    assert all(r.json()["result"]["structuredContent"]["status"] == "ok" for r in responses)
+
+
+# --- GET / DELETE: no hang, no 5xx, SDK-documented status --------------------
+
+
+def test_delete_returns_405_not_a_hang_or_crash(mcp_client: TestClient, mcp_headers: dict) -> None:
+    # D5: stateless_http=True means there is no session to terminate, and
+    # that is not treated as a failure — DELETE succeeding is not required,
+    # only that it answers cleanly instead of hanging or 500ing.
+    response = mcp_client.delete("/mcp/", headers=mcp_headers)
+    assert response.status_code == 405
+    assert (
+        response.json()["error"]["message"]
+        == "Method Not Allowed: Session termination not supported"
+    )
+
+
+def test_get_without_sse_accept_returns_406_not_a_hang_or_crash(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    headers = {**mcp_headers, "Accept": "application/json"}
+    response = mcp_client.get("/mcp/", headers=headers)
+    assert response.status_code == 406
+    assert "text/event-stream" in response.json()["error"]["message"]
+
+
+async def test_get_with_sse_accept_opens_stream_promptly_not_a_hang(
+    env: None, api_token: str
+) -> None:
+    """A GET with a correct SSE Accept header is a deliberately long-lived
+    server-push channel by design (MCP_IMPLEMENTATION_PLAN section 15's
+    "ハングせず" requirement, D5) — the failure mode this actually guards
+    against is the server never answering at all. httpx's ASGI transport
+    awaits the whole app call before returning anything, which would make
+    *any* open stream look like a hang through it regardless of server
+    behaviour, so this drives the ASGI scope directly and asserts only that
+    ``http.response.start`` (status + headers) arrives within a few seconds.
+    """
+    async with _standalone_mcp_app(get_settings()) as app:
+
+        async def receive() -> dict:
+            return {"type": "http.disconnect"}
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/mcp/",
+            "raw_path": b"/mcp/",
+            "query_string": b"",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"authorization", f"Bearer {api_token}".encode()),
+                (b"accept", b"text/event-stream"),
+            ],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+            "scheme": "http",
+            "root_path": "",
+        }
+        got_start = anyio.Event()
+        start_message: dict = {}
+
+        async def send(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                start_message.update(message)
+                got_start.set()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(app, scope, receive, send)
+            with anyio.fail_after(5):
+                await got_start.wait()
+            tg.cancel_scope.cancel()
+
+    assert start_message["status"] == 200
+    headers = dict(start_message["headers"])
+    assert headers[b"content-type"] == b"text/event-stream"
