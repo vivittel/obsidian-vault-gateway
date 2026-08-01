@@ -17,6 +17,17 @@ from fastapi import Depends
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The REST mount point. Shared between app/main.py (router prefix) and
+# app/middleware.py (the pure-ASGI scope guard that keeps REST-only
+# logging/size-limiting from ever touching /mcp — MCP_IMPLEMENTATION_PLAN
+# section 15) so the two can't drift apart.
+API_PREFIX = "/api/v1"
+
+# The MCP mount point, for the same reason: app/main.py both mounts the
+# Streamable HTTP transport here and normalizes the bare path onto it, so
+# the two can't drift apart either.
+MCP_PREFIX = "/mcp"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
@@ -24,6 +35,18 @@ class Settings(BaseSettings):
     api_token: str = Field(
         min_length=16,
         description="Bearer token required by every endpoint except /api/v1/health.",
+    )
+
+    mcp_allowed_hosts: str = Field(
+        description=(
+            "Comma-separated Host header values the /mcp Streamable HTTP transport "
+            "accepts (DNS-rebinding allowlist; U2). Required, not defaulted: the MCP "
+            "SDK auto-enables DNS-rebinding protection restricted to localhost whenever "
+            "no explicit allowlist is given, which silently rejects every request that "
+            "arrives through Caddy with a real Host header — an empty or missing value "
+            "here means /mcp is unreachable from anywhere but localhost, not that "
+            "protection is off."
+        ),
     )
 
     vault_read_root: Path = Field(
@@ -52,6 +75,14 @@ class Settings(BaseSettings):
     @field_validator("api_token")
     @classmethod
     def _strip_token(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("mcp_allowed_hosts")
+    @classmethod
+    def _require_non_empty_mcp_allowed_hosts(cls, value: str) -> str:
+        if not value.strip():
+            msg = "MCP_ALLOWED_HOSTS must not be empty"
+            raise ValueError(msg)
         return value.strip()
 
     @field_validator("vault_inbox_relative_path")
@@ -84,6 +115,10 @@ class Settings(BaseSettings):
     @cached_property
     def timezone(self) -> ZoneInfo:
         return ZoneInfo(self.tz)
+
+    @cached_property
+    def mcp_allowed_hosts_list(self) -> list[str]:
+        return [host.strip() for host in self.mcp_allowed_hosts.split(",") if host.strip()]
 
 
 @lru_cache(maxsize=1)

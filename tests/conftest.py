@@ -11,6 +11,7 @@ not be committed to git (symlinks, huge files) is generated at test time by
 from __future__ import annotations
 
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,7 @@ def env(vault_root: Path, inbox_root: Path, monkeypatch: pytest.MonkeyPatch) -> 
     from app.config import get_settings
 
     monkeypatch.setenv("API_TOKEN", TEST_API_TOKEN)
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "testserver,127.0.0.1:*,localhost:*")
     monkeypatch.setenv("VAULT_READ_ROOT", str(vault_root))
     monkeypatch.setenv("VAULT_INBOX_ROOT", str(inbox_root))
     monkeypatch.setenv("VAULT_INBOX_RELATIVE_PATH", INBOX_RELATIVE_PATH)
@@ -82,6 +84,72 @@ def client(env: None) -> TestClient:
     from app.main import app
 
     return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.fixture(scope="session")
+def mcp_client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[TestClient]:
+    """A ``TestClient`` for the real, shared ``/mcp`` endpoint, with its
+    lifespan entered exactly once for the whole test session.
+
+    ``client`` above deliberately never enters the app's lifespan (existing
+    REST tests never needed the MCP session manager running); any request to
+    ``/mcp`` does, since ``mcp.session_manager.run()`` only starts inside
+    that lifespan. But ``app.mcp_server.mcp`` is a module-level singleton
+    built once at import time — matching production and MCP_IMPLEMENTATION
+    _PLAN section 9's ordering requirement — and its session manager's
+    ``run()`` can only be entered once per process (verified against the
+    installed SDK: a second call raises ``RuntimeError``). So unlike
+    ``env``/``client``, which every test gets its own fresh copy of via
+    ``tmp_path``, every test needing the real mounted ``/mcp`` endpoint has
+    to share this one session-scoped entry rather than one per test.
+
+    Sets up its own environment directly (not the function-scoped ``env``
+    fixture, which a session-scoped fixture can't depend on) against a vault
+    built once for the session. test_mcp_lifespan.py tests the one-shot
+    lifecycle mechanics themselves against an independent, throwaway
+    ``MCPServer`` — precisely because this fixture's constraint means the
+    shared singleton can't be reused to demonstrate them.
+    """
+    vault_root = tmp_path_factory.mktemp("mcp-session-vault") / "vault"
+    shutil.copytree(FIXTURE_VAULT, vault_root)
+    inbox_root = vault_root / INBOX_RELATIVE_PATH
+    inbox_root.mkdir(parents=True, exist_ok=True)
+
+    mp = pytest.MonkeyPatch()
+    mp.setenv("API_TOKEN", TEST_API_TOKEN)
+    mp.setenv("MCP_ALLOWED_HOSTS", "testserver,127.0.0.1:*,localhost:*")
+    mp.setenv("VAULT_READ_ROOT", str(vault_root))
+    mp.setenv("VAULT_INBOX_ROOT", str(inbox_root))
+    mp.setenv("VAULT_INBOX_RELATIVE_PATH", INBOX_RELATIVE_PATH)
+    mp.setenv("MAX_SEARCH_RESULTS", "50")
+    mp.setenv("MAX_NOTE_SIZE_BYTES", "1048576")
+    mp.setenv("MAX_REQUEST_BYTES", "2097152")
+    mp.setenv("TZ", "Asia/Tokyo")
+
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    from app.main import app
+
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+
+    mp.undo()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def mcp_headers(api_token: str) -> dict[str, str]:
+    """Headers a legacy-era MCP request needs. Modern (2026-07-28) requests
+    additionally need ``Mcp-Method``/``Mcp-Name`` headers and a
+    ``params._meta`` envelope — see tests/test_mcp_protocol.py's
+    ``_modern_meta``/``_modern_headers`` helpers.
+    """
+    return {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
 
 
 @pytest.fixture

@@ -177,7 +177,7 @@ ChatGPT WebはローカルCodexホストの`~/.codex/config.toml`を読み取ら
 
 ### ランタイム
 
-- Python 3.13
+- Python: `pyproject.toml`の`requires-python`は`>=3.12`。CI (`.github/workflows/publish.yml`)は3.12と3.13の両方でテストする。DockerイメージのベースはPython 3.13固定（`python:3.13-slim-bookworm`）（U9: 当初案の「Python 3.13」単独指定から訂正）
 - FastAPI
 - Uvicorn
 - Pydantic
@@ -198,7 +198,7 @@ ChatGPT WebはローカルCodexホストの`~/.codex/config.toml`を読み取ら
   - Codex CLI
   - Codex IDE extension
 
-MCP Python SDKは安定版を厳密に固定する。v2系が安定化・互換性確認されるまでは、安定したv1系を使用する。
+MCP Python SDKは`mcp==2.0.0`に厳密固定する。実装開始時点でPyPI上の安定版はv2系（v1系はメンテナンスのみの旧系列）であったため、本節が当初想定していたv1系固定ではなくv2系を採用した。詳細は`docs/adr/0002-use-mcp-python-sdk-v2.md`を参照する。
 
 ### REST
 
@@ -513,10 +513,16 @@ INTERNAL_ERROR
 - operation/tool名
 - ステータス
 - 処理時間
-- 読み取ったノートの相対パス
-- 作成したノートの相対パス
+- 読み取ったノートの相対パス（REST）
+- 作成したノートの相対パス（REST）
 - 検索語の長さ
 - 結果件数
+
+**MCPでの逸脱（U1）**: MCPアクセスログは`transport=mcp` / `tool` / `status` /
+`duration_ms` / `result_count`のみを記録し、読み取り・作成したノートの相対パス
+（`note_path`）は記録しない。REST側は上記のとおり相対パスを記録するため、
+transport間でログ項目が完全には一致しない。両者を統一するのではなく、MCP側を
+より保守的（記録項目を少なく）にする方向で意図的に逸脱している。
 
 記録しない項目:
 
@@ -547,12 +553,16 @@ INTERNAL_ERROR
 
 ### ネットワーク
 
-現在は既存Dockerネットワーク`br0`を使用する。
+`compose.yaml`はローカルalias名を`proxy`に固定し、実際の外部Dockerネットワーク名を
+`PROXY_NETWORK`環境変数（既定値`caddy`）で指定する（A5: 本節の当初案「`br0`」と
+実際の`compose.yaml`の記述「`caddy`」が一致していなかったため、どちらか一方に
+決め打ちせず設定可能にした）。
 
 ```yaml
 networks:
-  br0:
+  proxy:
     external: true
+    name: ${PROXY_NETWORK:-caddy}
 ```
 
 ### 公開範囲

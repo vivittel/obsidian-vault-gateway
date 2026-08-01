@@ -33,5 +33,5 @@ Obsidian Vault.
 # Initial commands
 
 - Test: `pytest`
-- Lint: define after the project tooling is initialized
+- Lint: `ruff check .`
 - Compose validation: `docker compose config`

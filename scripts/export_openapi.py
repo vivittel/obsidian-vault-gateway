@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Export app.main.app's OpenAPI schema to openapi.json.
+"""Export app.main.rest_app's OpenAPI schema to openapi.json.
 
 Run after any change to routers/models/exceptions that affects the schema:
 
     .venv/bin/python scripts/export_openapi.py          # write openapi.json
     .venv/bin/python scripts/export_openapi.py --check   # CI: fail on drift
+
+Reads ``rest_app`` — the FastAPI application itself — rather than
+``app.main.app``: since Phase 1.5, ``app`` is a plain Starlette instance that
+mounts ``rest_app`` alongside the MCP transport, and only a FastAPI instance
+has ``.openapi()``.
 """
 
 from __future__ import annotations
@@ -23,11 +28,12 @@ def _build_schema() -> dict:
     # Settings just need to construct successfully; export never touches the
     # filesystem paths it names.
     os.environ.setdefault("API_TOKEN", "openapi-export-placeholder-token")
+    os.environ.setdefault("MCP_ALLOWED_HOSTS", "localhost")
 
     sys.path.insert(0, str(REPO_ROOT))
-    from app.main import app
+    from app.main import rest_app
 
-    return app.openapi()
+    return rest_app.openapi()
 
 
 def main() -> int:

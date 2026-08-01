@@ -8,6 +8,10 @@ services:
     environment:
       TZ: ${TZ:-Asia/Tokyo}
       API_TOKEN: ${API_TOKEN}
+      # Streamable HTTP DNS-rebinding allowlist (U2) — must include whatever
+      # Host header Caddy forwards, e.g. obsidian-api.example.com. See
+      # .env.example.
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS}
       VAULT_READ_ROOT: ${VAULT_READ_ROOT:-/vault-ro}
       VAULT_INBOX_ROOT: ${VAULT_INBOX_ROOT:-/vault-write/inbox}
       VAULT_INBOX_RELATIVE_PATH: ${VAULT_INBOX_RELATIVE_PATH:-00_Inbox/ChatGPT}
@@ -26,7 +30,7 @@ services:
       - ${INBOX_HOST_PATH}:/vault-write/inbox:rw
 
     networks:
-      - caddy
+      - proxy
 
     security_opt:
       - no-new-privileges:true
@@ -40,5 +44,11 @@ services:
       - /tmp:size=64m
 
 networks:
-  caddy:
+  # Local alias kept stable regardless of what the real external network is
+  # actually called on the host — IMPLEMENTATION_PLAN.md section 15 and this
+  # file's own history disagreed (br0 vs caddy); PROXY_NETWORK settles that by
+  # making the real name a deployment choice instead of a hardcoded guess.
+  # Defaults to "caddy", this file's actual name before this change.
+  proxy:
     external: true
+    name: ${PROXY_NETWORK:-caddy}
