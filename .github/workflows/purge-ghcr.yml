@@ -1,0 +1,66 @@
+name: Purge GHCR package
+
+on:
+  push:
+    branches:
+      - feat/mcp-transport
+    paths:
+      - ".github/workflows/purge-ghcr.yml"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  purge:
+    name: Delete all GHCR versions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Delete every package version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE: ${{ github.event.repository.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t version_ids < <(
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/users/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100" \
+              --jq '.[].id'
+          )
+
+          deleted=0
+          for version_id in "${version_ids[@]}"; do
+            gh api --method DELETE \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/users/${OWNER}/packages/container/${PACKAGE}/versions/${version_id}"
+            ((deleted += 1))
+          done
+
+          completed_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          printf '{"package":"ghcr.io/%s/%s","deleted_versions":%d,"completed_at":"%s"}\n' \
+            "${OWNER}" "${PACKAGE}" "${deleted}" "${completed_at}" \
+            > .github/ghcr-purge-result.json
+
+          echo "Deleted ${deleted} GHCR package version(s)."
+
+      - name: Record purge result
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/ghcr-purge-result.json
+          git commit -m "chore: record GHCR purge result"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
