@@ -13,7 +13,7 @@ import pytest
 
 from app.application import GatewayApplication
 from app.config import Settings, get_settings
-from app.exceptions import ValidationError
+from app.exceptions import InvalidCursorError, ValidationError
 from app.models import CreatedNoteResponse, HealthResponse, NoteResponse, SearchResponse
 
 TEST_API_TOKEN = "test-token-0123456789abcdef"  # noqa: S105 - test fixture, not a real secret
@@ -67,6 +67,29 @@ def test_search_notes_clamps_valid_limit_to_max_search_results(
     # a transport-level Query(le=200) constraint, has to catch this.
     response = application.search_notes(limit=100)
     assert len(response.results) <= 50
+
+
+def test_search_notes_next_cursor_resumes_at_the_right_offset(
+    application: GatewayApplication,
+) -> None:
+    first = application.search_notes(limit=1)
+    assert first.next_cursor is not None
+    second = application.search_notes(limit=1, cursor=first.next_cursor)
+    assert second.results != first.results
+
+
+def test_search_notes_rejects_a_garbage_cursor(application: GatewayApplication) -> None:
+    with pytest.raises(InvalidCursorError):
+        application.search_notes(cursor="not-a-real-cursor")
+
+
+def test_search_notes_rejects_a_cursor_from_different_conditions(
+    application: GatewayApplication,
+) -> None:
+    page = application.search_notes(folder="Knowledge/PC", limit=1)
+    assert page.next_cursor is not None
+    with pytest.raises(InvalidCursorError):
+        application.search_notes(limit=1, cursor=page.next_cursor)
 
 
 def test_read_note_returns_note_response(application: GatewayApplication) -> None:

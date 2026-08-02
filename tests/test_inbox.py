@@ -1,12 +1,15 @@
-"""Inbox creation tests. All writes go into the tmp_path vault from conftest —
-never a real vault (AGENTS.md).
+"""Inbox creation and append tests. All writes go into the tmp_path vault
+from conftest — never a real vault (AGENTS.md).
 """
 
 from __future__ import annotations
 
 import os
+import stat
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -195,3 +198,393 @@ def test_create_note_over_size_limit_returns_413(
         assert response.json()["error"]["code"] == "FILE_TOO_LARGE"
     finally:
         get_settings.cache_clear()
+
+
+# --- POST /api/v1/inbox/notes/append ---------------------------------------
+
+REJECTED_APPEND_PATHS = [
+    "../secret.md",
+    "../../.obsidian/config",
+    "%2e%2e%2fsecret.md",
+    "%252e%252e%252fsecret.md",
+    "..\\secret.md",
+    "/vault/secret.md",
+    "C:\\secret.md",
+    "00_Inbox/ChatGPT/.hidden.md",
+    "not_markdown.txt",
+]
+
+
+def test_append_appends_without_overwriting_lf(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "Note.md").write_text("first\n", encoding="utf-8")
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Note.md", "content": "second\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["path"] == "00_Inbox/ChatGPT/Note.md"
+    assert body["id"] == body["path"]
+    assert (inbox_root / "Note.md").read_text(encoding="utf-8") == "first\nsecond\n"
+    assert body["appended_bytes"] == len(b"second\n")
+
+
+def test_append_preserves_crlf_line_endings(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "Crlf.md").write_bytes(b"first\r\n")
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Crlf.md", "content": "second\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    assert (inbox_root / "Crlf.md").read_bytes() == b"first\r\nsecond\r\n"
+
+
+def test_append_inserts_separating_newline_when_missing(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "NoTrailingNewline.md").write_bytes(b"first")
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/NoTrailingNewline.md", "content": "second\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    assert (inbox_root / "NoTrailingNewline.md").read_bytes() == b"first\nsecond\n"
+
+
+def test_append_to_empty_note_needs_no_separator(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "Empty.md").write_bytes(b"")
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Empty.md", "content": "first\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    assert (inbox_root / "Empty.md").read_bytes() == b"first\n"
+    assert response.json()["appended_bytes"] == len(b"first\n")
+
+
+def test_appended_bytes_equals_the_actual_file_size_increase(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    note = inbox_root / "SizeDelta.md"
+    note.write_text("first", encoding="utf-8")  # no trailing newline
+    before_size = note.stat().st_size
+
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/SizeDelta.md", "content": "second"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    after_size = note.stat().st_size
+    assert response.json()["appended_bytes"] == after_size - before_size
+
+
+def test_append_preserves_file_mode(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    note = inbox_root / "ModeCheck.md"
+    note.write_text("first\n", encoding="utf-8")
+    note.chmod(0o640)
+
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/ModeCheck.md", "content": "second\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    assert stat.S_IMODE(note.stat().st_mode) == 0o640
+
+
+def test_append_leaves_no_temp_files_behind(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "Clean.md").write_text("x\n", encoding="utf-8")
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Clean.md", "content": "y\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    leftovers = [p for p in inbox_root.iterdir() if p.name.startswith(".tmp-")]
+    assert leftovers == []
+
+
+def test_append_only_writes_inside_inbox_root(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "Contained.md").write_text("x\n", encoding="utf-8")
+    before = set(os.listdir(inbox_root.parent))
+    client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Contained.md", "content": "y\n"},
+        headers=auth_headers,
+    )
+    after = set(os.listdir(inbox_root.parent))
+    assert before == after
+
+
+def test_append_rejects_empty_content(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "Target.md").write_text("x\n", encoding="utf-8")
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Target.md", "content": ""},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+
+
+def test_append_rejects_whitespace_only_content(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "Target.md").write_text("x\n", encoding="utf-8")
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Target.md", "content": "   \n  "},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_append_rejects_missing_note(client: TestClient, auth_headers: dict[str, str]) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/does-not-exist.md", "content": "x\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOTE_NOT_FOUND"
+
+
+@pytest.mark.parametrize("raw", REJECTED_APPEND_PATHS)
+def test_append_rejects_malicious_or_invalid_paths(
+    client: TestClient, auth_headers: dict[str, str], raw: str
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": raw, "content": "x\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code in {400, 403, 404}
+    assert "error" in response.json()
+
+
+def test_append_rejects_path_outside_inbox(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "Knowledge/no_frontmatter.md", "content": "x\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "PATH_OUTSIDE_VAULT"
+
+
+def test_append_rejects_subdirectory_of_inbox(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    subdir = inbox_root / "Sub"
+    subdir.mkdir()
+    (subdir / "Nested.md").write_text("x\n", encoding="utf-8")
+
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Sub/Nested.md", "content": "y\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_PATH"
+
+
+def test_append_rejects_symlinked_note(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path, vault_root: Path
+) -> None:
+    outside_target = vault_root.parent / "outside-secret.md"
+    outside_target.write_text("secret\n", encoding="utf-8")
+    (inbox_root / "Link.md").symlink_to(outside_target)
+
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Link.md", "content": "x\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_PATH"
+    assert outside_target.read_text(encoding="utf-8") == "secret\n"
+
+
+def test_append_rejects_already_oversized_note(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path, monkeypatch
+) -> None:
+    from app.config import get_settings
+
+    (inbox_root / "AlreadyBig.md").write_text("x" * 2000, encoding="utf-8")
+    monkeypatch.setenv("MAX_NOTE_SIZE_BYTES", "1024")
+    get_settings.cache_clear()
+    try:
+        response = client.post(
+            "/api/v1/inbox/notes/append",
+            json={"path": "00_Inbox/ChatGPT/AlreadyBig.md", "content": "y\n"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 413
+        assert response.json()["error"]["code"] == "FILE_TOO_LARGE"
+        assert (inbox_root / "AlreadyBig.md").read_text(encoding="utf-8") == "x" * 2000
+    finally:
+        get_settings.cache_clear()
+
+
+def test_append_rejects_when_result_would_exceed_size_limit(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path, monkeypatch
+) -> None:
+    from app.config import get_settings
+
+    (inbox_root / "NearLimit.md").write_text("x" * 900, encoding="utf-8")
+    monkeypatch.setenv("MAX_NOTE_SIZE_BYTES", "1024")
+    get_settings.cache_clear()
+    try:
+        response = client.post(
+            "/api/v1/inbox/notes/append",
+            json={"path": "00_Inbox/ChatGPT/NearLimit.md", "content": "y" * 900},
+            headers=auth_headers,
+        )
+        assert response.status_code == 413
+        assert response.json()["error"]["code"] == "FILE_TOO_LARGE"
+        assert (inbox_root / "NearLimit.md").read_text(encoding="utf-8") == "x" * 900
+    finally:
+        get_settings.cache_clear()
+
+
+def test_append_lock_file_being_a_symlink_is_rejected_and_target_unchanged(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path, vault_root: Path
+) -> None:
+    outside_target = vault_root.parent / "lock-escape-secret.md"
+    outside_target.write_text("do not touch\n", encoding="utf-8")
+    (inbox_root / ".append.lock").symlink_to(outside_target)
+    (inbox_root / "Note.md").write_text("original\n", encoding="utf-8")
+
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Note.md", "content": "x\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_PATH"
+    assert outside_target.read_text(encoding="utf-8") == "do not touch\n"
+    assert (inbox_root / "Note.md").read_text(encoding="utf-8") == "original\n"
+    assert str(vault_root) not in response.text
+
+
+def test_append_lock_file_not_a_regular_file_is_rejected(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    os.mkfifo(inbox_root / ".append.lock")
+    (inbox_root / "Note.md").write_text("original\n", encoding="utf-8")
+
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/Note.md", "content": "x\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_FILE_TYPE"
+    assert (inbox_root / "Note.md").read_text(encoding="utf-8") == "original\n"
+
+
+def test_append_detects_concurrent_modification_and_leaves_target_unchanged(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path, monkeypatch
+) -> None:
+    """A modification landing on the target between this request's read and
+
+    its pre-replace identity check (e.g. LiveSync writing the same file
+    concurrently) must be detected — the append must not silently discard
+    that other write.
+    """
+    from app.services import inbox_service
+
+    note = inbox_root / "RaceTarget.md"
+    note.write_text("original\n", encoding="utf-8")
+
+    original_write_temp_bytes = inbox_service._write_temp_bytes
+
+    def write_then_mutate(*args, **kwargs):
+        note.write_text("original\nsomeone else wrote this\n", encoding="utf-8")
+        return original_write_temp_bytes(*args, **kwargs)
+
+    monkeypatch.setattr(inbox_service, "_write_temp_bytes", write_then_mutate)
+
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/RaceTarget.md", "content": "appended\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "NOTE_MODIFIED"
+    assert note.read_text(encoding="utf-8") == "original\nsomeone else wrote this\n"
+
+
+def test_concurrent_appends_do_not_lose_content(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "Concurrent.md").write_text("start\n", encoding="utf-8")
+    markers = [f"line-{i}\n" for i in range(8)]
+
+    def append_one(marker: str) -> int:
+        response = client.post(
+            "/api/v1/inbox/notes/append",
+            json={"path": "00_Inbox/ChatGPT/Concurrent.md", "content": marker},
+            headers=auth_headers,
+        )
+        return response.status_code
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        statuses = list(pool.map(append_one, markers))
+
+    assert all(status == 200 for status in statuses)
+    final = (inbox_root / "Concurrent.md").read_text(encoding="utf-8")
+    assert final.startswith("start\n")
+    for marker in markers:
+        assert final.count(marker) == 1
+
+
+def test_append_response_never_contains_an_absolute_path(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path, vault_root: Path
+) -> None:
+    (inbox_root / "PathCheck.md").write_text("x\n", encoding="utf-8")
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/PathCheck.md", "content": "y\n"},
+        headers=auth_headers,
+    )
+    assert str(vault_root) not in response.text
+
+
+def test_append_note_content_is_readable_via_get_notes(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "RoundTrip.md").write_text("# Round trip\n\n", encoding="utf-8")
+    client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/RoundTrip.md", "content": "more content\n"},
+        headers=auth_headers,
+    )
+    read_response = client.get(
+        "/api/v1/notes",
+        params={"path": "00_Inbox/ChatGPT/RoundTrip.md"},
+        headers=auth_headers,
+    )
+    assert read_response.status_code == 200
+    assert "more content" in read_response.json()["content"]

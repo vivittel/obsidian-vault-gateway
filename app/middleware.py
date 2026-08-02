@@ -94,9 +94,9 @@ class AccessLogMiddleware:
     """One log line per REST request: method, route, status, duration.
 
     Note or Inbox paths are logged by the routers themselves via
-    ``request.state.accessed_note`` / ``request.state.created_note`` (set on
-    the shared ``scope["state"]`` dict) so this middleware stays generic and
-    never inspects the body.
+    ``request.state.accessed_note`` / ``request.state.created_note`` /
+    ``request.state.appended_note`` (set on the shared ``scope["state"]``
+    dict) so this middleware stays generic and never inspects the body.
     """
 
     def __init__(self, app) -> None:
@@ -110,6 +110,7 @@ class AccessLogMiddleware:
         request = Request(scope)
         request.state.accessed_note = None
         request.state.created_note = None
+        request.state.appended_note = None
 
         start = time.monotonic()
         status_code = 0
@@ -136,6 +137,8 @@ class AccessLogMiddleware:
             extra["note_path"] = request.state.accessed_note
         if request.state.created_note:
             extra["note_path"] = request.state.created_note
+        if request.state.appended_note:
+            extra["note_path"] = request.state.appended_note
         if request.method == "GET" and "q" in request.query_params:
             extra["query_length"] = len(request.query_params["q"])
 

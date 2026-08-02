@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.exceptions import GatewayError, InvalidFileTypeError, InvalidPathError, NoteNotFoundError
-from app.services.path_security import resolve_read_path
+from app.services.path_security import normalise_relative_dir, resolve_read_path
 
 REJECTED_PATHS = [
     "../secret.md",
@@ -72,3 +72,18 @@ def test_percent_sequences_are_validated_but_not_decoded_for_lookup(vault_root: 
     """
     with pytest.raises(NoteNotFoundError):
         resolve_read_path("Knowledge/PC/GPU/RTX%205070.md", vault_root)
+
+
+@pytest.mark.parametrize("raw", ["/Knowledge", "//Knowledge", "/"])
+def test_normalise_relative_dir_rejects_absolute_paths(raw: str) -> None:
+    """A leading slash must be rejected before it is stripped away — stripping
+
+    first (an earlier version of this function did) would silently accept
+    ``/Knowledge`` as the relative path ``Knowledge``.
+    """
+    with pytest.raises(InvalidPathError):
+        normalise_relative_dir(raw)
+
+
+def test_normalise_relative_dir_strips_only_a_trailing_slash() -> None:
+    assert normalise_relative_dir("Knowledge/PC/") == normalise_relative_dir("Knowledge/PC")
