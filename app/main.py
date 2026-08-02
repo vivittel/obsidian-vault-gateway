@@ -41,7 +41,7 @@ from app.config import API_PREFIX, MCP_PREFIX, get_settings
 from app.exceptions import ErrorCode, GatewayError, error_envelope
 from app.mcp_server import build_mcp_transport, mcp
 from app.middleware import AccessLogMiddleware, RequestSizeLimitMiddleware
-from app.routers import health, inbox, notes, search
+from app.routers import health, inbox, notes, search, vault
 
 if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
@@ -106,6 +106,7 @@ rest_app.include_router(health.router, prefix=API_PREFIX)
 rest_app.include_router(search.router, prefix=API_PREFIX)
 rest_app.include_router(notes.router, prefix=API_PREFIX)
 rest_app.include_router(inbox.router, prefix=API_PREFIX)
+rest_app.include_router(vault.router, prefix=API_PREFIX)
 
 
 # --- MCP: built once at import time --------------------------------------

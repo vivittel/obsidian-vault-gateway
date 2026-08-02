@@ -1,4 +1,4 @@
-"""app.mcp_server — MCP_IMPLEMENTATION_PLAN sections 9-14 (unmounted server, 4 tools).
+"""app.mcp_server — MCP_IMPLEMENTATION_PLAN sections 9-14 (unmounted server, 7 tools).
 
 Exercises tools through ``mcp.call_tool(...)`` — the same tool-dispatch
 machinery a real ``tools/call`` request drives — without any transport;
@@ -35,19 +35,28 @@ def application(env: None) -> GatewayApplication:
 # --- tools/list: presence, annotations, schemas ------------------------------
 
 
-async def test_tools_list_has_exactly_four_tools() -> None:
+async def test_tools_list_has_exactly_seven_tools() -> None:
     tools = await mcp.list_tools()
     assert {t.name for t in tools} == {
         "get_health",
         "search_notes",
         "read_note",
+        "get_vault_tree",
+        "get_vault_summary",
         "create_inbox_note",
+        "append_inbox_note",
     }
 
 
 async def test_read_only_tools_have_read_only_annotations() -> None:
     tools = {t.name: t for t in await mcp.list_tools()}
-    for name in ("get_health", "search_notes", "read_note"):
+    for name in (
+        "get_health",
+        "search_notes",
+        "read_note",
+        "get_vault_tree",
+        "get_vault_summary",
+    ):
         annotations = tools[name].annotations
         assert annotations.read_only_hint is True
         assert annotations.destructive_hint is False
@@ -68,6 +77,21 @@ async def test_create_inbox_note_input_schema_has_no_path_field() -> None:
     tools = {t.name: t for t in await mcp.list_tools()}
     schema = tools["create_inbox_note"].input_schema
     assert set(schema["properties"]) == {"title", "content", "frontmatter"}
+
+
+async def test_append_inbox_note_has_write_annotations() -> None:
+    tools = {t.name: t for t in await mcp.list_tools()}
+    annotations = tools["append_inbox_note"].annotations
+    assert annotations.read_only_hint is False
+    assert annotations.destructive_hint is False
+    assert annotations.idempotent_hint is False
+    assert annotations.open_world_hint is False
+
+
+async def test_append_inbox_note_input_schema_has_path_and_content() -> None:
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["append_inbox_note"].input_schema
+    assert set(schema["properties"]) == {"path", "content"}
 
 
 async def test_search_notes_limit_schema_matches_u7_range() -> None:
@@ -134,6 +158,73 @@ async def test_search_result_path_can_be_passed_directly_to_read_note(env: None)
     assert read_result.is_error is False
 
 
+async def test_search_notes_cursor_matches_application_layer(
+    application: GatewayApplication,
+) -> None:
+    first = await mcp.call_tool("search_notes", {"limit": 1})
+    cursor = first.structured_content["next_cursor"]
+    assert cursor is not None
+
+    result = await mcp.call_tool("search_notes", {"limit": 1, "cursor": cursor})
+    expected = application.search_notes(limit=1, cursor=cursor).model_dump(mode="json")
+    assert result.structured_content == expected
+
+
+async def test_search_notes_invalid_cursor_maps_to_invalid_cursor_code(env: None) -> None:
+    with pytest.raises(MCPError) as excinfo:
+        await mcp.call_tool("search_notes", {"cursor": "not-a-real-cursor"})
+    assert excinfo.value.data == {"code": "INVALID_CURSOR"}
+
+
+async def test_get_vault_tree_matches_application_layer(application: GatewayApplication) -> None:
+    result = await mcp.call_tool("get_vault_tree", {})
+    expected = application.get_vault_tree().model_dump(mode="json")
+    assert result.structured_content == expected
+
+
+async def test_get_vault_tree_cursor_matches_application_layer(
+    application: GatewayApplication,
+) -> None:
+    first = await mcp.call_tool("get_vault_tree", {"limit": 1})
+    cursor = first.structured_content["next_cursor"]
+    assert cursor is not None
+
+    result = await mcp.call_tool("get_vault_tree", {"limit": 1, "cursor": cursor})
+    expected = application.get_vault_tree(limit=1, cursor=cursor).model_dump(mode="json")
+    assert result.structured_content == expected
+
+
+async def test_get_vault_tree_folders_before_notes(env: None) -> None:
+    result = await mcp.call_tool("get_vault_tree", {"folder": "Knowledge"})
+    entries = result.structured_content["entries"]
+    kinds = [e["type"] for e in entries]
+    first_note_index = next((i for i, k in enumerate(kinds) if k == "note"), len(kinds))
+    assert all(k == "folder" for k in kinds[:first_note_index])
+    assert all(k == "note" for k in kinds[first_note_index:])
+
+
+async def test_get_vault_summary_matches_application_layer(
+    application: GatewayApplication,
+) -> None:
+    result = await mcp.call_tool("get_vault_summary", {})
+    expected = application.get_vault_summary().model_dump(mode="json")
+    assert result.structured_content == expected
+
+
+async def test_get_vault_summary_never_exposes_note_content(env: None) -> None:
+    result = await mcp.call_tool("get_vault_summary", {})
+    body = result.structured_content
+    assert set(body) == {
+        "note_count",
+        "total_bytes",
+        "folder_count",
+        "top_level_folders",
+        "tags",
+        "last_modified_at",
+        "skipped_count",
+    }
+
+
 # --- error conversion: never leak internals -----------------------------------
 
 REJECTED_READ_PATHS = [
@@ -164,6 +255,27 @@ async def test_read_note_rejects_malicious_paths_without_leaking_internals(
     assert api_token not in message
     assert "Errno" not in message
     assert "repr" not in message.lower()
+
+
+@pytest.mark.parametrize("raw_path", REJECTED_READ_PATHS)
+async def test_get_vault_tree_rejects_malicious_folders_without_leaking_internals(
+    raw_path: str, env: None, api_token: str, vault_root: Path
+) -> None:
+    with pytest.raises(MCPError) as excinfo:
+        await mcp.call_tool("get_vault_tree", {"folder": raw_path})
+
+    message = excinfo.value.message
+    assert "Traceback" not in message
+    assert str(vault_root) not in message
+    assert "/vault-ro" not in message
+    assert api_token not in message
+    assert "Errno" not in message
+    assert "repr" not in message.lower()
+
+
+async def test_get_vault_tree_rejects_symlinked_directory(env: None) -> None:
+    with pytest.raises(MCPError):
+        await mcp.call_tool("get_vault_tree", {"folder": "Knowledge/SymlinkedDir"})
 
 
 async def test_read_note_rejects_symlinked_note(env: None) -> None:
@@ -265,6 +377,112 @@ async def test_create_inbox_note_rejects_nested_frontmatter_structures(env: None
             "create_inbox_note",
             {"title": "x", "content": "y\n", "frontmatter": {"nested": {"a": 1}}},
         )
+
+
+async def test_append_inbox_note_matches_application_layer(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    (inbox_root / "MCP Append Target.md").write_text("original\n", encoding="utf-8")
+    result = await mcp.call_tool(
+        "append_inbox_note",
+        {"path": "00_Inbox/ChatGPT/MCP Append Target.md", "content": "more\n"},
+    )
+    assert result.structured_content == {
+        "id": "00_Inbox/ChatGPT/MCP Append Target.md",
+        "path": "00_Inbox/ChatGPT/MCP Append Target.md",
+        "modified_at": result.structured_content["modified_at"],
+        "appended_bytes": len(b"more\n"),
+    }
+
+
+async def test_append_inbox_note_appends_without_overwriting(
+    env: None, inbox_root: Path
+) -> None:
+    (inbox_root / "Keep.md").write_text("first\n", encoding="utf-8")
+    await mcp.call_tool(
+        "append_inbox_note", {"path": "00_Inbox/ChatGPT/Keep.md", "content": "second\n"}
+    )
+    assert (inbox_root / "Keep.md").read_text(encoding="utf-8") == "first\nsecond\n"
+
+
+async def test_append_inbox_note_leaves_no_temp_files_behind(
+    env: None, inbox_root: Path
+) -> None:
+    (inbox_root / "NoLeftovers.md").write_text("x\n", encoding="utf-8")
+    await mcp.call_tool(
+        "append_inbox_note", {"path": "00_Inbox/ChatGPT/NoLeftovers.md", "content": "y\n"}
+    )
+    leftovers = [p for p in inbox_root.iterdir() if p.name.startswith(".tmp-")]
+    assert leftovers == []
+
+
+async def test_append_inbox_note_writes_only_inside_inbox_root(
+    env: None, inbox_root: Path
+) -> None:
+    import os
+
+    (inbox_root / "Contained.md").write_text("x\n", encoding="utf-8")
+    before = set(os.listdir(inbox_root.parent))
+    await mcp.call_tool(
+        "append_inbox_note", {"path": "00_Inbox/ChatGPT/Contained.md", "content": "y\n"}
+    )
+    after = set(os.listdir(inbox_root.parent))
+    assert before == after
+
+
+async def test_append_inbox_note_rejects_missing_note(env: None) -> None:
+    with pytest.raises(MCPError) as excinfo:
+        await mcp.call_tool(
+            "append_inbox_note",
+            {"path": "00_Inbox/ChatGPT/does-not-exist.md", "content": "x\n"},
+        )
+    assert excinfo.value.data == {"code": "NOTE_NOT_FOUND"}
+
+
+async def test_append_inbox_note_rejects_outside_inbox(env: None) -> None:
+    with pytest.raises(MCPError) as excinfo:
+        await mcp.call_tool(
+            "append_inbox_note",
+            {"path": "Knowledge/no_frontmatter.md", "content": "x\n"},
+        )
+    assert excinfo.value.data == {"code": "PATH_OUTSIDE_VAULT"}
+
+
+async def test_append_inbox_note_rejects_subdirectory(env: None, inbox_root: Path) -> None:
+    subdir = inbox_root / "Sub"
+    subdir.mkdir()
+    (subdir / "Nested.md").write_text("x\n", encoding="utf-8")
+    with pytest.raises(MCPError) as excinfo:
+        await mcp.call_tool(
+            "append_inbox_note",
+            {"path": "00_Inbox/ChatGPT/Sub/Nested.md", "content": "y\n"},
+        )
+    assert excinfo.value.data == {"code": "INVALID_PATH"}
+
+
+async def test_append_inbox_note_rejects_empty_content(env: None, inbox_root: Path) -> None:
+    (inbox_root / "EmptyContent.md").write_text("x\n", encoding="utf-8")
+    with pytest.raises(MCPError) as excinfo:
+        await mcp.call_tool(
+            "append_inbox_note", {"path": "00_Inbox/ChatGPT/EmptyContent.md", "content": "   "}
+        )
+    assert excinfo.value.data == {"code": "VALIDATION_ERROR"}
+
+
+async def test_append_inbox_note_rejects_path_without_leaking_internals(
+    env: None, api_token: str, vault_root: Path
+) -> None:
+    with pytest.raises(MCPError) as excinfo:
+        await mcp.call_tool(
+            "append_inbox_note", {"path": "../secret.md", "content": "x\n"}
+        )
+    message = excinfo.value.message
+    assert "Traceback" not in message
+    assert str(vault_root) not in message
+    assert "/vault-write" not in message
+    assert api_token not in message
+    assert "Errno" not in message
+    assert "repr" not in message.lower()
 
 
 # --- logging: never leak token / query / path / content / frontmatter --------

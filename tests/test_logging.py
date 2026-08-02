@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -96,3 +97,39 @@ def test_absolute_vault_path_never_logged(
     )
     for record in caplog.records:
         assert str(vault_root) not in record.getMessage()
+
+
+def test_append_content_never_logged(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+    inbox_root: Path,
+) -> None:
+    secret_content = "extremely sensitive appended text that must not leak"
+    (inbox_root / "LogAppendTarget.md").write_text("x\n", encoding="utf-8")
+    client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/LogAppendTarget.md", "content": secret_content},
+        headers=auth_headers,
+    )
+    for record in caplog.records:
+        assert secret_content not in record.getMessage()
+        assert secret_content not in str(record.__dict__)
+
+
+def test_appended_note_relative_path_is_logged(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+    inbox_root: Path,
+) -> None:
+    (inbox_root / "LogAppendPath.md").write_text("x\n", encoding="utf-8")
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/LogAppendPath.md", "content": "y\n"},
+        headers=auth_headers,
+    )
+    appended_path = response.json()["path"]
+
+    access_records = [r for r in caplog.records if r.name == "obsidian_gateway.access"]
+    assert any(getattr(r, "note_path", None) == appended_path for r in access_records)

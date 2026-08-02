@@ -1,19 +1,24 @@
 # Obsidian Vault Gateway
 
 A secure gateway over a private Obsidian vault: full-vault search, note
-reads, and note creation restricted to one directory. **MCP is the primary
-interface** — for the ChatGPT desktop app, Codex CLI, and the Codex IDE
-extension, all sharing one MCP server configuration on the same Codex host,
-without exposing the Gateway to the public internet. A secondary REST API
-is kept for health checks, curl-based diagnostics, and regression tests.
+reads, staged directory/summary browsing, and note creation and append
+restricted to one directory. **MCP is the primary interface** — for the
+ChatGPT desktop app, Codex CLI, and the Codex IDE extension, all sharing one
+MCP server configuration on the same Codex host, without exposing the
+Gateway to the public internet. A secondary REST API is kept for health
+checks, curl-based diagnostics, and regression tests.
 
-This is **Phase 1.5** of `docs/IMPLEMENTATION_PLAN.md`. See
+This is **Phase 2** of `docs/IMPLEMENTATION_PLAN.md` — implemented and
+covered by the automated test suite, with OMV/LiveSync deployment
+verification still pending (see the checklist below). See
 `docs/adr/0001-switch-primary-interface-to-mcp.md` for why MCP replaced the
 original ChatGPT Actions plan, `docs/adr/0002-use-mcp-python-sdk-v2.md` for
-why this runs on the MCP Python SDK's v2 line, and
-`docs/MCP_IMPLEMENTATION_PLAN.md` for the MCP design in full. Phase 1 (the
-REST-only predecessor) is documented as completed history in
-`docs/PHASE1_PLAN.md`.
+why this runs on the MCP Python SDK's v2 line,
+`docs/adr/0003-allow-os-replace-for-inbox-append.md` for why note append is
+the one place `os.replace()` is used, and `docs/MCP_IMPLEMENTATION_PLAN.md`
+for the MCP design in full. Phase 1 and Phase 1.5 (the REST-only and
+MCP-introduction predecessors) are documented as completed history in
+`docs/PHASE1_PLAN.md` and `docs/IMPLEMENTATION_PLAN.md`.
 
 ## Security invariants
 
@@ -22,7 +27,10 @@ transports:
 
 - The whole vault is mounted **read-only**.
 - Only `00_Inbox/ChatGPT` is writable, and only through the `create_inbox_note`
-  MCP tool or `POST /api/v1/inbox/notes`.
+  / `append_inbox_note` MCP tools or `POST /api/v1/inbox/notes` /
+  `POST /api/v1/inbox/notes/append`. `append_inbox_note` can only extend an
+  existing note already directly inside that directory — it cannot create
+  one, and cannot target a subdirectory or anywhere else.
 - There is no delete, move, rename, or arbitrary-path write endpoint or tool.
 - Every path is validated against traversal, absolute paths, hidden files, and
   symlinks before touching the filesystem (`app/services/path_security.py`).
@@ -49,20 +57,32 @@ error.
 | `get_health` | read | auto |
 | `search_notes` | read | auto |
 | `read_note` | read | auto |
+| `get_vault_tree` | read | auto |
+| `get_vault_summary` | read | auto |
 | `create_inbox_note` | write | **prompt** |
+| `append_inbox_note` | write | **prompt** |
 
 `search_notes` before `read_note` when the exact path is unknown — search
-results' `path` can be passed directly to `read_note`. `create_inbox_note`
-always writes a new file under `00_Inbox/ChatGPT`; it cannot overwrite,
-delete, move, or rename notes, and does not accept a path from the caller.
+results' `path` can be passed directly to `read_note`, `get_vault_tree`'s
+`path`, or `append_inbox_note`'s `path`. `get_vault_tree` lists one folder's
+direct children at a time (folders before notes); `get_vault_summary` gives
+vault-wide counts, sizes, and top tags without exposing any note body or
+title. Both support cursor-based pagination — pass a non-null `next_cursor`
+back as `cursor` with the same other arguments to fetch the next page; a
+cursor is only valid for the exact arguments it was minted with, and
+becomes invalid if `API_TOKEN` is rotated. `create_inbox_note` always writes
+a new file under `00_Inbox/ChatGPT`; `append_inbox_note` appends to an
+existing file already directly inside it. Neither can overwrite, delete,
+move, or rename notes, and `create_inbox_note` does not accept a path from
+the caller.
 
-**Write approval is not left to `ToolAnnotations` alone.** The
-`create_inbox_note` tool is annotated `readOnlyHint: false`, which is a
-signal a client's own policy can choose to ignore — the Codex configuration
-below sets an explicit approval policy (`default_tools_approval_mode`, plus a
-per-tool override) so a write actually prompts for confirmation rather than
-depending on the client interpreting the annotation the way this Gateway
-intends.
+**Write approval is not left to `ToolAnnotations` alone.** Both
+`create_inbox_note` and `append_inbox_note` are annotated
+`readOnlyHint: false`, which is a signal a client's own policy can choose to
+ignore — the Codex configuration below sets an explicit approval policy
+(`default_tools_approval_mode`, plus a per-tool override for each) so a
+write actually prompts for confirmation rather than depending on the client
+interpreting the annotation the way this Gateway intends.
 
 ### ChatGPT desktop app
 
@@ -75,8 +95,9 @@ Settings → MCP servers → Add server
 ```
 
 Restart the app after saving. Confirm the connection in the composer with
-`/mcp`. Read tools (`get_health`, `search_notes`, `read_note`) run without
-confirmation; `create_inbox_note` prompts before writing.
+`/mcp`. Read tools (`get_health`, `search_notes`, `read_note`,
+`get_vault_tree`, `get_vault_summary`) run without confirmation;
+`create_inbox_note` and `append_inbox_note` prompt before writing.
 
 ### Codex CLI / Codex IDE extension
 
@@ -94,6 +115,9 @@ enabled = true
 required = true
 
 [mcp_servers.obsidian_vault.tools.create_inbox_note]
+approval_mode = "prompt"
+
+[mcp_servers.obsidian_vault.tools.append_inbox_note]
 approval_mode = "prompt"
 ```
 
@@ -126,7 +150,7 @@ npx -y @modelcontextprotocol/inspector
 ```
 
 Connect to `https://obsidian-api.example.com/mcp` (Streamable HTTP),
-set the Bearer token, and confirm all four tools are listed and callable.
+set the Bearer token, and confirm all seven tools are listed and callable.
 
 ### Configuration
 
@@ -147,14 +171,25 @@ any non-MCP client.
 | GET | `/api/v1/health` | `getHealth` | none |
 | GET | `/api/v1/search` | `searchNotes` | Bearer |
 | GET | `/api/v1/notes` | `readNote` | Bearer |
+| GET | `/api/v1/vault/tree` | `getVaultTree` | Bearer |
+| GET | `/api/v1/vault/summary` | `getVaultSummary` | Bearer |
 | POST | `/api/v1/inbox/notes` | `createInboxNote` | Bearer |
+| POST | `/api/v1/inbox/notes/append` | `appendInboxNote` | Bearer |
 
 Full schema: `openapi.json` (regenerate with `scripts/export_openapi.py`
 after changing any router/model), or `GET /docs` on a running instance.
 
 `GET /api/v1/notes` takes the note path as a **query parameter**
 (`?path=Knowledge/PC/GPU/RTX 5070.md`), not as part of the URL path — see
-`docs/PHASE1_PLAN.md` section 4.5 for why.
+`docs/PHASE1_PLAN.md` section 4.5 for why. `POST /api/v1/inbox/notes/append`
+follows the same reasoning: the target note's path is a JSON body field
+(`path`), not a URL path segment.
+
+`GET /api/v1/search` and `GET /api/v1/vault/tree` both support an opaque
+`cursor` query parameter for pagination — take the previous response's
+`next_cursor` and pass it back with the same other query parameters to get
+the next page. A cursor is bound to those parameters (and to the current
+`API_TOKEN`) and is rejected with `INVALID_CURSOR` if either changes.
 
 ## Configuration
 
@@ -215,7 +250,7 @@ are generated at test time, not committed.
 MCP tests (`tests/test_mcp_*.py`) mostly share one session-scoped `mcp_client`
 fixture rather than one per test: the SDK's session manager can only be
 started once per process, matching how a real server runs. `test_mcp_tools.py`
-covers the four tools directly, unmounted; `test_mcp_lifespan.py` and two
+covers the seven tools directly, unmounted; `test_mcp_lifespan.py` and two
 tests in `test_mcp_protocol.py` that need their own event loop build an
 independent, throwaway MCP server instead.
 
@@ -261,11 +296,20 @@ curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/search" \
 curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/notes" \
      --data-urlencode 'path=Knowledge/PC/GPU/RTX 5070.md'
 
+curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/vault/tree" \
+     --data-urlencode 'limit=100'
+
+curl -fsS -H "Authorization: Bearer $API_TOKEN" "$BASE/api/v1/vault/summary"
+
 curl -fsS -X POST -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
      -d '{"title":"Gateway smoke test","content":"# Gateway smoke test\n"}' \
      "$BASE/api/v1/inbox/notes"
 
-# MCP: no Bearer → 401; tools/list → 4 tools
+curl -fsS -X POST -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"path":"00_Inbox/ChatGPT/Gateway smoke test.md","content":"\nAppended by the OMV checklist.\n"}' \
+     "$BASE/api/v1/inbox/notes/append"
+
+# MCP: no Bearer → 401; tools/list → 7 tools
 curl -i -X POST "$BASE/mcp/" -H 'Content-Type: application/json' \
      -H 'Accept: application/json, text/event-stream' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
@@ -275,12 +319,23 @@ curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
+Walk the vault tree a level at a time to confirm pagination works end to
+end: request `/api/v1/vault/tree` with a small `limit`, follow `next_cursor`
+until it comes back null, and confirm every entry was seen exactly once.
+Repeat for `/api/v1/search` with a query that matches more notes than
+`limit`.
+
 **The `POST /api/v1/inbox/notes` and any `create_inbox_note` calls above
-create a real note in `00_Inbox/ChatGPT` on your vault.** There is no delete
-endpoint or tool (by design — see Security invariants above), so the Gateway
-itself cannot remove it. After confirming it synced correctly, delete the
-note manually, from Obsidian or directly on the OMV host. Do the same for any
-note created while checking LiveSync below.
+create a real note in `00_Inbox/ChatGPT` on your vault; `append_inbox_note`
+/ the append call above appends to it.** There is no delete endpoint or tool
+(by design — see Security invariants above), so the Gateway itself cannot
+remove it. After confirming it synced correctly, delete the note manually,
+from Obsidian or directly on the OMV host. Do the same for any note created
+while checking LiveSync below.
+
+Also confirm `append_inbox_note` / `POST /api/v1/inbox/notes/append` reject
+a path outside `00_Inbox/ChatGPT` (e.g. `Knowledge/...`) with
+`PATH_OUTSIDE_VAULT`.
 
 Container permission checks:
 
@@ -295,6 +350,23 @@ docker compose exec obsidian-api sh -c '
 Expect: a non-root uid/gid, the `/vault-ro` write to fail, and the
 `/vault-write/inbox` write/remove to succeed.
 
+**Append and ownership** (`docs/adr/0003-allow-os-replace-for-inbox-append.md`):
+`append_inbox_note` uses `os.replace()`, which preserves the note's file
+mode but not its owning UID/GID — the appended note's owner becomes whoever
+the container process runs as. Before relying on append in production,
+confirm on the OMV host:
+
+```bash
+ls -ln /path/to/vault/00_Inbox/ChatGPT/'Gateway smoke test.md'   # before append
+# ... run the append curl command above ...
+ls -ln /path/to/vault/00_Inbox/ChatGPT/'Gateway smoke test.md'   # after append
+```
+
+and note whether the uid/gid columns changed. If they did and that note is
+no longer writable by the same host-side user/process that Obsidian or
+LiveSync runs as, append is not safe to use in that deployment as-is (see
+the ADR's Consequences section).
+
 LiveSync check — with the container running, use a smoke-test write above (or
 `create_inbox_note` from an actual client) and confirm, in order:
 
@@ -304,11 +376,22 @@ LiveSync check — with the container running, use a smoke-test write above (or
 4. It appears in Obsidian on a PC.
 5. It appears in Obsidian on an iPhone.
 
+Then repeat the same five checks for an **append** (the append curl command
+above, or `append_inbox_note` from an actual client) against that same
+note, and additionally confirm:
+
+6. The note is still editable and saveable from Obsidian on the PC after
+   the append (catches the ownership change above silently breaking
+   host-side writes).
+7. The note is still editable and saveable from Obsidian on the iPhone
+   after the append.
+
 Then delete the test note as noted above.
 
-Client checks: MCP Inspector connects and lists all four tools; ChatGPT
+Client checks: MCP Inspector connects and lists all seven tools; ChatGPT
 desktop connects and a read tool runs without a prompt; Codex CLI connects
-(`codex mcp list`) and a write tool prompts for approval before running.
+(`codex mcp list`) and both write tools (`create_inbox_note`,
+`append_inbox_note`) prompt for approval before running.
 
 ### Updating to a new image
 
@@ -378,10 +461,13 @@ request Caddy forwards.
 
 ## Known gaps (tracked for later phases)
 
-- `GET /api/v1/vault/tree`, `GET /api/v1/vault/summary`, an
-  `append_inbox_note` MCP tool / `POST /api/v1/inbox/notes/{note_id}/append`
-  — Phase 2.
-- Search pagination (`cursor`) — the response always has `next_cursor: null`.
+- Phase 2 (`get_vault_tree`, `get_vault_summary`, `append_inbox_note`,
+  search/tree cursor pagination) is implemented and covered by the
+  automated test suite, but the OMV/LiveSync deployment verification
+  checklist above — including the append ownership check — has not yet been
+  run on real hardware. Large-vault performance work (`docs/IMPLEMENTATION_
+  PLAN.md` section 18's "大規模Vault向け改善", e.g. a SQLite FTS5 index) is
+  explicitly out of Phase 2's scope.
 - Rate limiting, concurrency limits, metrics, MCP compatibility testing
   across SDK updates — Phase 3.
 - Vault audit (orphan notes, broken links, stale Inbox notes) — Phase 4.

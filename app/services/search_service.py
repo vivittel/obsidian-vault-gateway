@@ -46,6 +46,11 @@ class SearchHit(NamedTuple):
     score: int
 
 
+class SearchPage(NamedTuple):
+    hits: list[SearchHit]
+    has_more: bool
+
+
 def fold(text: str) -> str:
     """NFKC + casefold, the single normalisation used on both sides of a match."""
     return unicodedata.normalize("NFKC", text).casefold()
@@ -110,15 +115,21 @@ def search_notes(
     folder: str | None = None,
     tags: str | None = None,
     limit: int = DEFAULT_LIMIT,
+    offset: int = 0,
     timezone: ZoneInfo,
     max_note_bytes: int,
-) -> list[SearchHit]:
+) -> SearchPage:
     """Search the vault.
 
     ``query`` matches file name, frontmatter title, frontmatter tags, headings and
     body. ``tags`` narrows by frontmatter tags and is an **AND**: every tag listed
     must be present. ``folder`` restricts to a subtree. With no ``query`` the
     filters alone select notes, newest first.
+
+    The full result set is scored, then sorted by ``(-score, -mtime, relative)``
+    — a strict total order, since ``relative`` is unique — before ``[offset:offset
+    + limit]`` is sliced off. ``has_more`` tells the caller whether a further page
+    exists so it can decide whether to mint a ``next_cursor``.
     """
     folded_query = fold(query.strip()) if query and query.strip() else ""
     required_tags = parse_tag_filter(tags)
@@ -167,4 +178,6 @@ def search_notes(
         )
 
     hits.sort(key=lambda hit: (-hit.score, -hit.modified_at.timestamp(), hit.relative))
-    return hits[:limit]
+    window = hits[offset : offset + limit]
+    has_more = len(hits) > offset + len(window)
+    return SearchPage(hits=window, has_more=has_more)

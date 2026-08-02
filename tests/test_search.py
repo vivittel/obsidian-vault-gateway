@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -111,3 +112,97 @@ def test_search_no_query_returns_all_notes_newest_first(
     assert response.status_code == 200
     assert response.json()["next_cursor"] is None
     assert len(response.json()["results"]) > 0
+
+
+def test_search_pagination_visits_every_note_without_duplicates_or_gaps(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    full = client.get("/api/v1/search", headers=auth_headers).json()["results"]
+    assert len(full) >= 3  # otherwise limit=2 wouldn't exercise more than one page
+
+    seen: list[str] = []
+    cursor = None
+    for _ in range(len(full) + 1):  # generous bound; a stuck cursor must not loop forever
+        params: dict[str, object] = {"limit": 2}
+        if cursor:
+            params["cursor"] = cursor
+        page = client.get("/api/v1/search", params=params, headers=auth_headers).json()
+        seen.extend(r["path"] for r in page["results"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+
+    assert cursor is None, "pagination did not terminate"
+    assert seen == [r["path"] for r in full]
+    assert len(seen) == len(set(seen))
+
+
+def test_search_cursor_from_a_different_query_is_rejected(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    page = client.get(
+        "/api/v1/search", params={"q": "RTX", "limit": 1}, headers=auth_headers
+    ).json()
+    assert page["next_cursor"] is not None
+
+    response = client.get(
+        "/api/v1/search",
+        params={"q": "GPU", "limit": 1, "cursor": page["next_cursor"]},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_CURSOR"
+
+
+def test_search_cursor_from_a_different_folder_is_rejected(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    page = client.get(
+        "/api/v1/search", params={"folder": "Knowledge/PC", "limit": 1}, headers=auth_headers
+    ).json()
+    assert page["next_cursor"] is not None
+
+    response = client.get(
+        "/api/v1/search",
+        params={"limit": 1, "cursor": page["next_cursor"]},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_CURSOR"
+
+
+def test_search_tampered_cursor_is_rejected(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    page = client.get("/api/v1/search", params={"limit": 1}, headers=auth_headers).json()
+    assert page["next_cursor"] is not None
+    tampered = page["next_cursor"][:-1] + ("A" if page["next_cursor"][-1] != "A" else "B")
+
+    response = client.get(
+        "/api/v1/search", params={"limit": 1, "cursor": tampered}, headers=auth_headers
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_CURSOR"
+
+
+def test_search_changing_limit_between_pages_does_not_invalidate_cursor(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    first = client.get("/api/v1/search", params={"limit": 1}, headers=auth_headers).json()
+    assert first["next_cursor"] is not None
+
+    second = client.get(
+        "/api/v1/search",
+        params={"limit": 3, "cursor": first["next_cursor"]},
+        headers=auth_headers,
+    )
+    assert second.status_code == 200
+
+
+@pytest.mark.parametrize("folder", ["/Knowledge", "//Knowledge", "/"])
+def test_search_folder_rejects_absolute_paths(
+    client: TestClient, auth_headers: dict[str, str], folder: str
+) -> None:
+    response = client.get("/api/v1/search", params={"folder": folder}, headers=auth_headers)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_PATH"

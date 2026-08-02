@@ -134,7 +134,7 @@ async def _standalone_mcp_app(settings: Settings):
         yield test_app
 
 
-# --- modern: server/discover -> tools/list -> tools/call (4 tools) -----------
+# --- modern: server/discover -> tools/list -> tools/call (7 tools) -----------
 
 
 def test_modern_discover_returns_instructions_and_capabilities(
@@ -157,7 +157,7 @@ def test_modern_discover_returns_instructions_and_capabilities(
     assert "tools" in result["capabilities"]
 
 
-def test_modern_tools_list_has_four_tools(mcp_client: TestClient, mcp_headers: dict) -> None:
+def test_modern_tools_list_has_seven_tools(mcp_client: TestClient, mcp_headers: dict) -> None:
     response = mcp_client.post(
         "/mcp/",
         json={
@@ -170,7 +170,15 @@ def test_modern_tools_list_has_four_tools(mcp_client: TestClient, mcp_headers: d
     )
     assert response.status_code == 200
     names = {tool["name"] for tool in response.json()["result"]["tools"]}
-    assert names == {"get_health", "search_notes", "read_note", "create_inbox_note"}
+    assert names == {
+        "get_health",
+        "search_notes",
+        "read_note",
+        "get_vault_tree",
+        "get_vault_summary",
+        "create_inbox_note",
+        "append_inbox_note",
+    }
 
 
 @pytest.mark.parametrize(
@@ -194,7 +202,7 @@ def test_modern_tools_call_succeeds(
     assert "structuredContent" in result
 
 
-# --- legacy: initialize -> initialized -> tools/list -> tools/call (4 tools) --
+# --- legacy: initialize -> initialized -> tools/list -> tools/call (7 tools) --
 
 
 def test_legacy_initialize_succeeds(mcp_client: TestClient, mcp_headers: dict) -> None:
@@ -230,7 +238,7 @@ def test_legacy_initialized_notification_is_accepted(
     assert response.status_code == 202
 
 
-def test_legacy_tools_list_has_four_tools(mcp_client: TestClient, mcp_headers: dict) -> None:
+def test_legacy_tools_list_has_seven_tools(mcp_client: TestClient, mcp_headers: dict) -> None:
     response = mcp_client.post(
         "/mcp/",
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
@@ -238,7 +246,15 @@ def test_legacy_tools_list_has_four_tools(mcp_client: TestClient, mcp_headers: d
     )
     assert response.status_code == 200
     names = {tool["name"] for tool in response.json()["result"]["tools"]}
-    assert names == {"get_health", "search_notes", "read_note", "create_inbox_note"}
+    assert names == {
+        "get_health",
+        "search_notes",
+        "read_note",
+        "get_vault_tree",
+        "get_vault_summary",
+        "create_inbox_note",
+        "append_inbox_note",
+    }
 
 
 @pytest.mark.parametrize(
@@ -299,7 +315,10 @@ def test_both_mcp_and_trailing_slash_variant_connect(
         "get_health",
         "search_notes",
         "read_note",
+        "get_vault_tree",
+        "get_vault_summary",
         "create_inbox_note",
+        "append_inbox_note",
     }
 
 
@@ -409,7 +428,10 @@ def test_bare_mcp_query_string_survives_normalization(
         "get_health",
         "search_notes",
         "read_note",
+        "get_vault_tree",
+        "get_vault_summary",
         "create_inbox_note",
+        "append_inbox_note",
     }
 
 

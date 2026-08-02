@@ -105,8 +105,13 @@ Windows 予約名（CON/PRN/AUX/NUL/COM1-9/LPT1-9、大小無視）なら `INVAL
 
 ### 4.3 原子的な書き込み（§17）— `services/inbox_service.py`
 
-**`os.replace()` は使わない。** `os.replace()` は既存ファイルを上書きするため、
-§6.6「既存ファイルを上書きしない」と両立しない。代わりに:
+**新規作成では `os.replace()` は使わない。** `os.replace()` は既存ファイルを
+上書きするため、§6.6「既存ファイルを上書きしない」と両立しない。代わりに:
+
+> Phase 2 の `append_inbox_note`（既存ノートへの追記、`PHASE2_PLAN.md` §6）は
+> 例外として `os.replace()` を使用する。対象は解決済み・存在確認済みの既存
+> ノートに限られ、ここで述べる新規作成の上書き禁止は緩めない。詳細は
+> `docs/adr/0003-allow-os-replace-for-inbox-append.md`。
 
 1. Inbox ディレクトリ内に隠し一時ファイル（`.tmp-<random>`）を作成 → 書き込み → `fsync`
 2. 候補名 `title.md`, `title-2.md`, … に対して `os.link(tmp, candidate)` を試行。

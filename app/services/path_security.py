@@ -1,8 +1,8 @@
 """Path validation — the security core of the gateway (IMPLEMENTATION_PLAN section 7).
 
-Every filesystem access in this service goes through :func:`resolve_read_path` or
-:func:`resolve_inbox_write_path`. Nothing else is allowed to build a path from
-caller-supplied data.
+Every filesystem access in this service goes through :func:`resolve_read_path`,
+:func:`resolve_read_dir` or :func:`resolve_inbox_append_path`. Nothing else is
+allowed to build a path from caller-supplied data.
 
 Two ordering details matter and are easy to get wrong:
 
@@ -17,6 +17,7 @@ Two ordering details matter and are easy to get wrong:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import stat
@@ -109,8 +110,18 @@ def normalise_relative_path(raw: str) -> PurePosixPath:
 
 
 def normalise_relative_dir(raw: str) -> PurePosixPath:
-    """Validate a caller-supplied vault-relative directory path (the search ``folder``)."""
-    cleaned = raw.strip().strip("/")
+    """Validate a caller-supplied vault-relative directory path (the search ``folder``).
+
+    The leading slash is checked on the string as given — stripping it first,
+    as an earlier version of this function did, would silently turn an
+    absolute path like ``/Knowledge`` into the accepted relative path
+    ``Knowledge``. Only a trailing slash (a normal way to write a directory
+    path) is normalised away.
+    """
+    stripped = raw.strip()
+    if stripped.startswith("/"):
+        raise InvalidPathError(log_detail="absolute path")
+    cleaned = stripped.rstrip("/")
     if not cleaned:
         raise InvalidPathError(log_detail="empty folder")
     _check_every_encoding(cleaned, require_markdown=False)
@@ -150,37 +161,146 @@ def resolve_read_path(raw: str, read_root: Path) -> ResolvedNote:
     return ResolvedNote(path=resolved, relative=relative.as_posix())
 
 
-def resolve_inbox_write_path(file_name: str, inbox_root: Path) -> Path:
-    """Validate an already-sanitised file name for writing into the inbox.
+def resolve_read_dir(raw: str | None, read_root: Path) -> ResolvedNote:
+    """Turn a caller-supplied folder path into a directory inside ``read_root``.
 
-    Takes a bare file name, never a path: the inbox is flat and callers never get
-    to influence the directory (section 6.6, "クライアントから保存パスは受け取らない").
+    Mirrors :func:`resolve_read_path`'s steps but without the ``.md`` suffix
+    requirement, and accepts ``None``/blank for the vault root itself.
     """
-    if not file_name or "/" in file_name or "\\" in file_name or "\x00" in file_name:
-        raise InvalidPathError(log_detail="inbox file name must be a single component")
-    if file_name.startswith("."):
-        raise InvalidPathError(log_detail="hidden inbox file name")
-    if len(file_name) > MAX_COMPONENT_LENGTH:
-        raise InvalidPathError(log_detail="inbox file name exceeds maximum length")
-    if not file_name.endswith(MARKDOWN_SUFFIX):
-        raise InvalidFileTypeError(log_detail="inbox file name must end in .md")
+    if raw is None or not raw.strip():
+        return ResolvedNote(path=read_root, relative="")
 
-    candidate = inbox_root / file_name
+    relative = normalise_relative_dir(raw)
+    _reject_symlinked_components(read_root, relative)
+
+    candidate = read_root / relative
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise NoteNotFoundError() from exc
+    except OSError as exc:  # ELOOP, ENAMETOOLONG, ENOTDIR, ...
+        raise InvalidPathError(log_detail=f"unresolvable path: {type(exc).__name__}") from exc
+
+    if not resolved.is_relative_to(read_root):
+        raise PathOutsideVaultError(log_detail="resolved path escapes the read root")
+
+    if not stat.S_ISDIR(resolved.stat().st_mode):
+        raise InvalidFileTypeError(log_detail="path does not name a directory")
+
+    return ResolvedNote(path=resolved, relative=relative.as_posix())
+
+
+class VaultEntry(NamedTuple):
+    name: str
+    relative: str
+    is_dir: bool
+    stat_result: os.stat_result | None
+
+
+def iter_directory(directory: Path, read_root: Path) -> Iterator[VaultEntry]:
+    """List the direct, non-hidden, non-symlink children of ``directory``.
+
+    One level only — unlike :func:`iter_vault_notes`, this does not recurse.
+    Non-Markdown files are excluded entirely; sub-folders are listed even when
+    they contain no notes. Per-entry ``OSError`` (e.g. a race with a delete on
+    the host) is skipped rather than raised, matching :func:`iter_vault_notes`.
+    """
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(entry.name for entry in entries)
+    except OSError:
+        return
+
+    for name in names:
+        if name.startswith("."):
+            continue
+        path = directory / name
+        try:
+            if path.is_symlink():
+                continue
+            # path is confirmed not a symlink above, so a plain is_dir() (no
+            # follow_symlinks kwarg — that requires Python 3.13+, and this
+            # project targets 3.12 too) cannot be fooled by one here.
+            is_dir = path.is_dir()
+            if not is_dir and not name.endswith(MARKDOWN_SUFFIX):
+                continue
+            stat_result = None if is_dir else path.stat()
+        except OSError:
+            continue
+        if stat_result is not None and not stat.S_ISREG(stat_result.st_mode):
+            continue
+        yield VaultEntry(
+            name=name,
+            relative=path.relative_to(read_root).as_posix(),
+            is_dir=is_dir,
+            stat_result=stat_result,
+        )
+
+
+def resolve_inbox_append_path(
+    raw: str, *, inbox_root: Path, inbox_relative_path: str
+) -> ResolvedNote:
+    """Turn a caller-supplied path into an *existing* note directly inside
+    the inbox, or raise (PHASE2_PLAN section 6).
+
+    The caller passes a full vault-relative path (e.g.
+    ``00_Inbox/ChatGPT/Example.md``), matching how they addressed the note
+    with ``read_note``/``search_notes`` — but the writable mount is
+    ``inbox_root``, a different bind mount than the read-only vault root, so
+    this both verifies the ``inbox_relative_path`` prefix and re-roots onto
+    ``inbox_root`` for the actual filesystem access. Rejects any path with a
+    subdirectory under the inbox — appends only ever touch a file directly
+    inside it — and, unlike :func:`resolve_read_path`, requires the target to
+    already exist rather than creating it.
+    """
+    relative = normalise_relative_path(raw)
+    prefix = PurePosixPath(inbox_relative_path).parts
+    parts = relative.parts
+
+    if parts[: len(prefix)] != prefix:
+        raise PathOutsideVaultError(log_detail="append target is outside the inbox")
+    if len(parts) != len(prefix) + 1:
+        raise InvalidPathError(log_detail="append target must be directly inside the inbox")
+
+    candidate = inbox_root / parts[-1]
     if candidate.is_symlink():
-        raise InvalidPathError(log_detail="inbox target is a symlink")
-    if not candidate.resolve().parent.is_relative_to(inbox_root):
-        raise PathOutsideVaultError(log_detail="inbox target escapes the inbox root")
+        raise InvalidPathError(log_detail="append target is a symlink")
 
-    return candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise NoteNotFoundError() from exc
+    except OSError as exc:  # ELOOP, ENAMETOOLONG, ENOTDIR, ...
+        raise InvalidPathError(log_detail=f"unresolvable path: {type(exc).__name__}") from exc
+
+    if not resolved.is_relative_to(inbox_root):
+        raise PathOutsideVaultError(log_detail="append target escapes the inbox root")
+    if not stat.S_ISREG(resolved.stat().st_mode):
+        raise InvalidFileTypeError(log_detail="append target is not a regular file")
+
+    return ResolvedNote(path=resolved, relative=relative.as_posix())
 
 
-def iter_vault_notes(read_root: Path) -> Iterator[VaultNote]:
+@dataclasses.dataclass
+class WalkStats:
+    """Counts entries :func:`iter_vault_notes` skipped rather than yielded.
+
+    Optional and additive: existing callers that omit ``stats`` see no change
+    in behaviour, only this counter is new.
+    """
+
+    skipped: int = 0
+
+
+def iter_vault_notes(read_root: Path, *, stats: WalkStats | None = None) -> Iterator[VaultNote]:
     """Walk every readable Markdown note in the vault.
 
     Applies the same exclusions as the read path: hidden directories (which
     covers ``.obsidian``, ``.git`` and ``.trash``), hidden files, symlinks,
     non-regular files and anything that is not ``.md``. Results are sorted so a
-    given vault always produces the same ordering.
+    given vault always produces the same ordering. When ``stats`` is given, a
+    file skipped because it could not be ``stat()``-ed or was not a regular
+    file increments ``stats.skipped``.
     """
     for dirpath, dirnames, filenames in os.walk(read_root, followlinks=False):
         directory = Path(dirpath)
@@ -199,8 +319,12 @@ def iter_vault_notes(read_root: Path) -> Iterator[VaultNote]:
             try:
                 stat_result = path.stat()
             except OSError:
+                if stats is not None:
+                    stats.skipped += 1
                 continue
             if not stat.S_ISREG(stat_result.st_mode):
+                if stats is not None:
+                    stats.skipped += 1
                 continue
             yield VaultNote(
                 path=path,

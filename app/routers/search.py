@@ -31,5 +31,8 @@ async def search(
     limit: Annotated[
         int, Query(ge=1, le=200, description="Maximum number of results.")
     ] = 20,
+    cursor: Annotated[
+        str | None, Query(description="Opaque pagination token from a previous response.")
+    ] = None,
 ) -> SearchResponse:
-    return application.search_notes(query=q, folder=folder, tags=tags, limit=limit)
+    return application.search_notes(query=q, folder=folder, tags=tags, limit=limit, cursor=cursor)

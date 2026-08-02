@@ -39,6 +39,8 @@ class ErrorCode(StrEnum):
     NOTE_ALREADY_EXISTS = "NOTE_ALREADY_EXISTS"
     VALIDATION_ERROR = "VALIDATION_ERROR"
     RATE_LIMITED = "RATE_LIMITED"
+    INVALID_CURSOR = "INVALID_CURSOR"
+    NOTE_MODIFIED = "NOTE_MODIFIED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -107,6 +109,20 @@ class ValidationError(GatewayError):
     code = ErrorCode.VALIDATION_ERROR
     status_code = 400
     default_message = "The request could not be validated."
+
+
+class InvalidCursorError(GatewayError):
+    code = ErrorCode.INVALID_CURSOR
+    status_code = 400
+    default_message = "The pagination cursor is not valid for this request."
+
+
+class NoteModifiedError(GatewayError):
+    """Raised when a note changes between validation and the atomic write (Phase 2 append)."""
+
+    code = ErrorCode.NOTE_MODIFIED
+    status_code = 409
+    default_message = "The note changed while the append was being prepared. Retry."
 
 
 class InternalError(GatewayError):
