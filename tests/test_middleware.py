@@ -109,7 +109,10 @@ async def test_api_v1_request_is_logged_with_status_and_route(
     caplog.set_level(logging.INFO, logger="obsidian_gateway.access")
     inner = _RecordingApp()
     middleware = AccessLogMiddleware(inner)
-    scope = _http_scope("/api/v1/health")
+    # Deliberately not /api/v1/health: that one route logs at DEBUG (see
+    # test_health_request_is_logged_at_debug_not_info below), so it would not
+    # exercise the ordinary INFO path this test is about.
+    scope = _http_scope("/api/v1/search")
     sent_events = []
 
     async def send(message: dict) -> None:
@@ -122,7 +125,34 @@ async def test_api_v1_request_is_logged_with_status_and_route(
     record = access_records[0]
     assert record.status_code == 200
     assert record.method == "GET"
+    assert record.transport == "rest"
     assert sent_events[0]["type"] == "http.response.start"
+
+
+async def test_health_request_is_logged_at_debug_not_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dockerfile's HEALTHCHECK hits /api/v1/health every 30s. At INFO that one
+    route accounted for almost the whole access log, so it is logged at DEBUG:
+    still available when LOG_LEVEL=DEBUG, never the default noise floor.
+    """
+    inner = _RecordingApp()
+    middleware = AccessLogMiddleware(inner)
+
+    async def send(message: dict) -> None:
+        pass
+
+    caplog.set_level(logging.INFO, logger="obsidian_gateway.access")
+    await middleware(_http_scope("/api/v1/health"), _dummy_receive, send)
+    assert [r for r in caplog.records if r.name == "obsidian_gateway.access"] == []
+
+    caplog.clear()
+    caplog.set_level(logging.DEBUG, logger="obsidian_gateway.access")
+    await middleware(_http_scope("/api/v1/health"), _dummy_receive, send)
+    records = [r for r in caplog.records if r.name == "obsidian_gateway.access"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    assert records[0].route == "/api/v1/health"
 
 
 async def test_scope_state_set_downstream_is_visible_to_access_log(

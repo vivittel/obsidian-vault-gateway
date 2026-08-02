@@ -556,6 +556,17 @@ transport間でログ項目が完全には一致しない。両者を統一す�
 - MCP response body
 - ホスト側絶対パス
 
+**出力形式（実装時に確定）**: 上記は記録項目の列挙であり、出力形式ではない。
+実際のレンダリングは桁揃え平文（`$1` 日時 / `$2` level / `$3` transportまたは
+発生元 / `$4` method / `$5` route・tool / `$6` status / `$7` duration、以降に
+任意項目の`key=value`）で、stdoutへ1レコード1行。設計判断とフィールド一覧は
+`app/logging_config.py`のモジュールdocstringとREADMEの「Logging」節、
+レンダリング後の1行に対する検証は`tests/test_log_format.py`にある。
+
+`LOG_LEVEL`は`app/logging_config.py`が`obsidian_gateway`系ロガーへ適用する。
+`/api/v1/health`のアクセスログのみDEBUG（Docker HEALTHCHECKが30秒ごとに叩く
+ため、INFOではアクセスログのほぼ全量がこの1ルートになる）。
+
 ## 15. Docker構成
 
 ### 原則

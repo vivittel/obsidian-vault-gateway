@@ -705,6 +705,18 @@ status=unauthorized
   RESTのアクセスログは`request.state.accessed_note`/`created_note`経由で
   引き続き相対パスを記録するため、transport間でログ項目が完全には一致しない）**
 
+**本節冒頭の`key=value`表記について**: あれは記録項目の列挙であって出力形式の
+指定ではない。実際の出力は桁揃え平文で、`transport`/`method`/`tool`/`status`/
+`duration_ms`/`result_count`は固定カラムに、`reason`などの任意項目のみ行末の
+`key=value`に入る。IMPLEMENTATION_PLAN.md §14とREADMEの「Logging」節を参照。
+
+MCPアクセスログに呼び出し側由来の自由文字列が一切入らないこと（`transport`・
+`tool`（7ツール名）・`status`・`reason`・`code`はいずれも固定語彙、
+`duration_ms`/`result_count`は数値、`note_path`は上記U1により非記録）が、
+出力形式にJSONではなく平文を選べた根拠になっている。ログ注入や改行による
+1イベント2行化がMCP側では原理的に起きない。REST側の`note_path`のみ
+呼び出し側由来なので、フォーマッタが改行をエスケープして担保している。
+
 ## 17. セキュリティ試験
 
 ### 認証
