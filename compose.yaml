@@ -1,7 +1,6 @@
 services:
   obsidian-api:
-    build:
-      context: .
+    image: ${OBSIDIAN_GATEWAY_IMAGE:-ghcr.io/vivittel/obsidian-vault-gateway:latest}
     container_name: obsidian-api
     restart: unless-stopped
 

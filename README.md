@@ -223,7 +223,8 @@ independent, throwaway MCP server instead.
 
 ```bash
 docker compose config    # validate before starting anything
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 The image is a non-root, `read_only: true` container with all Linux
@@ -246,7 +247,9 @@ instead of scrolling past silently.
 ```bash
 docker compose config
 
-docker compose up -d --build
+docker compose pull
+
+docker compose up -d
 
 BASE=https://obsidian-api.example.com
 
@@ -306,6 +309,62 @@ Then delete the test note as noted above.
 Client checks: MCP Inspector connects and lists all four tools; ChatGPT
 desktop connects and a read tool runs without a prompt; Codex CLI connects
 (`codex mcp list`) and a write tool prompts for approval before running.
+
+### Updating to a new image
+
+After a `main` push, GitHub Actions (`.github/workflows/publish.yml`) builds
+and publishes a new `ghcr.io/vivittel/obsidian-vault-gateway:latest`. Apply
+it on OMV:
+
+```bash
+docker compose pull
+docker compose up -d --force-recreate
+```
+
+If the GHCR package is **public** (this repo's default), pulling it needs no
+`docker login` — only *pushing* to it, done by CI with the ephemeral
+`secrets.GITHUB_TOKEN`, needs credentials. If the package is private,
+authenticate once with a PAT that has `read:packages`:
+
+```bash
+echo "$GHCR_READ_PAT" | docker login ghcr.io -u <github-username> --password-stdin
+```
+
+Confirm the new container is healthy and still enforces auth:
+
+```bash
+BASE=https://obsidian-api.example.com
+
+curl -fsS "$BASE/api/v1/health"
+
+# No Bearer token → 401. A silently-broken auth check after an update is the
+# dangerous failure mode this guards against — a 200 here would mean /mcp is
+# reachable unauthenticated.
+curl -i -X POST "$BASE/mcp/" -H 'Content-Type: application/json' \
+     -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+### Rolling back
+
+Every published image also carries its commit SHA as a tag (`type=sha` in
+`.github/workflows/publish.yml`), independent of `:latest`. To roll back,
+pin `OBSIDIAN_GATEWAY_IMAGE` in `.env` to a known-good SHA instead of
+overwriting `:latest`:
+
+```bash
+# find a known-good commit (git log, or the package page on GHCR)
+echo "OBSIDIAN_GATEWAY_IMAGE=ghcr.io/vivittel/obsidian-vault-gateway:<sha>" >> .env
+
+docker compose pull
+docker compose up -d --force-recreate
+```
+
+There is no schema or database migration to reverse — the only state a
+rollback needs to account for is any note `create_inbox_note` already wrote
+to `00_Inbox/ChatGPT` while the newer image was running, which nothing here
+removes. Switch `OBSIDIAN_GATEWAY_IMAGE` back to `:latest` (or delete the
+override) once a fixed image is published.
 
 ## Caddy
 
