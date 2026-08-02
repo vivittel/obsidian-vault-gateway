@@ -1,6 +1,39 @@
 {
   "components": {
     "schemas": {
+      "AppendedNoteResponse": {
+        "properties": {
+          "appended_bytes": {
+            "description": "Bytes added to the file, including any inserted separator/terminator.",
+            "title": "Appended Bytes",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Vault-relative path of the note.",
+            "title": "Id",
+            "type": "string"
+          },
+          "modified_at": {
+            "description": "Modification time in the configured timezone.",
+            "format": "date-time",
+            "title": "Modified At",
+            "type": "string"
+          },
+          "path": {
+            "description": "Vault-relative path of the note.",
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "modified_at",
+          "appended_bytes"
+        ],
+        "title": "AppendedNoteResponse",
+        "type": "object"
+      },
       "CreatedNoteResponse": {
         "properties": {
           "id": {
@@ -75,6 +108,31 @@
           "inbox_writable"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "InboxNoteAppendRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "description": "Markdown to append. The existing note's line ending is preserved.",
+            "maxLength": 2000000,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "path": {
+            "description": "Vault-relative path of an existing .md note directly inside the inbox.",
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "title": "InboxNoteAppendRequest",
         "type": "object"
       },
       "InboxNoteCreateRequest": {
@@ -217,7 +275,7 @@
                 "type": "null"
               }
             ],
-            "description": "Always null in Phase 1. Reserved for pagination so the schema stays stable when it lands.",
+            "description": "Opaque pagination token. Pass it back as `cursor` with the same query/folder/tags to fetch the next page. Null when there is no further page.",
             "title": "Next Cursor"
           },
           "results": {
@@ -321,6 +379,163 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "VaultNameCount": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "note_count": {
+            "title": "Note Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "note_count"
+        ],
+        "title": "VaultNameCount",
+        "type": "object"
+      },
+      "VaultSummaryResponse": {
+        "properties": {
+          "folder_count": {
+            "description": "Number of distinct folders that directly contain a note.",
+            "title": "Folder Count",
+            "type": "integer"
+          },
+          "last_modified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Newest note mtime in the configured timezone. Null if empty.",
+            "title": "Last Modified At"
+          },
+          "note_count": {
+            "description": "Total number of Markdown notes in the vault.",
+            "title": "Note Count",
+            "type": "integer"
+          },
+          "skipped_count": {
+            "description": "Notes that could not be read while aggregating and were excluded.",
+            "title": "Skipped Count",
+            "type": "integer"
+          },
+          "tags": {
+            "description": "Most common frontmatter tags, folded for case/width, up to `top_tags_limit`.",
+            "items": {
+              "$ref": "#/components/schemas/VaultNameCount"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "top_level_folders": {
+            "description": "Note counts per top-level folder. A note directly at the vault root is not counted here.",
+            "items": {
+              "$ref": "#/components/schemas/VaultNameCount"
+            },
+            "title": "Top Level Folders",
+            "type": "array"
+          },
+          "total_bytes": {
+            "description": "Combined file size of every Markdown note, in bytes.",
+            "title": "Total Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "note_count",
+          "total_bytes",
+          "folder_count",
+          "top_level_folders",
+          "tags",
+          "skipped_count"
+        ],
+        "title": "VaultSummaryResponse",
+        "type": "object"
+      },
+      "VaultTreeEntry": {
+        "properties": {
+          "modified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "File mtime in the configured timezone. Null for folders.",
+            "title": "Modified At"
+          },
+          "name": {
+            "description": "File or folder name, without any path component.",
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "description": "Vault-relative path.",
+            "title": "Path",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "folder",
+              "note"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "name",
+          "path"
+        ],
+        "title": "VaultTreeEntry",
+        "type": "object"
+      },
+      "VaultTreeResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/VaultTreeEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "folder": {
+            "description": "Vault-relative folder that was listed. Empty for the root.",
+            "title": "Folder",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Opaque pagination token. Pass it back as `cursor` with the same `folder` to fetch the next page. Null when there is no further page.",
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "folder",
+          "entries"
+        ],
+        "title": "VaultTreeResponse",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -400,6 +615,52 @@
           }
         ],
         "summary": "Create a Markdown note in 00_Inbox/ChatGPT",
+        "tags": [
+          "inbox"
+        ]
+      }
+    },
+    "/api/v1/inbox/notes/append": {
+      "post": {
+        "operationId": "appendInboxNote",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboxNoteAppendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppendedNoteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Append Markdown to an existing note in 00_Inbox/ChatGPT",
         "tags": [
           "inbox"
         ]
@@ -525,6 +786,24 @@
               "title": "Limit",
               "type": "integer"
             }
+          },
+          {
+            "description": "Opaque pagination token from a previous response.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque pagination token from a previous response.",
+              "title": "Cursor"
+            }
           }
         ],
         "responses": {
@@ -557,6 +836,146 @@
         "summary": "Search the vault by file name, title, tags, headings and body",
         "tags": [
           "search"
+        ]
+      }
+    },
+    "/api/v1/vault/summary": {
+      "get": {
+        "operationId": "getVaultSummary",
+        "parameters": [
+          {
+            "description": "Maximum number of tags to return.",
+            "in": "query",
+            "name": "top_tags_limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "description": "Maximum number of tags to return.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Top Tags Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Summarise vault-wide note counts, sizes, and tags",
+        "tags": [
+          "vault"
+        ]
+      }
+    },
+    "/api/v1/vault/tree": {
+      "get": {
+        "operationId": "getVaultTree",
+        "parameters": [
+          {
+            "description": "Vault-relative folder to list. Omit for the vault root.",
+            "in": "query",
+            "name": "folder",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Vault-relative folder to list. Omit for the vault root.",
+              "title": "Folder"
+            }
+          },
+          {
+            "description": "Maximum number of entries.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "Maximum number of entries.",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque pagination token from a previous response.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque pagination token from a previous response.",
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultTreeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List the direct children of a vault folder",
+        "tags": [
+          "vault"
         ]
       }
     }

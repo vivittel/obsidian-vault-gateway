@@ -211,13 +211,18 @@ GET  /api/v1/notes
 POST /api/v1/inbox/notes
 ```
 
-将来追加:
+Phase 2で追加（実装済み）:
 
 ```text
 GET  /api/v1/vault/tree
 GET  /api/v1/vault/summary
-POST /api/v1/inbox/notes/{note_id}/append
+POST /api/v1/inbox/notes/append
 ```
+
+`POST /api/v1/inbox/notes/append`は対象ノートの`path`をURLではなくJSON body
+で受け取る。`GET /api/v1/notes`が`path`をquery paramにしている理由
+（`%2F`の扱いがプロキシによって異なるため。§6.3、`docs/PHASE1_PLAN.md` 4.5節）
+と同じ判断による。
 
 ### 検索
 
@@ -262,6 +267,7 @@ Services
 ├── note_service
 ├── inbox_service
 ├── vault_service
+├── cursor_service
 └── filenames
         │
         ▼
@@ -303,6 +309,7 @@ app/
     ├── search_service.py
     ├── note_service.py
     ├── vault_service.py
+    ├── cursor_service.py
     ├── inbox_service.py
     └── filenames.py
 
@@ -314,21 +321,24 @@ tests/
 ├── test_notes.py
 ├── test_inbox.py
 ├── test_vault.py
+├── test_cursor_service.py
 ├── test_mcp_auth.py
 ├── test_mcp_tools.py
 ├── test_mcp_protocol.py
 └── test_rest_regression.py
 
 scripts/
-├── export_openapi.py
-└── mcp_smoke_test.py
+└── export_openapi.py
 
 docs/
 ├── IMPLEMENTATION_PLAN.md
 ├── MCP_IMPLEMENTATION_PLAN.md
 ├── PHASE1_PLAN.md
+├── PHASE2_PLAN.md
 ├── adr/
-│   └── 0001-switch-primary-interface-to-mcp.md
+│   ├── 0001-switch-primary-interface-to-mcp.md
+│   ├── 0002-use-mcp-python-sdk-v2.md
+│   └── 0003-allow-os-replace-for-inbox-append.md
 └── caddy/
     └── obsidian-api.Caddyfile
 ```
@@ -464,7 +474,11 @@ Title-3.md
 - 一時ファイルを必ず削除
 - ディレクトリを`fsync`
 
-`os.replace()`は既存ファイルを上書きするため使用しない。
+`os.replace()`は既存ファイルを上書きするため、新規作成では使用しない。
+
+> Phase 2の`append_inbox_note`（既存ノートへの追記）は例外として`os.replace()`
+> を使用する — 対象は既存であることが検証済みのノートに限られ、新規作成の
+> 上書き禁止は緩めない。詳細は `docs/adr/0003-allow-os-replace-for-inbox-append.md`。
 
 ## 13. エラー仕様
 
@@ -500,9 +514,16 @@ INVALID_FILE_TYPE
 FILE_TOO_LARGE
 INVALID_TITLE
 NOTE_ALREADY_EXISTS
+INVALID_CURSOR
+NOTE_MODIFIED
 RATE_LIMITED
 INTERNAL_ERROR
 ```
+
+`INVALID_CURSOR`（400）はPhase 2で追加。検索・Vault Treeのページングカーソル
+が改ざん・破損・別条件への流用のいずれかに該当する場合に返す。`NOTE_MODIFIED`
+（409）もPhase 2で追加。`append_inbox_note`が対象ノートの検証時点から変更を
+検出した場合に返す（`docs/PHASE2_PLAN.md` §6）。
 
 ## 14. ログ
 
@@ -682,7 +703,7 @@ Status: Completed
 
 ### Phase 1.5: MCP MVP
 
-Status: Next
+Status: Completed
 
 - MCP SDK導入
 - application layer抽出
@@ -701,13 +722,20 @@ Status: Next
 
 ### Phase 2: Vault構造参照
 
+Status: Implemented — Deployment verification pending
+
 - `get_vault_tree`
 - `get_vault_summary`
 - frontmatter集計
 - タグ集計
 - ページング
 - `append_inbox_note`
-- 大規模Vault向け改善
+- 大規模Vault向け改善（Phase 2の範囲外。詳細は `docs/PHASE2_PLAN.md`）
+
+自動テスト・lint・OpenAPI回帰はすべて成功しているが、OMV・LiveSync・PC/iPhone
+Obsidianでの実機検証（README.md「OMV verification checklist」、特に
+`append_inbox_note`が使う`os.replace()`の所有者変化の確認）が完了するまで
+`Completed`へは変更しない。
 
 ### Phase 3: 運用強化
 
