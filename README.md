@@ -8,9 +8,11 @@ MCP server configuration on the same Codex host, without exposing the
 Gateway to the public internet. A secondary REST API is kept for health
 checks, curl-based diagnostics, and regression tests.
 
-This is **Phase 2** of `docs/IMPLEMENTATION_PLAN.md` — implemented and
-covered by the automated test suite, with OMV/LiveSync deployment
-verification still pending (see the checklist below). See
+This is **Phase 2** of `docs/IMPLEMENTATION_PLAN.md` — implemented, covered by
+the automated test suite, and verified on the OMV host together with LiveSync,
+Obsidian on a PC, and Obsidian on an iPhone. Only the container memory limit
+and Docker log-rotation settings added afterwards remain to be checked against
+the latest deployed image (see the checklist below). See
 `docs/adr/0001-switch-primary-interface-to-mcp.md` for why MCP replaced the
 original ChatGPT Actions plan, `docs/adr/0002-use-mcp-python-sdk-v2.md` for
 why this runs on the MCP Python SDK's v2 line,
@@ -182,7 +184,7 @@ Full schema: `openapi.json` (regenerate with `scripts/export_openapi.py`
 after changing any router/model), or `GET /docs` on a running instance.
 
 `GET /api/v1/notes` takes the note path as a **query parameter**
-(`?path=Knowledge/PC/GPU/RTX 5070.md`), not as part of the URL path — see
+(`?path=Knowledge/Examples/Device.md`), not as part of the URL path — see
 `docs/PHASE1_PLAN.md` section 4.5 for why. `POST /api/v1/inbox/notes/append`
 follows the same reasoning: the target note's path is a JSON body field
 (`path`), not a URL path segment.
@@ -214,7 +216,7 @@ plugin all show it.
 
 ```text
 2026-08-02T21:13:58.001+0900  INFO  uvicorn Started server process [1]
-2026-08-02T21:14:03.412+0900  INFO  rest    GET        /api/v1/notes              200          12.4ms   note=Knowledge/PC/GPU/RTX 5070.md
+2026-08-02T21:14:03.412+0900  INFO  rest    GET        /api/v1/notes              200          12.4ms   note=Knowledge/Examples/Device.md
 2026-08-02T21:14:05.100+0900  INFO  rest    GET        /api/v1/search             200          48.2ms   q_len=29 results=5
 2026-08-02T21:14:07.883+0900  INFO  mcp     tools/call search_notes               success      31.7ms   results=5
 2026-08-02T21:14:12.004+0900  INFO  mcp     tools/call read_note                  error        3.1ms
@@ -344,10 +346,10 @@ requests were running concurrently (`VAULT_SCAN_CONCURRENCY` in
 once that points at a real, expected memory need rather than a leak.
 
 > **Not verified in this repository's automated tests.** The development
-> environment this code was written in has no Docker installed, so
-> `docker compose config`, the container-permission checks below, and the
-> LiveSync check have not been run. Run the checklist below on the actual OMV
-> host before relying on this in production.
+> environment this code was written in has no Docker installed, so nothing
+> below is exercised by `pytest`. The checklist has been run manually on the
+> OMV host; only the container memory limit and Docker log-rotation settings
+> added later remain unverified against the latest image.
 
 ### OMV verification checklist
 
@@ -362,14 +364,25 @@ docker compose pull
 docker compose up -d
 
 BASE=https://obsidian-api.example.com
+NOTE='<a note path that already exists in your vault>'
+QUERY='<a term that matches several notes in your vault>'
 
 curl -fsS "$BASE/api/v1/health"
 
-curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/search" \
-     --data-urlencode 'q=RTX 5070' --data-urlencode 'limit=5'
+# Skip these two if NOTE/QUERY are still placeholders — the literal values
+# above match nothing, and `curl -fsS` would report a 404 as a real failure.
+case "$NOTE$QUERY" in
+  *'<'*)
+    echo 'Set NOTE and QUERY to real values in your vault first — skipped.' >&2
+    ;;
+  *)
+    curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/search" \
+         --data-urlencode "q=$QUERY" --data-urlencode 'limit=5'
 
-curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/notes" \
-     --data-urlencode 'path=Knowledge/PC/GPU/RTX 5070.md'
+    curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/notes" \
+         --data-urlencode "path=$NOTE"
+    ;;
+esac
 
 curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/vault/tree" \
      --data-urlencode 'limit=100'
@@ -397,8 +410,8 @@ curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
 Walk the vault tree a level at a time to confirm pagination works end to
 end: request `/api/v1/vault/tree` with a small `limit`, follow `next_cursor`
 until it comes back null, and confirm every entry was seen exactly once.
-Repeat for `/api/v1/search` with a query that matches more notes than
-`limit`.
+Repeat for `/api/v1/search` with `$QUERY` and a `limit` smaller than its
+match count.
 
 **The `POST /api/v1/inbox/notes` and any `create_inbox_note` calls above
 create a real note in `00_Inbox/ChatGPT` on your vault; `append_inbox_note`
@@ -542,13 +555,14 @@ request Caddy forwards.
 
 ## Known gaps (tracked for later phases)
 
-- Phase 2 (`get_vault_tree`, `get_vault_summary`, `append_inbox_note`,
-  search/tree cursor pagination) is implemented and covered by the
-  automated test suite, but the OMV/LiveSync deployment verification
-  checklist above — including the append ownership check — has not yet been
-  run on real hardware. Large-vault performance work (`docs/IMPLEMENTATION_
-  PLAN.md` section 18's "大規模Vault向け改善", e.g. a SQLite FTS5 index) is
-  explicitly out of Phase 2's scope.
+- Phase 2's OMV/LiveSync verification checklist above — including the append
+  ownership check — has been run on real hardware. What remains is the
+  container memory limit (`mem_limit: 512m`) and the Docker `json-file` log
+  rotation (`max-size: 10m`, `max-file: 3`), which were added afterwards and
+  have not yet been checked against the latest deployed image. Large-vault
+  performance work (`docs/IMPLEMENTATION_PLAN.md` section 18's
+  "大規模Vault向け改善", e.g. a SQLite FTS5 index) is explicitly out of
+  Phase 2's scope.
 - Rate limiting, concurrency limits, metrics, MCP compatibility testing
   across SDK updates — Phase 3.
 - Vault audit (orphan notes, broken links, stale Inbox notes) — Phase 4.

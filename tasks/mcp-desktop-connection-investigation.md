@@ -109,27 +109,19 @@ Windows User 環境変数の値は `.env` の `API_TOKEN` と **SHA-256 完全�
 デスクトップアプリが起動した Codex エージェント本体:
 
 ```
-pid 98459   起動 2026-08-02 20:02:10
+pid <PID>
   cmd:  /mnt/c/Users/<user>/.codex/bin/wsl/<hash>/codex \
           -c features.code_mode_host=true app-server --analytics-default-enabled
-  親系譜: 98459 <- /init <- /init <- /init <- /sbin/init
+  親系譜: WSL init 経由で直接起動（ログインシェルを介さない）
   CODEX_HOME=/mnt/c/Users/<user>/.codex
   SHLVL=0
-  OBSIDIAN_MCP_TOKEN  → 存在しない          ← /proc/98459/environ を直読
+  OBSIDIAN_MCP_TOKEN  → 存在しない          ← /proc/<PID>/environ を直読
 ```
 
-同プロセスの `WSLENV`（アプリが自前生成したリスト。`OBSIDIAN_MCP_TOKEN` を**含まない**）:
-
-```
-PATHEXT/l:COMSPEC/p:SYSTEMROOT/p:SYSTEMDRIVE:USERNAME:USERDOMAIN:USERPROFILE/p:
-PROGRAMFILES/p:PROGRAMFILES(X86)/p:PROGRAMW6432/p:PROGRAMDATA/p:LOCALAPPDATA/p:
-APPDATA/p:TEMP/p:TMP/p:POWERSHELL:PWSH:HTTP_PROXY:HTTPS_PROXY:NO_PROXY:
-NODE_TLS_REJECT_UNAUTHORIZED:CODEX_HOME/p:LOG_FORMAT:RUST_LOG:
-CODEX_INTERNAL_ORIGINATOR_OVERRIDE
-```
-
-永続 `WSLENV` は User / Machine とも **未設定**。上記リストは完全にアプリ生成物であり、
-**アプリが `WSLENV` を丸ごと設定している可能性が高い**（後述 7-B のリスク）。
+同プロセスの `WSLENV` はアプリが自前生成したリストで、`OBSIDIAN_MCP_TOKEN` を
+**含まなかった**。永続 `WSLENV` は User / Machine とも **未設定**であり、当該リストは
+完全にアプリ生成物のため、**アプリが `WSLENV` を丸ごと設定している可能性が高い**
+（後述 7-B のリスク）。
 
 ### 5.4 Codex 側に代替の注入経路はない
 
@@ -153,7 +145,7 @@ CODEX_INTERNAL_ORIGINATOR_OVERRIDE
 | `experimental_use_rmcp_client` が必要 | 0.146.0 では不要。`codex mcp list` が HTTP サーバーを警告なく列挙 |
 | **アプリを再起動すれば直る**（初期仮説） | **誤り。** Windows User 環境変数は `WSLENV` なしでは WSL に渡らないため、何度再起動しても届かない |
 | `~/.bashrc` / `~/.profile` に書けば届く | `/init` からの直起動・`SHLVL=0` で**シェルが一切走らない**ため読まれない |
-| `/etc/environment` に書けば届く | 未適用。`/etc/environment` の `PATH` にある `/snap/bin` が pid 98459 の `PATH` に無い（WSL interop 起動は PAM セッションを作らない）|
+| `/etc/environment` に書けば届く | 未適用。`/etc/environment` の `PATH` にある `/snap/bin` が pid <PID> の `PATH` に無い（WSL interop 起動は PAM セッションを作らない）|
 | WSL 側 `~/.codex/config.toml` を直せば直る | そちらは有効な設定ではない（§5.1）。ただし別問題として §8 参照 |
 
 ## 7. 対処（B を適用して解決）
@@ -264,8 +256,8 @@ powershell.exe -NoProfile -Command "
 
 # 実プロセスの環境（決定的証拠）
 ps -eo pid,lstart,cmd | grep [c]odex
-tr '\0' '\n' < /proc/98459/environ | grep -E '^(CODEX_HOME|WSLENV|SHLVL|PATH)='
-tr '\0' '\n' < /proc/98459/environ | grep -c '^OBSIDIAN_MCP_TOKEN='
+tr '\0' '\n' < /proc/<PID>/environ | grep -E '^(CODEX_HOME|WSLENV|SHLVL|PATH)='
+tr '\0' '\n' < /proc/<PID>/environ | grep -c '^OBSIDIAN_MCP_TOKEN='
 
 # WSLENV 転送機構の実測
 powershell.exe -NoProfile -Command "
