@@ -280,3 +280,88 @@ Cursor→Tree→Summary→Appendの順に変更した（承認済み）。
   ままだが、この記述はPhase 1時点から実装と一致していなかった（実際は
   `inbox_service.py`が直接パスを組んでいた）既存の不整合であり、Completedな
   historical documentのため今回は変更していない
+
+# 運用向けログ形式の整備（Phase 2 範囲内の欠陥修正）
+
+新規フェーズではなく、`docs/IMPLEMENTATION_PLAN.md`§14と
+`docs/MCP_IMPLEMENTATION_PLAN.md`§16が要求していた項目が実際には出力されて
+いなかったことの修正。コンテナログの実出力が`request` / `mcp_call` /
+`Terminating session: None`だけの状態だった。
+
+- [x] 0. 原因特定（`MCPServer`生成の副作用である`logging.basicConfig(
+      format="%(message)s")`がrootロガーを掌握していた。アプリ側に logging
+      設定は存在しなかった）
+- [x] 1. `app/logging_config.py`新規（`PlainLogFormatter` +
+      `configure_logging()`）
+- [x] 2. `app/mcp_server.py`で`MCPServer`生成の直前に`configure_logging()`
+- [x] 3. RESTアクセスログに`transport=rest`と`result_count`を追加（§14）
+- [x] 4. `/api/v1/health`のアクセスログをDEBUGへ降格
+- [x] 5. MCPアクセスログに`method=tools/call`を追加（§16）
+- [x] 6. `compose.yaml`にログローテーション（`10m × 3`）
+- [x] 7. `tests/test_log_format.py`新規（レンダリング後の1行を検証）
+- [x] 8. README「Logging」節、§14・§16への出力形式注記、`.env.example`
+
+## Review
+
+### 変更ファイル
+
+- 新規: `app/logging_config.py`, `tests/test_log_format.py`
+- 変更: `app/mcp_server.py`（`configure_logging()`呼び出し、`method`フィールド）
+- 変更: `app/middleware.py`（`transport` / `result_count` / health DEBUG /
+  `_route_path()`）
+- 変更: `app/routers/search.py`, `app/routers/vault.py`
+  （`request.state.result_count`）
+- 変更: `app/main.py`（import順の理由コメントのみ）
+- 変更: `compose.yaml`, `.env.example`, `README.md`,
+  `docs/IMPLEMENTATION_PLAN.md`, `docs/MCP_IMPLEMENTATION_PLAN.md`
+- 変更: `tests/test_middleware.py`（health用テストの追加、既存テストの
+  対象ルート変更）
+
+### テスト結果
+
+- `.venv/bin/pytest -q` → 407 passed（うち新規24件）
+- `.venv/bin/ruff check .` → All checks passed
+- `.venv/bin/python scripts/export_openapi.py --check` → up to date
+  （`request: Request`追加はスキーマに影響しない）
+- `docker compose config`は開発機にdockerが無いため未実行。`compose.yaml`は
+  PyYAMLでパースし`logging`ブロックを確認した
+- ローカルuvicornで実出力を目視確認（`awk '$3=="mcp" {print $5}'`が通ること、
+  `LOG_LEVEL=DEBUG`でhealth行が出ること、`Terminating session`が消えたこと）
+
+### 実装中に発見し、計画から逸脱した点
+
+1. **`configure_logging()`をSettings非依存にした。** 計画では
+   `configure_logging(settings)`だったが、`app/mcp_server.py`のimport時に
+   `get_settings()`を呼ぶとテストのcollectionが壊れる（テストは環境変数を
+   設定する前にこのモジュールをimportする）。加えてSettings検証失敗自体を
+   ログに出したいので、`TZ`/`LOG_LEVEL`を環境変数から直接読む形が本来正しい。
+   デフォルト値のみ`Settings`と二重管理になっている
+2. **`dictConfig`を使わず素の logging API を使った。** `root`を明示指定した
+   `dictConfig`はrootのハンドラリストを置換するため、アプリを最初にimport
+   したテストのpytest caplogハンドラを消してしまう
+3. **`uvicorn.access`を統合対象から外し、明示的に無効化した。** 統合テストで
+   検出した回帰: `propagate=True`にすると`--no-access-log`を無効化してしまい、
+   生のクエリ文字列（`q=RTX 5070`）がログに出る。§14の「記録しない: 検索語」
+   違反。`app/logging_config.py`側でも落とすようにしたので、この不変条件が
+   Dockerfileのフラグだけに依存しなくなった
+4. **`route`が`/api/v1`プレフィックス無しで記録されていた既存バグを修正。**
+   この FastAPI 版は`include_router(prefix=...)`をマッチ時に`_IncludedRouter`
+   で適用するため`scope["route"].path`は`/search`のまま。そのため
+   health判定（`/api/v1/health`との比較）が実アプリで一致せず、DEBUG降格が
+   効いていなかった。`AccessLogMiddleware._route_path()`で解決
+5. **タイムスタンプの区切りを空白ではなく`T`にした。** 空白だと日時が2
+   フィールドに割れて以降の全カラムがずれ、「1カラム = 1 awkフィールド」
+   （平文を選んだ理由そのもの）が崩れる
+
+### 未解決事項
+
+- MCPのエラー行（`mcp tools/call read_note error 0.1ms`）に**どのエラーか**が
+  出ない。`GatewayError.log_detail`が無い場合（`NoteNotFoundError`など）は
+  `mcp_tool_error`レコードも出ないため、`code`がどこにも残らない。§14/§16は
+  エラーコードの記録を要求していないので今回は変更していないが、運用上は
+  `mcp_call`のerror側extraに`code`を足す価値がある
+- `docs/PHASE1_PLAN.md:178`はuvicornアクセスログの無効化を`--no-access-log`
+  のみと説明しており、`app/logging_config.py`側の二重化に言及していない。
+  Completedなhistorical documentのため変更していない
+- ローテーションの実効確認（`docker inspect obsidian-api --format
+  '{{json .HostConfig.LogConfig}}'`）は実機で未実施

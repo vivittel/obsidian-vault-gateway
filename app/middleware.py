@@ -40,6 +40,13 @@ if TYPE_CHECKING:
 
 access_logger = logging.getLogger("obsidian_gateway.access")
 
+# Logged at DEBUG rather than INFO: Dockerfile's HEALTHCHECK hits this every 30
+# seconds, which at INFO drowns out every real request — the log this
+# middleware exists to produce was ~90% health checks before this. DEBUG keeps
+# the line available under LOG_LEVEL=DEBUG without making it the default noise
+# floor.
+_HEALTH_ROUTE = f"{API_PREFIX}/health"
+
 
 def _is_rest_http_request(scope: Scope) -> bool:
     return scope["type"] == "http" and scope["path"].startswith(API_PREFIX)
@@ -91,12 +98,13 @@ class RequestSizeLimitMiddleware:
 
 
 class AccessLogMiddleware:
-    """One log line per REST request: method, route, status, duration.
+    """One log line per REST request: transport, method, route, status, duration.
 
-    Note or Inbox paths are logged by the routers themselves via
-    ``request.state.accessed_note`` / ``request.state.created_note`` /
-    ``request.state.appended_note`` (set on the shared ``scope["state"]``
-    dict) so this middleware stays generic and never inspects the body.
+    Note or Inbox paths and result counts are logged by the routers themselves
+    via ``request.state.accessed_note`` / ``request.state.created_note`` /
+    ``request.state.appended_note`` / ``request.state.result_count`` (set on the
+    shared ``scope["state"]`` dict) so this middleware stays generic and never
+    inspects the body.
     """
 
     def __init__(self, app) -> None:
@@ -111,6 +119,7 @@ class AccessLogMiddleware:
         request.state.accessed_note = None
         request.state.created_note = None
         request.state.appended_note = None
+        request.state.result_count = None
 
         start = time.monotonic()
         status_code = 0
@@ -124,10 +133,12 @@ class AccessLogMiddleware:
         await self.app(scope, receive, send_wrapper)
 
         duration_ms = round((time.monotonic() - start) * 1000, 1)
-        route = scope.get("route")
-        route_path = getattr(route, "path", request.url.path)
+        route_path = self._route_path(scope, request)
 
         extra = {
+            # IMPLEMENTATION_PLAN section 14 lists transport among the things
+            # to record; only the MCP side was setting it before.
+            "transport": "rest",
             "method": request.method,
             "route": route_path,
             "status_code": status_code,
@@ -139,7 +150,35 @@ class AccessLogMiddleware:
             extra["note_path"] = request.state.created_note
         if request.state.appended_note:
             extra["note_path"] = request.state.appended_note
+        if request.state.result_count is not None:
+            extra["result_count"] = request.state.result_count
         if request.method == "GET" and "q" in request.query_params:
             extra["query_length"] = len(request.query_params["q"])
 
-        access_logger.info("request", extra=extra)
+        level = logging.DEBUG if route_path == _HEALTH_ROUTE else logging.INFO
+        access_logger.log(level, "request", extra=extra)
+
+    @staticmethod
+    def _route_path(scope: Scope, request: Request) -> str:
+        """The full public path of the matched route, e.g. ``/api/v1/search``.
+
+        The matched route's own ``path`` is *not* prefixed: this FastAPI version
+        applies ``include_router(prefix=...)`` at match time via an
+        ``_IncludedRouter`` wrapper, leaving ``scope["route"].path`` as the
+        router-relative ``/search`` (verified against the installed version).
+        Logging that unprefixed form made the route ambiguous and impossible to
+        line up against Caddy's access log, and it silently defeated the health
+        check's DEBUG downgrade above, which compares against the full path.
+
+        Still the route *template* rather than ``request.url.path``, so a path
+        parameter added later cannot put caller-supplied data in the log; the
+        prefix is only added when the route did not already carry it, so a
+        future FastAPI that prefixes it itself cannot produce
+        ``/api/v1/api/v1/search``.
+        """
+        route_path: str = getattr(scope.get("route"), "path", "")
+        if not route_path:
+            return request.url.path
+        if route_path.startswith(API_PREFIX):
+            return route_path
+        return f"{API_PREFIX}{route_path}"

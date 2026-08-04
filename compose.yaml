@@ -17,7 +17,19 @@ services:
       MAX_SEARCH_RESULTS: ${MAX_SEARCH_RESULTS:-50}
       MAX_NOTE_SIZE_BYTES: ${MAX_NOTE_SIZE_BYTES:-1048576}
       MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-2097152}
+      # Applied to the obsidian_gateway loggers by app/logging_config.py. DEBUG
+      # additionally surfaces the /api/v1/health line the Docker HEALTHCHECK
+      # produces every 30s, which is deliberately below INFO.
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+    # The application only ever writes to stdout (the container filesystem is
+    # read_only below), so Docker's driver is the whole retention story. Without
+    # these options json-file keeps every line forever and fills the OMV disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
     volumes:
       # Whole vault, read-only. VAULT_HOST_PATH comes from .env — see

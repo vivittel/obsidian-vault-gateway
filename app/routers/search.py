@@ -42,9 +42,14 @@ async def search(
     # thread through a dedicated limiter (app/main.py) instead of as a plain
     # `def` endpoint sharing FastAPI's default thread pool, so this can never
     # starve /health or any other lightweight REST request of a thread.
-    return await anyio.to_thread.run_sync(
+    response = await anyio.to_thread.run_sync(
         partial(
             application.search_notes, query=q, folder=folder, tags=tags, limit=limit, cursor=cursor
         ),
         limiter=request.app.state.vault_scan_limiter,
     )
+    # Picked up by AccessLogMiddleware — IMPLEMENTATION_PLAN section 14's
+    # "結果件数". Same request.state hand-off app/routers/notes.py uses for
+    # note paths, so the middleware never has to inspect the response body.
+    request.state.result_count = len(response.results)
+    return response

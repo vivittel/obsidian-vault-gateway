@@ -47,8 +47,10 @@ never diverge in behaviour for the same operation.
 
 Endpoint: `/mcp`, Streamable HTTP transport, Bearer token authentication
 (same `API_TOKEN` as REST). Stateless (`stateless_http=True`): no session is
-tracked across requests, so terminating one (`DELETE`) is a no-op, not an
-error.
+tracked across requests, so there is nothing for a client to terminate and
+`DELETE /mcp` answers **405** — the status the spec prescribes for a server
+that does not support session termination (asserted in
+`tests/test_mcp_protocol.py`). Clients handle it; it is not an error condition.
 
 ### Tools
 
@@ -202,6 +204,60 @@ openssl rand -hex 32   # use the output as API_TOKEN
 
 See `.env.example` for every variable. Required for a real deployment:
 `API_TOKEN`, `MCP_ALLOWED_HOSTS`, `VAULT_HOST_PATH` / `INBOX_HOST_PATH`.
+
+## Logging
+
+Aligned plain text on **stdout** — nothing is ever written to a file (the
+container filesystem is `read_only`), so Docker's log driver is the whole
+story: `docker logs obsidian-api`, Portainer's Logs tab, or OMV's Compose
+plugin all show it.
+
+```text
+2026-08-02T21:13:58.001+0900  INFO  uvicorn Started server process [1]
+2026-08-02T21:14:03.412+0900  INFO  rest    GET        /api/v1/notes              200          12.4ms   note=Knowledge/PC/GPU/RTX 5070.md
+2026-08-02T21:14:05.100+0900  INFO  rest    GET        /api/v1/search             200          48.2ms   q_len=29 results=5
+2026-08-02T21:14:07.883+0900  INFO  mcp     tools/call search_notes               success      31.7ms   results=5
+2026-08-02T21:14:12.004+0900  INFO  mcp     tools/call read_note                  error        3.1ms
+2026-08-02T21:14:19.002+0900  INFO  mcp     -          mcp_auth_failed            unauthorized -        reason=bearer_token_mismatch
+```
+
+| Field | Meaning |
+|---|---|
+| `$1` | Timestamp, ISO 8601 in the container's `TZ`. `T`, not a space, so it stays one field |
+| `$2` | Level (`DEBUG`/`INFO`/`WARN`/`ERROR`) |
+| `$3` | Source: `rest` or `mcp` for the access logs, otherwise `uvicorn` / `mcp-sdk` / `app` |
+| `$4` | Method: HTTP verb, or `tools/call` |
+| `$5` | Target: full REST route, MCP tool name, or the event when there is neither |
+| `$6` | Status: HTTP status, or `success` / `error` / `unauthorized` |
+| `$7` | Duration |
+| rest | `key=value` for whatever optional fields the event has |
+
+Every column is exactly one whitespace-separated field, so `awk` works
+directly. Only the tail can contain spaces, and the two fields there that can
+(`note`, `detail`) come last:
+
+```bash
+docker logs obsidian-api | awk '$3=="mcp" {print $5}' | sort | uniq -c   # calls per tool
+docker logs obsidian-api | awk '$3=="mcp" && $6=="error"'                # failed tool calls
+docker logs obsidian-api | grep mcp_auth_failed                          # rejected requests
+```
+
+`LOG_LEVEL` (default `INFO`) is applied to the `obsidian_gateway` loggers.
+`DEBUG` additionally surfaces the `/api/v1/health` line, which is deliberately
+below `INFO`: the Docker `HEALTHCHECK` hits that route every 30 seconds and at
+`INFO` it accounted for almost the whole log.
+
+What never appears, per `AGENTS.md` and `docs/IMPLEMENTATION_PLAN.md`
+section 14: the bearer token, note content, frontmatter, the search term (only
+its length), MCP request/response bodies, and absolute host paths. The
+formatter renders an explicit allow-list of fields rather than dumping
+whatever a caller attached, so adding a new `extra` somewhere cannot leak it by
+accident. uvicorn's own access log is silenced in two places — the Dockerfile's
+`--no-access-log` and `app/logging_config.py` — because its formatter prints
+the raw query string.
+
+`compose.yaml` caps retention at `10m × 3` files (30 MB). Without that,
+`json-file` keeps every line forever.
 
 ## Running locally (no Docker)
 

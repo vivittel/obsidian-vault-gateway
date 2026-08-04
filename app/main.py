@@ -40,6 +40,11 @@ from starlette.routing import Mount
 
 from app.config import API_PREFIX, MCP_PREFIX, get_settings
 from app.exceptions import ErrorCode, GatewayError, error_envelope
+
+# Importing this also configures logging for the whole process: the call has to
+# happen before the MCPServer inside it is constructed, so it lives there rather
+# than here. See app/logging_config.py and app/mcp_server.py's comment above
+# `configure_logging(get_settings())`.
 from app.mcp_server import build_mcp_transport, mcp
 from app.middleware import AccessLogMiddleware, RequestSizeLimitMiddleware
 from app.routers import health, inbox, notes, search, vault

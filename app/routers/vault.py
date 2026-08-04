@@ -22,6 +22,7 @@ router = APIRouter(tags=["vault"], dependencies=[Depends(require_token)])
     summary="List the direct children of a vault folder",
 )
 def get_vault_tree(
+    request: Request,
     application: ApplicationDep,
     folder: Annotated[
         str | None, Query(description="Vault-relative folder to list. Omit for the vault root.")
@@ -38,7 +39,10 @@ def get_vault_tree(
     # plain sync `def` and FastAPI's default thread pool (app/routers/
     # search.py's dedicated limiter is only for the two handlers below that
     # actually walk the whole vault).
-    return application.get_vault_tree(folder=folder, limit=limit, cursor=cursor)
+    response = application.get_vault_tree(folder=folder, limit=limit, cursor=cursor)
+    # See app/routers/search.py — IMPLEMENTATION_PLAN section 14's "結果件数".
+    request.state.result_count = len(response.entries)
+    return response
 
 
 @router.get(

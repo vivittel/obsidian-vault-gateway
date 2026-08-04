@@ -40,6 +40,7 @@ from pydantic import Field
 from app.application import GatewayApplication
 from app.config import Settings, get_settings
 from app.exceptions import GatewayError
+from app.logging_config import configure_logging
 from app.mcp_auth import McpBearerAuthMiddleware
 from app.models import (
     AppendedNoteResponse,
@@ -85,6 +86,19 @@ _WRITE_ANNOTATIONS = ToolAnnotations(
     open_world_hint=False,
 )
 
+# Must precede the MCPServer construction below, not follow it: that
+# constructor calls the SDK's own configure_logging(), which calls
+# logging.basicConfig(level=..., format="%(message)s") — and basicConfig is
+# documented to do nothing once the root logger has a handler. Configuring
+# first therefore turns the SDK's call into a no-op, instead of leaving a
+# second, unformatted stderr handler on the root logger that this application
+# would then have to identify and remove.
+#
+# Takes no Settings on purpose: this runs at import time, and this module must
+# stay importable without a validated environment (tests import it during
+# collection). See app/logging_config.py's module docstring.
+configure_logging()
+
 mcp = MCPServer(name="Obsidian Vault Gateway", instructions=SERVER_INSTRUCTIONS)
 
 
@@ -125,6 +139,12 @@ class _McpCall:
         if exc is None:
             extra: dict[str, object] = {
                 "transport": "mcp",
+                # A tool body only ever runs from a tools/call, so this is a
+                # constant rather than something read off the request — but
+                # MCP_IMPLEMENTATION_PLAN section 16 lists it among the fields
+                # to record, and it keeps the rendered log's method column
+                # populated for MCP the way it is for REST.
+                "method": "tools/call",
                 "tool": self.tool_name,
                 "status": "success",
                 "duration_ms": duration_ms,
@@ -138,6 +158,7 @@ class _McpCall:
             "mcp_call",
             extra={
                 "transport": "mcp",
+                "method": "tools/call",
                 "tool": self.tool_name,
                 "status": "error",
                 "duration_ms": duration_ms,
