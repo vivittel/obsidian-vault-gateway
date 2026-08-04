@@ -86,6 +86,58 @@ def test_create_note_sequence_numbers_increment(
     assert names == ["Repeat-2.md", "Repeat-3.md", "Repeat.md"]
 
 
+def test_create_note_mode_is_0o644(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    # Access-control policy (app/services/inbox_service.py's
+    # _CREATED_NOTE_MODE), not an incidental default: the vault is a bind
+    # mount shared with the host's own Obsidian, and every other note in it
+    # is ordinarily 0o644.
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={"title": "Mode Check", "content": "x\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    assert stat.S_IMODE((inbox_root / "Mode Check.md").stat().st_mode) == 0o644
+
+
+def test_create_note_mode_is_0o644_even_under_a_restrictive_umask(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    # os.fchmod (app/services/inbox_service.py's _write_temp_bytes) sets the
+    # mode explicitly, so the process umask must never affect it — unlike a
+    # plain os.open(..., mode) create, which the umask does modify.
+    old_umask = os.umask(0o077)
+    try:
+        response = client.post(
+            "/api/v1/inbox/notes",
+            json={"title": "Umask Check", "content": "x\n"},
+            headers=auth_headers,
+        )
+    finally:
+        os.umask(old_umask)
+    assert response.status_code == 201
+    assert stat.S_IMODE((inbox_root / "Umask Check.md").stat().st_mode) == 0o644
+
+
+def test_create_note_conflict_does_not_change_the_existing_files_mode(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    existing = inbox_root / "Duplicate.md"
+    existing.write_text("original\n", encoding="utf-8")
+    existing.chmod(0o600)
+
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={"title": "Duplicate", "content": "new content\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o600
+    assert stat.S_IMODE((inbox_root / "Duplicate-2.md").stat().st_mode) == 0o644
+
+
 def test_create_note_leaves_no_temp_files_behind(
     client: TestClient, auth_headers: dict[str, str], inbox_root: Path
 ) -> None:
@@ -310,6 +362,25 @@ def test_append_preserves_file_mode(
     assert stat.S_IMODE(note.stat().st_mode) == 0o640
 
 
+def test_append_preserves_a_0o600_file_mode(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    # A distinct mode from test_append_preserves_file_mode's 0o640: append
+    # must preserve whatever the target already has, not normalise toward
+    # either create's 0o644 policy or any other fixed value.
+    note = inbox_root / "StrictModeCheck.md"
+    note.write_text("first\n", encoding="utf-8")
+    note.chmod(0o600)
+
+    response = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/StrictModeCheck.md", "content": "second\n"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    assert stat.S_IMODE(note.stat().st_mode) == 0o600
+
+
 def test_append_leaves_no_temp_files_behind(
     client: TestClient, auth_headers: dict[str, str], inbox_root: Path
 ) -> None:
@@ -436,7 +507,11 @@ def test_append_rejects_already_oversized_note(
 ) -> None:
     from app.config import get_settings
 
-    (inbox_root / "AlreadyBig.md").write_text("x" * 2000, encoding="utf-8")
+    note = inbox_root / "AlreadyBig.md"
+    note.write_text("x" * 2000, encoding="utf-8")
+    note.chmod(0o640)
+    before = note.stat()
+
     monkeypatch.setenv("MAX_NOTE_SIZE_BYTES", "1024")
     get_settings.cache_clear()
     try:
@@ -447,7 +522,13 @@ def test_append_rejects_already_oversized_note(
         )
         assert response.status_code == 413
         assert response.json()["error"]["code"] == "FILE_TOO_LARGE"
-        assert (inbox_root / "AlreadyBig.md").read_text(encoding="utf-8") == "x" * 2000
+        after = note.stat()
+        assert note.read_text(encoding="utf-8") == "x" * 2000
+        # A rejected append must be a complete no-op on the target: same
+        # mode, same inode (never replaced), same mtime (never rewritten).
+        assert stat.S_IMODE(after.st_mode) == 0o640
+        assert after.st_ino == before.st_ino
+        assert after.st_mtime_ns == before.st_mtime_ns
     finally:
         get_settings.cache_clear()
 

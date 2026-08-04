@@ -350,6 +350,12 @@ docker compose exec obsidian-api sh -c '
 Expect: a non-root uid/gid, the `/vault-ro` write to fail, and the
 `/vault-write/inbox` write/remove to succeed.
 
+**Create mode policy**: a newly created note (`create_inbox_note` /
+`POST /api/v1/inbox/notes`) is always written with mode `0o644` — matching
+the mode an ordinary note in the vault has — regardless of the container
+process's umask. An appended-to note instead keeps whatever mode it already
+had before the append (see below); append never changes a note's mode.
+
 **Append and ownership** (`docs/adr/0003-allow-os-replace-for-inbox-append.md`):
 `append_inbox_note` uses `os.replace()`, which preserves the note's file
 mode but not its owning UID/GID — the appended note's owner becomes whoever
