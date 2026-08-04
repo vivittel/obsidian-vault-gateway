@@ -37,6 +37,27 @@ _CLOSE_DELIMITER_RE = re.compile(r"^---[ \t]*\r?\n", re.MULTILINE)
 _HEADING_RE = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
 _TAG_SPLIT_RE = re.compile(r"[,\s]+")
 
+# yaml.CSafeLoader (libyaml) parses roughly 7x faster than the pure-Python
+# yaml.SafeLoader — worth having on the two paths that parse every note in
+# the vault (search, vault/summary) — but it is a C extension with its own
+# call stack, and confirmed directly (not a hypothetical): deeply nested
+# YAML that raises a clean, catchable RecursionError under SafeLoader
+# instead SEGFAULTS THE WHOLE PROCESS under CSafeLoader, in both flow style
+# (`[[[...]]]`) and block style (nested mappings), somewhere between depth
+# 20,000 (confirmed safe) and 50,000 (confirmed crash) for either form.
+# Below this character cap, that depth is unreachable even in the most
+# compact encoding (flow style costs a minimum of 2 characters per nesting
+# level, so 8192 characters bounds depth to at most 4096 — better than 4x
+# below the confirmed-safe ceiling, let alone the crash zone; block style's
+# cumulative indentation makes it quadratically more expensive per level,
+# so it is bounded far more tightly still). Legitimate frontmatter — a
+# handful of scalar fields — sits far under this cap, so the fast loader is
+# what every real note gets; only a document already shaped like an attack
+# pays for the pure-Python fallback.
+_CSAFE_MAX_YAML_CHARS = 8192
+
+_FAST_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 # to_json_safe()'s conversion budget. YAML aliases let a handful of bytes
 # describe a structure that shares the same sub-object many times over
 # (`a: &a [1,2]` / `b: *a`); to_json_safe rebuilds it without that sharing, so
@@ -109,12 +130,21 @@ def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         return {}, text
 
     yaml_text = text[open_match.end() : close_match.start()]
+    # See _CSAFE_MAX_YAML_CHARS's comment: the fast C loader is only safe
+    # below this length, so anything larger — already shaped unlike any real
+    # frontmatter block — takes the slower but crash-proof pure-Python path.
+    loader = yaml.SafeLoader if len(yaml_text) > _CSAFE_MAX_YAML_CHARS else _FAST_YAML_LOADER
     try:
-        data = yaml.safe_load(yaml_text)
+        # S506 (bandit's "unsafe Loader") is a false positive here: `loader`
+        # is always yaml.SafeLoader or yaml.CSafeLoader — its safe,
+        # C-accelerated equivalent — never yaml.Loader/FullLoader/
+        # UnsafeLoader. The linter can't see that from a variable.
+        data = yaml.load(yaml_text, Loader=loader)  # noqa: S506
     except (yaml.YAMLError, RecursionError):
         # RecursionError alongside YAMLError: deeply nested (but alias-free,
         # so to_json_safe's own guards never see it) YAML can exhaust
-        # PyYAML's own composer stack before it ever returns a value.
+        # PyYAML's own composer stack before it ever returns a value. Only
+        # yaml.SafeLoader (pure Python) can raise this cleanly — see above.
         return {}, text
 
     if not isinstance(data, dict):
