@@ -33,7 +33,7 @@ router = APIRouter(tags=["inbox"], dependencies=[Depends(require_token)])
     operation_id="createInboxNote",
     summary="Create a Markdown note in 00_Inbox/ChatGPT",
 )
-async def create_note(
+def create_note(
     request: Request,
     body: InboxNoteCreateRequest,
     application: ApplicationDep,
@@ -55,7 +55,7 @@ async def create_note(
     operation_id="appendInboxNote",
     summary="Append Markdown to an existing note in 00_Inbox/ChatGPT",
 )
-async def append_note(
+def append_note(
     request: Request,
     body: InboxNoteAppendRequest,
     application: ApplicationDep,

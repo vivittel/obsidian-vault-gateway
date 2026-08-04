@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+import anyio
+from fastapi import APIRouter, Depends, Query, Request
 
 from app.application import ApplicationDep
 from app.auth import require_token
@@ -20,6 +22,7 @@ router = APIRouter(tags=["search"], dependencies=[Depends(require_token)])
     summary="Search the vault by file name, title, tags, headings and body",
 )
 async def search(
+    request: Request,
     application: ApplicationDep,
     q: Annotated[str | None, Query(description="Free-text search term.")] = None,
     folder: Annotated[
@@ -35,4 +38,13 @@ async def search(
         str | None, Query(description="Opaque pagination token from a previous response.")
     ] = None,
 ) -> SearchResponse:
-    return application.search_notes(query=q, folder=folder, tags=tags, limit=limit, cursor=cursor)
+    # A full-vault scan (app/services/search_service.py) — run in a worker
+    # thread through a dedicated limiter (app/main.py) instead of as a plain
+    # `def` endpoint sharing FastAPI's default thread pool, so this can never
+    # starve /health or any other lightweight REST request of a thread.
+    return await anyio.to_thread.run_sync(
+        partial(
+            application.search_notes, query=q, folder=folder, tags=tags, limit=limit, cursor=cursor
+        ),
+        limiter=request.app.state.vault_scan_limiter,
+    )
