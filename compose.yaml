@@ -39,6 +39,12 @@ services:
 
     read_only: true
 
+    # A last line of defence, not a substitute for the app-level bounds
+    # (frontmatter conversion budget, per-request size caps) that keep
+    # normal operation far under this. See README's "Container memory
+    # limit" section for the measurement behind this value.
+    mem_limit: 512m
+
     tmpfs:
       - /tmp:size=64m
 
