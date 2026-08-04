@@ -465,3 +465,18 @@ def test_sdk_per_request_session_noise_is_below_info(rendered: Rendered) -> None
     lines = rendered()
     assert not [line for line in lines if "Terminating session" in line]
     assert _line_with(lines, "session manager started")
+
+
+def test_auth_disabled_warning_renders_with_detail_and_no_secret(rendered: Rendered) -> None:
+    """app/main.py's startup WARNING for AUTH_ENABLED=false — visible in
+    ``docker logs`` and carrying no token or host information, only the fixed
+    event name and a static detail string.
+    """
+    logging.getLogger("obsidian_gateway").warning(
+        "authentication_disabled",
+        extra={"detail": "AUTH_ENABLED=false: no bearer token is required for REST or MCP"},
+    )
+
+    line = _line_with(rendered(), "authentication_disabled")
+    assert line.split()[1] == "WARN"
+    assert "detail=AUTH_ENABLED=false:" in line

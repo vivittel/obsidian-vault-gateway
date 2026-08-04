@@ -38,13 +38,23 @@ _UNAUTHORIZED_MESSAGE = "A valid bearer token is required."
 
 
 class McpBearerAuthMiddleware:
-    """Reject any HTTP request to the wrapped MCP app without a valid bearer token."""
+    """Reject any HTTP request to the wrapped MCP app without a valid bearer token.
+
+    A no-op when ``Settings.auth_enabled`` is false (``AUTH_ENABLED=false``):
+    every request is passed straight through without inspecting the
+    Authorization header at all.
+    """
 
     def __init__(self, app) -> None:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        settings = get_settings()
+        if not settings.auth_enabled:
             await self.app(scope, receive, send)
             return
 
@@ -55,7 +65,7 @@ class McpBearerAuthMiddleware:
             await self._reject(send, reason="missing_or_non_bearer_authorization_header")
             return
 
-        if not verify_bearer_token(provided=credential, expected=get_settings().api_token):
+        if not verify_bearer_token(provided=credential, expected=settings.api_token):
             await self._reject(send, reason="bearer_token_mismatch")
             return
 
