@@ -14,6 +14,7 @@ import logging
 
 import pytest
 from fastapi.testclient import TestClient
+from mcp.server.mcpserver import MCPServer
 
 pytestmark = pytest.mark.anyio
 
@@ -266,3 +267,104 @@ def test_mcp_requests_never_produce_a_rest_access_log_entry(
 
     access_records = [r for r in caplog.records if r.name == "obsidian_gateway.access"]
     assert access_records == []
+
+
+# --- AUTH_ENABLED=false: the middleware passes every request straight
+# through, without inspecting Authorization at all --------------------------
+#
+# The shared mcp_client fixture's session manager can only ever run once, with
+# the Settings it already started with (see conftest.py's mcp_client
+# docstring), so these use an independent MCPServer/Settings pair instead —
+# the same pattern tests/test_mcp_lifespan.py uses for lifecycle mechanics.
+
+
+async def _send_tools_list(app, headers: dict[bytes, bytes]) -> tuple[int, dict]:
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"accept", b"application/json, text/event-stream"),
+            *headers.items(),
+        ],
+        "client": ("127.0.0.1", 1234),
+        "server": ("testserver", 80),
+        "scheme": "http",
+        "root_path": "",
+    }
+    body = json.dumps(_tools_list_body()).encode("utf-8")
+    sent_once = False
+
+    async def receive() -> dict:
+        nonlocal sent_once
+        if sent_once:
+            return {"type": "http.disconnect"}
+        sent_once = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    events: list[dict] = []
+
+    async def send(message: dict) -> None:
+        events.append(message)
+
+    await app(scope, receive, send)
+
+    status = next(m["status"] for m in events if m["type"] == "http.response.start")
+    payload_bytes = b"".join(m["body"] for m in events if m["type"] == "http.response.body")
+    return status, json.loads(payload_bytes)
+
+
+@pytest.fixture
+def disabled_auth_app(monkeypatch: pytest.MonkeyPatch):
+    """McpBearerAuthMiddleware checks the process-wide ``get_settings()``
+    directly (see app/mcp_auth.py) rather than whatever ``Settings`` instance
+    ``build_mcp_transport`` itself was called with — so disabling auth for
+    this fresh, independent ``MCPServer`` means driving that same cached
+    singleton via the environment, exactly as it would be in production.
+    """
+    from app.config import get_settings
+    from app.mcp_server import build_mcp_transport
+
+    monkeypatch.setenv("API_TOKEN", "x" * 16)
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "testserver")
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    get_settings.cache_clear()
+
+    fresh_mcp = MCPServer(name="mcp-auth-disabled-test")
+    app = build_mcp_transport(fresh_mcp, get_settings())
+
+    yield fresh_mcp, app
+
+    get_settings.cache_clear()
+
+
+async def test_auth_disabled_allows_missing_authorization_header(disabled_auth_app) -> None:
+    fresh_mcp, app = disabled_auth_app
+    async with fresh_mcp.session_manager.run():
+        status, payload = await _send_tools_list(app, headers={})
+    assert status == 200
+    assert payload["result"]["tools"] == []
+
+
+async def test_auth_disabled_allows_wrong_bearer_token(disabled_auth_app) -> None:
+    fresh_mcp, app = disabled_auth_app
+    async with fresh_mcp.session_manager.run():
+        status, payload = await _send_tools_list(
+            app, headers={b"authorization": b"Bearer wrong-token"}
+        )
+    assert status == 200
+    assert payload["result"]["tools"] == []
+
+
+async def test_auth_disabled_allows_malformed_authorization_header(disabled_auth_app) -> None:
+    fresh_mcp, app = disabled_auth_app
+    async with fresh_mcp.session_manager.run():
+        status, payload = await _send_tools_list(
+            app, headers={b"authorization": b"Basic dXNlcjpwYXNz"}
+        )
+    assert status == 200
+    assert payload["result"]["tools"] == []

@@ -40,6 +40,13 @@ transports:
   note content — only vault-relative paths.
 - The Gateway is not exposed to the public internet — reachable only over a
   private LAN or Tailscale address, behind Caddy.
+- Bearer authentication (`API_TOKEN`) is required by default (`AUTH_ENABLED=true`).
+  It may only be disabled (`AUTH_ENABLED=false`) when an equivalent
+  access-control boundary already exists outside the application, e.g. a
+  localhost-only listener. Being on a private LAN or Tailscale tailnet is
+  **not** by itself such a boundary — anyone else with access to that network
+  or tailnet would reach every endpoint unauthenticated. `API_TOKEN` itself
+  stays required either way: it also signs pagination cursors.
 
 MCP and REST call the same `app/application.py` and service functions
 (`app/services/`); neither transport calls the other over HTTP, so they can
@@ -47,8 +54,10 @@ never diverge in behaviour for the same operation.
 
 ## MCP (primary interface)
 
-Endpoint: `/mcp`, Streamable HTTP transport, Bearer token authentication
-(same `API_TOKEN` as REST). Stateless (`stateless_http=True`): no session is
+Endpoint: `/mcp`, Streamable HTTP transport, Bearer authentication by default
+(same `API_TOKEN` as REST; runtime-disableable with `AUTH_ENABLED=false`, see
+Security invariants above and Configuration below). Stateless
+(`stateless_http=True`): no session is
 tracked across requests, so there is nothing for a client to terminate and
 `DELETE /mcp` answers **405** — the status the spec prescribes for a server
 that does not support session termination (asserted in
@@ -180,6 +189,12 @@ any non-MCP client.
 | POST | `/api/v1/inbox/notes` | `createInboxNote` | Bearer |
 | POST | `/api/v1/inbox/notes/append` | `appendInboxNote` | Bearer |
 
+"Bearer" above reflects the default (`AUTH_ENABLED=true`); with
+`AUTH_ENABLED=false` these endpoints accept requests with no Authorization
+header at all. `openapi.json` always advertises Bearer authentication for
+them regardless of `AUTH_ENABLED` — the published API contract is
+intentionally independent of any one deployment's runtime setting.
+
 Full schema: `openapi.json` (regenerate with `scripts/export_openapi.py`
 after changing any router/model), or `GET /docs` on a running instance.
 
@@ -206,6 +221,13 @@ openssl rand -hex 32   # use the output as API_TOKEN
 
 See `.env.example` for every variable. Required for a real deployment:
 `API_TOKEN`, `MCP_ALLOWED_HOSTS`, `VAULT_HOST_PATH` / `INBOX_HOST_PATH`.
+
+`AUTH_ENABLED` (default `true`) gates bearer-token enforcement on both REST
+and MCP; see "Security invariants" above for when `false` is appropriate.
+`API_TOKEN` stays required either way — it also signs pagination cursors.
+Disabling it logs a `WARNING authentication_disabled` line once at startup
+(see Logging below), so a deployment running without auth is always visible
+in `docker logs`.
 
 ## Logging
 

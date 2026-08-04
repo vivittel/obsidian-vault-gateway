@@ -7,6 +7,9 @@ services:
     environment:
       TZ: ${TZ:-Asia/Tokyo}
       API_TOKEN: ${API_TOKEN}
+      # Keep true unless an equivalent access-control boundary already exists
+      # outside this container. See .env.example.
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
       # Streamable HTTP DNS-rebinding allowlist (U2) — must include whatever
       # Host header Caddy forwards, e.g. obsidian-api.example.com. See
       # .env.example.

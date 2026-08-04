@@ -41,7 +41,14 @@ def verify_bearer_token(*, provided: str, expected: str) -> bool:
 
 
 async def require_token(settings: SettingsDep, credentials: CredentialsDep) -> None:
-    """Reject the request unless it carries the configured bearer token."""
+    """Reject the request unless it carries the configured bearer token.
+
+    A no-op when ``settings.auth_enabled`` is false (``AUTH_ENABLED=false``):
+    the Authorization header, if any, is not even inspected in that case.
+    """
+    if not settings.auth_enabled:
+        return
+
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise UnauthorizedError(log_detail="missing or non-bearer Authorization header")
 

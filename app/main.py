@@ -161,6 +161,16 @@ _mcp_app_with_auth = build_mcp_transport(mcp, get_settings())
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: Starlette) -> AsyncIterator[None]:
+    if not get_settings().auth_enabled:
+        # Logged here rather than at import time: this only fires once per
+        # actual process/worker startup, never for a test that merely imports
+        # this module, and only after app/mcp_server.py's configure_logging()
+        # has already installed the formatter that renders it.
+        logger.warning(
+            "authentication_disabled",
+            extra={"detail": "AUTH_ENABLED=false: no bearer token is required for REST or MCP"},
+        )
+
     async with contextlib.AsyncExitStack() as stack:
         # rest_app currently registers no startup/shutdown behaviour of its
         # own, but entering its lifespan here — rather than skipping it — is

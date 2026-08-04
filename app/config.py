@@ -34,7 +34,20 @@ class Settings(BaseSettings):
 
     api_token: str = Field(
         min_length=16,
-        description="Bearer token required by every endpoint except /api/v1/health.",
+        description=(
+            "Secret used to sign pagination cursors, and — when AUTH_ENABLED=true "
+            "(the default) — the bearer token required by every endpoint except "
+            "/api/v1/health. Always required, even if AUTH_ENABLED=false."
+        ),
+    )
+
+    auth_enabled: bool = Field(
+        default=True,
+        description=(
+            "Require bearer authentication for REST and MCP. Disable only when an "
+            "equivalent access-control boundary already exists outside the "
+            "application (e.g. a localhost-only listener)."
+        ),
     )
 
     mcp_allowed_hosts: str = Field(
@@ -72,9 +85,13 @@ class Settings(BaseSettings):
     tz: str = Field(default="Asia/Tokyo", description="Timezone for modified_at timestamps.")
     log_level: str = Field(default="INFO")
 
-    @field_validator("api_token")
+    @field_validator("api_token", mode="before")
     @classmethod
     def _strip_token(cls, value: str) -> str:
+        # mode="before" so min_length is enforced on the stripped value —
+        # otherwise a whitespace-padded value could pass the length check on
+        # its raw (unstripped) form and then collapse to a much shorter real
+        # token, e.g. "                short".
         return value.strip()
 
     @field_validator("mcp_allowed_hosts")
