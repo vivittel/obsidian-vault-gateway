@@ -37,6 +37,33 @@ _CLOSE_DELIMITER_RE = re.compile(r"^---[ \t]*\r?\n", re.MULTILINE)
 _HEADING_RE = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
 _TAG_SPLIT_RE = re.compile(r"[,\s]+")
 
+# to_json_safe()'s conversion budget. YAML aliases let a handful of bytes
+# describe a structure that shares the same sub-object many times over
+# (`a: &a [1,2]` / `b: *a`); to_json_safe rebuilds it without that sharing, so
+# an aliased frontmatter block that is fine for yaml.safe_load can still blow
+# up here. A 402-byte note with eight-way aliases nested nine deep exhausted a
+# 2 GiB budget in 11 seconds before these limits existed. Total characters (not
+# a per-string cap) is what closes the "many medium strings" gap a per-node or
+# per-string limit alone would leave: the three limits are independent, so a
+# per-string cap would still let node-count × string-length multiply past any
+# sane bound.
+MAX_JSON_SAFE_DEPTH = 64
+MAX_JSON_SAFE_NODES = 10_000
+MAX_JSON_SAFE_TOTAL_CHARS = 1_000_000
+
+
+class FrontmatterBudgetExceededError(ValueError):
+    """to_json_safe's output would exceed the conversion budget."""
+
+
+class FrontmatterCycleError(ValueError):
+    """to_json_safe found a YAML alias that refers back to its own ancestor.
+
+    ``a: &a [*a]`` is valid YAML that PyYAML happily parses into a list that
+    contains itself — not just repeated sharing, an actual cycle. Rebuilding
+    that without cycle detection overflows Python's call stack.
+    """
+
 
 class ParsedNote(NamedTuple):
     metadata: dict[str, Any]
@@ -84,7 +111,10 @@ def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     yaml_text = text[open_match.end() : close_match.start()]
     try:
         data = yaml.safe_load(yaml_text)
-    except yaml.YAMLError:
+    except (yaml.YAMLError, RecursionError):
+        # RecursionError alongside YAMLError: deeply nested (but alias-free,
+        # so to_json_safe's own guards never see it) YAML can exhaust
+        # PyYAML's own composer stack before it ever returns a value.
         return {}, text
 
     if not isinstance(data, dict):
@@ -138,20 +168,89 @@ def normalise_tags(value: Any) -> list[str]:
     return tags
 
 
+class _ConversionBudget:
+    """Running totals for one :func:`to_json_safe` call, shared across recursion."""
+
+    __slots__ = ("nodes", "chars")
+
+    def __init__(self) -> None:
+        self.nodes = 0
+        self.chars = 0
+
+    def charge_node(self) -> None:
+        self.nodes += 1
+        if self.nodes > MAX_JSON_SAFE_NODES:
+            raise FrontmatterBudgetExceededError(f"more than {MAX_JSON_SAFE_NODES} output nodes")
+
+    def charge_chars(self, count: int) -> None:
+        self.chars += count
+        if self.chars > MAX_JSON_SAFE_TOTAL_CHARS:
+            raise FrontmatterBudgetExceededError(
+                f"more than {MAX_JSON_SAFE_TOTAL_CHARS} output characters"
+            )
+
+
 def to_json_safe(value: Any) -> Any:
     """Convert parsed YAML into something JSON can represent.
 
     YAML gives back ``date``/``datetime`` objects and can produce non-finite
     floats; both would otherwise break serialisation or emit invalid JSON.
+
+    Bounded by :data:`MAX_JSON_SAFE_NODES`/:data:`MAX_JSON_SAFE_TOTAL_CHARS`
+    (raises :class:`FrontmatterBudgetExceededError`) and by cycle detection (raises
+    :class:`FrontmatterCycleError`) — see this module's docstring above those
+    constants. Callers that want the read path's usual "malformed frontmatter
+    degrades to an empty dict" behaviour must catch both themselves; this
+    function only ever returns a fully-converted value or raises.
     """
+    return _to_json_safe(value, budget=_ConversionBudget(), depth=0, active=set())
+
+
+def _to_json_safe(value: Any, *, budget: _ConversionBudget, depth: int, active: set[int]) -> Any:
+    budget.charge_node()
+    if depth > MAX_JSON_SAFE_DEPTH:
+        raise FrontmatterBudgetExceededError(f"more than {MAX_JSON_SAFE_DEPTH} levels deep")
+
     if value is None or isinstance(value, (str, bool, int)):
+        if isinstance(value, str):
+            budget.charge_chars(len(value))
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else str(value)
     if isinstance(value, (dt.datetime, dt.date, dt.time)):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {str(key): to_json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [to_json_safe(item) for item in value]
-    return str(value)
+        text = value.isoformat()
+        budget.charge_chars(len(text))
+        return text
+
+    if isinstance(value, (dict, list, tuple, set)):
+        # Containers only: interning and the small-int cache make id() on a
+        # str/int meaningless for cycle detection, and YAML aliases can only
+        # ever make a container refer back to itself in the first place.
+        object_id = id(value)
+        if object_id in active:
+            raise FrontmatterCycleError("frontmatter contains a cyclic YAML alias")
+        active.add(object_id)
+        try:
+            if isinstance(value, dict):
+                result: dict[str, Any] = {}
+                for key, item in value.items():
+                    budget.charge_node()
+                    key_text = str(key)
+                    budget.charge_chars(len(key_text))
+                    result[key_text] = _to_json_safe(
+                        item, budget=budget, depth=depth + 1, active=active
+                    )
+                return result
+            return [
+                _to_json_safe(item, budget=budget, depth=depth + 1, active=active)
+                for item in value
+            ]
+        finally:
+            # A shared (non-cyclic) alias may legitimately reappear in a
+            # later sibling branch — only remove it once this branch is
+            # done, so re-use elsewhere in the tree is not misread as a cycle.
+            active.discard(object_id)
+
+    text = str(value)
+    budget.charge_chars(len(text))
+    return text

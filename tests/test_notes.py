@@ -198,3 +198,53 @@ def test_note_service_response_never_contains_absolute_path(vault_root: Path) ->
         timezone=TOKYO,
     )
     assert str(vault_root) not in response.model_dump_json()
+
+
+# Frontmatter that is too expensive or too cyclic for to_json_safe to convert
+# degrades to no frontmatter, the same as unparseable YAML — the note itself
+# is still readable. See app/services/markdown_parser.py's budget/cycle
+# guards and their unit tests in tests/test_markdown_parser.py.
+
+
+def _write_alias_bomb_note(vault_root: Path, name: str, frontmatter: str) -> None:
+    (vault_root / name).write_text(f"---\n{frontmatter}\n---\n\nBody text.\n", encoding="utf-8")
+
+
+def test_note_service_degrades_exponential_alias_frontmatter_to_empty(vault_root: Path) -> None:
+    lines = ["a0: &a0 x"]
+    for i in range(1, 10):
+        refs = ",".join([f"*a{i - 1}"] * 8)
+        lines.append(f"a{i}: &a{i} [{refs}]")
+    _write_alias_bomb_note(vault_root, "alias-bomb.md", "\n".join(lines))
+
+    response = note_service.read_note(
+        "alias-bomb.md", read_root=vault_root, max_note_bytes=1_048_576, timezone=TOKYO
+    )
+    assert response.frontmatter == {}
+    assert "Body text." in response.content
+
+
+def test_note_service_degrades_cyclic_alias_frontmatter_to_empty(vault_root: Path) -> None:
+    _write_alias_bomb_note(vault_root, "alias-cycle.md", "a: &a [*a]")
+
+    response = note_service.read_note(
+        "alias-cycle.md", read_root=vault_root, max_note_bytes=1_048_576, timezone=TOKYO
+    )
+    assert response.frontmatter == {}
+    assert "Body text." in response.content
+
+
+def test_read_note_alias_bomb_via_http_degrades_instead_of_500(
+    client: TestClient, auth_headers: dict[str, str], vault_root: Path
+) -> None:
+    lines = ["a0: &a0 x"]
+    for i in range(1, 10):
+        refs = ",".join([f"*a{i - 1}"] * 8)
+        lines.append(f"a{i}: &a{i} [{refs}]")
+    _write_alias_bomb_note(vault_root, "alias-bomb-http.md", "\n".join(lines))
+
+    response = client.get(
+        "/api/v1/notes", params={"path": "alias-bomb-http.md"}, headers=auth_headers
+    )
+    assert response.status_code == 200
+    assert response.json()["frontmatter"] == {}
