@@ -268,6 +268,25 @@ copied into the image — it is bind-mounted at runtime. The container's own
 port (8000) is never published to the host; only Caddy, on the existing
 `PROXY_NETWORK` Docker network, reaches it.
 
+### Container memory limit
+
+`compose.yaml` sets `mem_limit: 512m`. This is a last line of defence, not
+a substitute for the app-level bounds that keep normal operation far under
+it (the frontmatter conversion budget in `app/services/markdown_parser.py`,
+per-request size caps) — it exists in case one of those bounds turns out to
+be wrong, or a future change adds an unbounded path.
+
+512 MiB is an initial default, not a measured ceiling for every deployment:
+against a synthetic 3000-note vault, this process's steady-state RSS after
+importing and running several full-vault searches was about 78 MiB, leaving
+roughly 6x headroom. A vault with unusually large notes, or a search whose
+result set is unusually large, could use more. If the container is OOM
+killed, do not simply raise the limit — first check the log for which
+request was in flight, how large the vault/notes involved are, and how many
+requests were running concurrently (`VAULT_SCAN_CONCURRENCY` in
+`app/main.py` bounds full-vault scans to 2 at a time); raise the limit only
+once that points at a real, expected memory need rather than a leak.
+
 > **Not verified in this repository's automated tests.** The development
 > environment this code was written in has no Docker installed, so
 > `docker compose config`, the container-permission checks below, and the
@@ -349,6 +368,12 @@ docker compose exec obsidian-api sh -c '
 
 Expect: a non-root uid/gid, the `/vault-ro` write to fail, and the
 `/vault-write/inbox` write/remove to succeed.
+
+**Create mode policy**: a newly created note (`create_inbox_note` /
+`POST /api/v1/inbox/notes`) is always written with mode `0o644` — matching
+the mode an ordinary note in the vault has — regardless of the container
+process's umask. An appended-to note instead keeps whatever mode it already
+had before the append (see below); append never changes a note's mode.
 
 **Append and ownership** (`docs/adr/0003-allow-os-replace-for-inbox-append.md`):
 `append_inbox_note` uses `os.replace()`, which preserves the note's file

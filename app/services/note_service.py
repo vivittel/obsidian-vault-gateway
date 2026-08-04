@@ -15,7 +15,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.models import NoteResponse
-from app.services.markdown_parser import parse_note, read_note_text, to_json_safe
+from app.services.markdown_parser import (
+    FrontmatterBudgetExceededError,
+    FrontmatterCycleError,
+    parse_note,
+    read_note_text,
+    to_json_safe,
+)
 from app.services.path_security import resolve_read_path
 
 
@@ -40,11 +46,20 @@ def read_note(
     stem = note.relative.rsplit("/", 1)[-1].removesuffix(".md")
     parsed = parse_note(text, fallback_title=stem)
 
+    try:
+        frontmatter = to_json_safe(parsed.metadata)
+    except (FrontmatterBudgetExceededError, FrontmatterCycleError, RecursionError):
+        # Same degradation as unparseable YAML (markdown_parser.py's
+        # _split_frontmatter): a note whose frontmatter is too expensive or
+        # too cyclic to convert is treated as having none, not as an error —
+        # the body is still perfectly readable.
+        frontmatter = {}
+
     return NoteResponse(
         id=note.relative,
         path=note.relative,
         title=parsed.title,
-        frontmatter=to_json_safe(parsed.metadata),
+        frontmatter=frontmatter,
         content=parsed.body,
         modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=timezone),
         truncated=truncated,

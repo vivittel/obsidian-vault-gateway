@@ -236,7 +236,6 @@ class GatewayApplication:
             read_root=self.settings.read_root,
             top_tags_limit=top_tags_limit,
             timezone=self.settings.timezone,
-            max_note_bytes=self.settings.max_note_size_bytes,
         )
         return VaultSummaryResponse(
             note_count=stats.note_count,

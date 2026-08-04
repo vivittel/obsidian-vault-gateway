@@ -8,6 +8,7 @@ mounting ``/mcp`` itself is a later slice (S6, tests/test_mcp_protocol.py).
 from __future__ import annotations
 
 import logging
+import multiprocessing
 from datetime import datetime
 from pathlib import Path
 
@@ -483,6 +484,39 @@ async def test_append_inbox_note_rejects_path_without_leaking_internals(
     assert api_token not in message
     assert "Errno" not in message
     assert "repr" not in message.lower()
+
+
+async def test_append_inbox_note_maps_lock_timeout_to_mcp_error(
+    env: None, inbox_root: Path, monkeypatch, vault_root: Path, hold_flock_in_subprocess
+) -> None:
+    from app.services import inbox_service
+
+    monkeypatch.setattr(inbox_service, "_LOCK_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(inbox_service, "_LOCK_POLL_INTERVAL_SECONDS", 0.02)
+
+    (inbox_root / "McpLocked.md").write_text("original\n", encoding="utf-8")
+    lock_path = str(inbox_root / ".append.lock")
+
+    ctx = multiprocessing.get_context("spawn")
+    acquired = ctx.Event()
+    holder = ctx.Process(target=hold_flock_in_subprocess, args=(lock_path, 5.0, acquired))
+    holder.start()
+    try:
+        assert acquired.wait(timeout=5), "holder process never acquired the lock"
+        with pytest.raises(MCPError) as excinfo:
+            await mcp.call_tool(
+                "append_inbox_note",
+                {"path": "00_Inbox/ChatGPT/McpLocked.md", "content": "x\n"},
+            )
+    finally:
+        holder.terminate()
+        holder.join(timeout=5)
+
+    assert excinfo.value.data == {"code": "INBOX_LOCK_TIMEOUT"}
+    message = excinfo.value.message
+    assert str(vault_root) not in message
+    assert "Errno" not in message
+    assert ".append.lock" not in message
 
 
 # --- logging: never leak token / query / path / content / frontmatter --------

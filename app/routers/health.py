@@ -16,5 +16,5 @@ router = APIRouter(tags=["health"])
     operation_id="getHealth",
     summary="Report whether the vault mounts are usable",
 )
-async def get_health(application: ApplicationDep) -> HealthResponse:
+def get_health(application: ApplicationDep) -> HealthResponse:
     return application.health()

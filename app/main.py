@@ -29,6 +29,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+import anyio
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -101,6 +102,29 @@ async def handle_unexpected_error(_request: Request, _exc: Exception) -> JSONRes
 
 rest_app.add_middleware(AccessLogMiddleware)
 rest_app.add_middleware(RequestSizeLimitMiddleware)
+
+# search and vault/summary walk and read every note in the vault — on a
+# large, Japanese-heavy vault, seconds of CPU-bound work (NFKC folding, YAML
+# parsing), all of it holding the GIL. Both run in a worker thread so they no
+# longer block the event loop (app/routers/search.py, app/routers/vault.py),
+# but sharing anyio's default limiter with every other synchronous REST
+# handler would let up to 40 of these run "concurrently" for no throughput
+# gain — just GIL thrashing and up to 40x peak memory — while also starving
+# that pool for /health and everything else. A small, dedicated limiter
+# isolates vault scans instead: passing limiter=... to anyio.to_thread.run_sync
+# replaces the default limiter for that call rather than adding to it, so a
+# vault scan waiting on VAULT_SCAN_CONCURRENCY never consumes one of the
+# default pool's 40 tokens. A fixed constant, not a Settings field: this has
+# no deployment-specific value to tune, only a test-specific one (tests
+# monkeypatch rest_app.state.vault_scan_limiter directly).
+#
+# Stored on rest_app.state rather than a bare module global so a future
+# second app instance (a script, a different mount) never shares it by
+# accident — request.app resolves to rest_app for every request reaching
+# these routers, since Starlette's own __call__ overwrites scope["app"] with
+# self on every ASGI entry, including a mounted sub-application's.
+VAULT_SCAN_CONCURRENCY = 2
+rest_app.state.vault_scan_limiter = anyio.CapacityLimiter(VAULT_SCAN_CONCURRENCY)
 
 rest_app.include_router(health.router, prefix=API_PREFIX)
 rest_app.include_router(search.router, prefix=API_PREFIX)

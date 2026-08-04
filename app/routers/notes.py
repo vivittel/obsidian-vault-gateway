@@ -29,7 +29,7 @@ router = APIRouter(tags=["notes"], dependencies=[Depends(require_token)])
     operation_id="readNote",
     summary="Read a note by its vault-relative path",
 )
-async def read_note(
+def read_note(
     request: Request,
     application: ApplicationDep,
     path: Annotated[

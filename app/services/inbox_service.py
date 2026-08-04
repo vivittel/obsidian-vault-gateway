@@ -28,10 +28,12 @@ host-side tool such as LiveSync) touches the same file mid-operation. See
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 import secrets
 import stat
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +43,7 @@ import yaml
 
 from app.exceptions import (
     FileTooLargeError,
+    InboxLockTimeoutError,
     InternalError,
     InvalidFileTypeError,
     InvalidPathError,
@@ -56,6 +59,32 @@ MAX_SEQUENCE_ATTEMPTS = 100
 
 _LOCK_FILE_NAME = ".append.lock"
 _READ_CHUNK_SIZE = 1024 * 1024
+
+# Access-control policy, not an incidental default: the vault is a bind
+# mount shared with the host's own Obsidian (a different uid than this
+# container's gateway user), and every other note in it is ordinarily
+# 0o644. A created note keeps that policy; append instead preserves
+# whatever mode the note it is appending to already has (see
+# append_inbox_note's mode=stat.S_IMODE(before.st_mode) below) rather than
+# overriding it.
+_CREATED_NOTE_MODE = 0o644
+
+# How long append() waits for the inbox-wide lock before giving up. A plain
+# LOCK_EX blocks forever — fine when every holder releases promptly, but a
+# stuck request (or, before REST handlers ran in a worker thread, one simply
+# doing its own slow disk I/O) would otherwise hang every later append with
+# no client-visible error. Module constants rather than a Settings field:
+# nothing here needs tuning per deployment, only per test (tests monkeypatch
+# these directly).
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_INTERVAL_SECONDS = 0.05
+
+# EAGAIN and EWOULDBLOCK are the same value on Linux; POSIX also permits
+# flock() to signal contention with EACCES, which BlockingIOError alone does
+# not catch (BlockingIOError maps only EAGAIN/EWOULDBLOCK/EALREADY/
+# EINPROGRESS — verified against the installed CPython's OSError subclass
+# table), so contention is matched on errno directly instead.
+_LOCK_RETRY_ERRNOS = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
 
 
 @dataclass(frozen=True)
@@ -89,20 +118,6 @@ def _render_note(*, content: str, frontmatter: dict[str, FrontmatterValue] | Non
     return f"---\n{yaml_block}---\n\n{body}"
 
 
-def _write_temp_file(inbox_root: Path, text: str) -> Path:
-    temp_path = inbox_root / f".tmp-{secrets.token_hex(8)}"
-    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except OSError:
-        temp_path.unlink(missing_ok=True)
-        raise
-    return temp_path
-
-
 def create_inbox_note(
     *,
     inbox_root: Path,
@@ -114,7 +129,14 @@ def create_inbox_note(
     stem = sanitise_title(title)
     text = _render_note(content=content, frontmatter=frontmatter)
 
-    temp_path = _write_temp_file(inbox_root, text)
+    # _write_temp_bytes applies _CREATED_NOTE_MODE before this function ever
+    # links the temp file into place, so the linked destination is 0o644
+    # from the instant it first appears under its real name — never a
+    # window where it briefly exists at some other mode. text is already
+    # LF-only and newline-normalised (_render_note); no newline translation
+    # is wanted here, so this encodes directly rather than going through a
+    # text-mode file object.
+    temp_path = _write_temp_bytes(inbox_root, text.encode("utf-8"), mode=_CREATED_NOTE_MODE)
     try:
         for sequence in range(1, MAX_SEQUENCE_ATTEMPTS + 1):
             file_name = note_file_name(stem, sequence)
@@ -146,6 +168,56 @@ def _fsync_directory(directory: Path) -> None:
         os.close(fd)
 
 
+def _write_temp_bytes(inbox_root: Path, data: bytes, *, mode: int) -> Path:
+    """Write ``data`` to a hidden temp file inside ``inbox_root``, fsynced,
+    with ``mode`` applied before either caller below makes it visible under
+    a real name.
+
+    Shared by both operations: create (:func:`create_inbox_note`) links this
+    temp file into place with ``mode=_CREATED_NOTE_MODE``; append
+    (:func:`append_inbox_note`) ``os.replace()``s it onto the target with
+    ``mode=`` the target's own preserved mode. The temp file starts at
+    0o600 (``os.open``'s own mode argument) and is always cleaned up,
+    including when the write itself fails.
+    """
+    temp_path = inbox_root / f".tmp-{secrets.token_hex(8)}"
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return temp_path
+
+
+def _acquire_exclusive_lock(fd: int) -> None:
+    """Block on an exclusive flock, but never past ``_LOCK_TIMEOUT_SECONDS``.
+
+    The deadline is set before the first attempt, not after the first
+    failure, so the actual wait never exceeds the configured timeout by more
+    than one poll interval. Raises :class:`InboxLockTimeoutError` — with no
+    path, fd, or inode in its message (AGENTS.md: never expose absolute host
+    paths in anything client-visible) — rather than blocking forever.
+    """
+    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if exc.errno not in _LOCK_RETRY_ERRNOS:
+                raise
+            if time.monotonic() >= deadline:
+                raise InboxLockTimeoutError(
+                    log_detail="timed out waiting for the inbox append lock"
+                ) from exc
+            time.sleep(_LOCK_POLL_INTERVAL_SECONDS)
+
+
 def _open_append_lock(inbox_root: Path) -> int:
     """Open (or create) the inbox-wide append lock and hold an exclusive flock.
 
@@ -171,7 +243,7 @@ def _open_append_lock(inbox_root: Path) -> int:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise InvalidFileTypeError(log_detail="append lock is not a regular file")
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        _acquire_exclusive_lock(fd)
     except BaseException:
         os.close(fd)
         raise
@@ -197,21 +269,6 @@ def _append_bytes(content: str, *, existing: bytes, crlf: bool) -> bytes:
     if existing and not existing.endswith(terminator):
         appended = terminator + appended
     return appended
-
-
-def _write_temp_bytes(inbox_root: Path, data: bytes, *, mode: int) -> Path:
-    temp_path = inbox_root / f".tmp-{secrets.token_hex(8)}"
-    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except OSError:
-        temp_path.unlink(missing_ok=True)
-        raise
-    return temp_path
 
 
 def append_inbox_note(
