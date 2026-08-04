@@ -326,15 +326,15 @@ def test_summary_skipped_count_includes_read_failures(
 ) -> None:
     from app.services import vault_service
 
-    original_read = vault_service.markdown_parser.read_note_text
+    original_read = vault_service.markdown_parser.read_frontmatter_text
 
-    def flaky_read(path: Path, *, size_bytes: int, max_bytes: int) -> tuple[str, bool]:
+    def flaky_read(path: Path) -> str | None:
         if path.name == "crlf.md":
             msg = "simulated read failure"
             raise OSError(msg)
-        return original_read(path, size_bytes=size_bytes, max_bytes=max_bytes)
+        return original_read(path)
 
-    monkeypatch.setattr(vault_service.markdown_parser, "read_note_text", flaky_read)
+    monkeypatch.setattr(vault_service.markdown_parser, "read_frontmatter_text", flaky_read)
 
     response = client.get("/api/v1/vault/summary", headers=auth_headers)
     body = response.json()

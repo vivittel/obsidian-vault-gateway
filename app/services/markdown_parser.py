@@ -113,6 +113,57 @@ def read_note_text(path: Path, *, size_bytes: int, max_bytes: int) -> tuple[str,
     return text, truncated
 
 
+# read_frontmatter_text()'s bounds. Real frontmatter is a handful of scalar
+# fields — comfortably under either limit — so this only ever engages for a
+# note already unlike anything a real vault produces, which is then treated
+# the same as having no frontmatter at all (see the function's docstring).
+MAX_FRONTMATTER_READ_CHARS = 64 * 1024
+MAX_FRONTMATTER_READ_LINES = 1000
+
+
+def read_frontmatter_text(path: Path) -> str | None:
+    """Read only a note's leading frontmatter block — the body is never read.
+
+    Returns the block verbatim (including both ``---`` delimiter lines), or
+    ``None`` if the note has none, or has one too large to be real
+    frontmatter (see the module-level bounds above). Raises ``OSError``
+    exactly as :func:`read_note_text` does, rather than catching it, so a
+    caller that already distinguishes "note unreadable" from "note has no
+    frontmatter" (:func:`~app.services.vault_service.summarise_vault`) can
+    keep doing so.
+
+    A bounded, line-by-line streaming read: it stops at the first line that
+    matches the closing delimiter, so a note's body — everything after that
+    line — is never touched. Written for :func:`~app.services.vault_service.
+    summarise_vault`, which used to pay for a full :func:`read_note_text` +
+    :func:`parse_note` of every note in the vault only to keep the tags and
+    discard the rest.
+
+    Shares :data:`_OPEN_DELIMITER_RE`/:data:`_CLOSE_DELIMITER_RE` with
+    :func:`_split_frontmatter`, so both agree on exactly where a block
+    starts and ends for the same note — see
+    ``test_summary_and_full_read_agree_on_frontmatter_boundaries``.
+    """
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        first_line = handle.readline(MAX_FRONTMATTER_READ_CHARS)
+        if not _OPEN_DELIMITER_RE.match(first_line):
+            return None
+
+        lines = [first_line]
+        total_chars = len(first_line)
+        for _ in range(MAX_FRONTMATTER_READ_LINES):
+            line = handle.readline(MAX_FRONTMATTER_READ_CHARS)
+            if not line:
+                return None  # EOF before any closing delimiter was found.
+            total_chars += len(line)
+            if total_chars > MAX_FRONTMATTER_READ_CHARS:
+                return None
+            lines.append(line)
+            if _CLOSE_DELIMITER_RE.match(line):
+                return "".join(lines)
+        return None  # No closing delimiter within MAX_FRONTMATTER_READ_LINES.
+
+
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """Split a leading YAML frontmatter block from the body.
 
@@ -196,6 +247,21 @@ def normalise_tags(value: Any) -> list[str]:
         if tag and tag not in tags:
             tags.append(tag)
     return tags
+
+
+def parse_frontmatter_tags(frontmatter_block: str) -> list[str]:
+    """Parse a frontmatter block (as returned by :func:`read_frontmatter_text`)
+    and return its normalised tags, or ``[]`` if it has none.
+
+    A narrow pairing with :func:`read_frontmatter_text` for
+    :func:`~app.services.vault_service.summarise_vault`, which wants
+    exactly this — not the title, body, or headings :func:`parse_note`
+    also computes. Reuses :func:`_split_frontmatter` rather than
+    re-implementing delimiter/YAML handling, so both this and the full
+    parse path degrade identically on malformed YAML.
+    """
+    metadata, _ = _split_frontmatter(frontmatter_block)
+    return normalise_tags(metadata.get("tags"))
 
 
 class _ConversionBudget:

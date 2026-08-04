@@ -103,7 +103,6 @@ def summarise_vault(
     read_root: Path,
     top_tags_limit: int,
     timezone: ZoneInfo,
-    max_note_bytes: int,
 ) -> VaultStats:
     """Aggregate counts and sizes over the whole vault without exposing any
     note body, title, or absolute path (PHASE2_PLAN section 4).
@@ -115,11 +114,20 @@ def summarise_vault(
     note directly at the vault root still counts toward ``note_count`` and
     ``total_bytes`` but contributes to neither.
 
+    Only frontmatter is ever read — never a note's body — via
+    :func:`~app.services.markdown_parser.read_frontmatter_text`, since tags
+    are the only thing this needs from a note's content. ``total_bytes``
+    comes from :func:`~app.services.path_security.iter_vault_notes`'s own
+    ``stat()`` regardless, so it was never affected by how much of the file
+    gets read.
+
     A note that cannot be read after :func:`iter_vault_notes` already stat'd
     it (e.g. a permission or unlink race) is skipped and counted in
     ``skipped_count`` alongside the walk's own skips, rather than raising —
     matching the read path's general tolerance for a vault that changes out
-    from under a scan.
+    from under a scan. A note that reads fine but simply has no (or no
+    usable) frontmatter is not a failure at all: it is counted normally and
+    contributes no tags, exactly as before.
     """
     walk_stats = WalkStats()
     note_count = 0
@@ -133,9 +141,7 @@ def summarise_vault(
 
     for note in iter_vault_notes(read_root, stats=walk_stats):
         try:
-            text, _ = markdown_parser.read_note_text(
-                note.path, size_bytes=note.stat_result.st_size, max_bytes=max_note_bytes
-            )
+            frontmatter_block = markdown_parser.read_frontmatter_text(note.path)
         except OSError:
             read_failures += 1
             continue
@@ -143,17 +149,16 @@ def summarise_vault(
         note_count += 1
         total_bytes += note.stat_result.st_size
 
-        parent, _, name = note.relative.rpartition("/")
+        parent = note.relative.rpartition("/")[0]
         if parent:
             folders_with_notes.add(parent)
             top_level_counts[parent.split("/", 1)[0]] += 1
 
-        stem = name.removesuffix(".md")
-        parsed = markdown_parser.parse_note(text, fallback_title=stem)
-        for tag in parsed.tags:
-            folded = fold(tag)
-            tag_counts[folded] += 1
-            tag_labels.setdefault(folded, tag)
+        if frontmatter_block is not None:
+            for tag in markdown_parser.parse_frontmatter_tags(frontmatter_block):
+                folded = fold(tag)
+                tag_counts[folded] += 1
+                tag_labels.setdefault(folded, tag)
 
         modified_at = datetime.fromtimestamp(note.stat_result.st_mtime, tz=timezone)
         if last_modified_at is None or modified_at > last_modified_at:

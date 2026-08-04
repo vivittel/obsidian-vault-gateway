@@ -282,3 +282,144 @@ def test_fast_and_safe_loaders_agree_on_cyclic_alias() -> None:
     for loader in (yaml.SafeLoader, _FAST_YAML_LOADER):
         result = yaml.load(cyclic, Loader=loader)  # noqa: S506 - always a safe loader
         assert result["a"][0] is result["a"]
+
+
+# --- read_frontmatter_text / parse_frontmatter_tags -------------------------
+#
+# summarise_vault's bounded, streaming alternative to a full read_note_text +
+# parse_note. The single most important property here is that it agrees with
+# the full parse path on where a frontmatter block starts and ends — a
+# divergence would mean the vault summary's tag counts silently drift from
+# what read_note/search report for the same note.
+
+
+def _write_note(tmp_path, name: str, content: str):
+    path = tmp_path / name
+    path.write_bytes(content.encode("utf-8"))
+    return path
+
+
+def test_read_frontmatter_text_returns_none_when_missing(tmp_path) -> None:
+    from app.services.markdown_parser import read_frontmatter_text
+
+    path = _write_note(tmp_path, "note.md", "# No Frontmatter\n\nBody.\n")
+    assert read_frontmatter_text(path) is None
+
+
+def test_read_frontmatter_text_returns_the_block_verbatim(tmp_path) -> None:
+    from app.services.markdown_parser import parse_frontmatter_tags, read_frontmatter_text
+
+    path = _write_note(
+        tmp_path, "note.md", "---\ntitle: RTX 5070\ntags: [gpu, nvidia]\n---\n\n# Body\n"
+    )
+    block = read_frontmatter_text(path)
+    assert block == "---\ntitle: RTX 5070\ntags: [gpu, nvidia]\n---\n"
+    assert parse_frontmatter_tags(block) == ["gpu", "nvidia"]
+
+
+def test_read_frontmatter_text_handles_crlf(tmp_path) -> None:
+    from app.services.markdown_parser import parse_frontmatter_tags, read_frontmatter_text
+
+    path = tmp_path / "crlf.md"
+    path.write_bytes(b"---\r\ntags: [gpu]\r\n---\r\n\r\nBody.\r\n")
+    block = read_frontmatter_text(path)
+    assert block is not None
+    assert parse_frontmatter_tags(block) == ["gpu"]
+
+
+def test_read_frontmatter_text_rejects_a_bom_prefixed_delimiter(tmp_path) -> None:
+    # Matches _split_frontmatter's own behaviour: text is decoded as plain
+    # "utf-8" (not "utf-8-sig"), so a leading BOM is never stripped and
+    # shifts "---" out of the \A-anchored match on both paths identically.
+    path = tmp_path / "bom.md"
+    path.write_bytes("﻿---\ntags: [gpu]\n---\n\nBody.\n".encode())
+    from app.services.markdown_parser import parse_note, read_frontmatter_text
+
+    assert read_frontmatter_text(path) is None
+    full_text = path.read_text(encoding="utf-8")
+    assert parse_note(full_text, fallback_title="x").tags == []
+
+
+def test_read_frontmatter_text_does_not_treat_ellipsis_as_a_close(tmp_path) -> None:
+    # "..." is a YAML document-end marker in general, but this project's
+    # frontmatter delimiter is specifically "---" (see _CLOSE_DELIMITER_RE) —
+    # a note using "..." to close never finds a match on either path.
+    path = _write_note(tmp_path, "note.md", "---\ntags: [gpu]\n...\n\nBody.\n")
+    from app.services.markdown_parser import parse_note, read_frontmatter_text
+
+    assert read_frontmatter_text(path) is None
+    assert parse_note(path.read_text(encoding="utf-8"), fallback_title="x").tags == []
+
+
+def test_read_frontmatter_text_treats_empty_frontmatter_as_tagless(tmp_path) -> None:
+    from app.services.markdown_parser import parse_frontmatter_tags, read_frontmatter_text
+
+    path = _write_note(tmp_path, "note.md", "---\n---\n\nBody.\n")
+    block = read_frontmatter_text(path)
+    assert block == "---\n---\n"
+    assert parse_frontmatter_tags(block) == []
+
+
+def test_read_frontmatter_text_treats_oversized_block_as_absent(tmp_path) -> None:
+    from app.services.markdown_parser import MAX_FRONTMATTER_READ_CHARS, read_frontmatter_text
+
+    # Well-formed YAML that the full (unbounded) parse path would happily
+    # parse — the cap is a documented tradeoff (a real note's frontmatter
+    # never approaches this size), not a parsing failure.
+    huge_value = "x" * (MAX_FRONTMATTER_READ_CHARS + 1)
+    path = _write_note(tmp_path, "note.md", f"---\ntags: [{huge_value}]\n---\n\nBody.\n")
+    assert read_frontmatter_text(path) is None
+
+
+def test_read_frontmatter_text_treats_too_many_lines_as_absent(tmp_path) -> None:
+    from app.services.markdown_parser import MAX_FRONTMATTER_READ_LINES, read_frontmatter_text
+
+    lines = ["---"] + [f"a{i}: {i}" for i in range(MAX_FRONTMATTER_READ_LINES + 5)] + ["---", ""]
+    path = _write_note(tmp_path, "note.md", "\n".join(lines) + "\nBody.\n")
+    assert read_frontmatter_text(path) is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# No Frontmatter\n\nBody.\n",
+        "---\ntitle: RTX 5070\ntags: [gpu, nvidia]\n---\n\nBody.\n",
+        "---\ntags: gpu, comparison\n---\n\nBody.\n",
+        "---\ntitle: [unterminated\ntags: gpu\n---\n\nBody.\n",
+        "---\n---\n\nBody.\n",
+        "---\ntags: [ＧＰＵ, #nvidia]\n---\n\nBody.\n",
+        "---\ntags:\n  - gpu\n  - nvidia\n---\n\nBody.\n",
+        "---\n...\n\nBody.\n",
+    ],
+    ids=[
+        "no-frontmatter",
+        "list-tags",
+        "string-tags",
+        "malformed-yaml",
+        "empty-frontmatter",
+        "hash-and-fullwidth-tags",
+        "block-list-tags",
+        "ellipsis-only",
+    ],
+)
+def test_summary_and_full_read_agree_on_frontmatter_boundaries(tmp_path, content: str) -> None:
+    """The decisive regression test for this module's two frontmatter
+    reading paths: whatever tags the full parse (parse_note, used by
+    read_note/search) finds for a note, the bounded streaming read
+    (read_frontmatter_text + parse_frontmatter_tags, used by
+    summarise_vault) must find the exact same tags for the exact same note.
+    """
+    from app.services.markdown_parser import (
+        parse_frontmatter_tags,
+        parse_note,
+        read_frontmatter_text,
+    )
+
+    path = _write_note(tmp_path, "note.md", content)
+
+    full_tags = parse_note(content, fallback_title="x").tags
+
+    block = read_frontmatter_text(path)
+    summary_tags = [] if block is None else parse_frontmatter_tags(block)
+
+    assert summary_tags == full_tags
