@@ -15,8 +15,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import hold_flock_in_subprocess
-
 
 def test_create_note_minimal(
     client: TestClient, auth_headers: dict[str, str], inbox_root: Path
@@ -745,6 +743,7 @@ def test_append_times_out_when_lock_held_by_another_process_then_recovers(
     inbox_root: Path,
     monkeypatch,
     vault_root: Path,
+    hold_flock_in_subprocess,
 ) -> None:
     from app.services import inbox_service
 
@@ -806,6 +805,7 @@ def test_append_lock_timeout_is_logged_with_a_reason(
     inbox_root: Path,
     monkeypatch,
     caplog: pytest.LogCaptureFixture,
+    hold_flock_in_subprocess,
 ) -> None:
     from app.services import inbox_service
 

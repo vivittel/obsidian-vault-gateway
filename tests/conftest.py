@@ -169,7 +169,7 @@ def make_symlink_outside(vault_root: Path, target: Path) -> Path:
     return link
 
 
-def hold_flock_in_subprocess(lock_path: str, hold_seconds: float, acquired=None) -> None:
+def _hold_flock_in_subprocess(lock_path: str, hold_seconds: float, acquired=None) -> None:
     """Hold an exclusive flock on ``lock_path`` from a separate process.
 
     Module-level (not a closure) and taking only picklable arguments so
@@ -186,6 +186,19 @@ def hold_flock_in_subprocess(lock_path: str, hold_seconds: float, acquired=None)
     the lock is held — callers must wait on it rather than sleeping a guessed
     duration, since "spawn" starts a fresh interpreter and its startup time
     is not bounded tightly enough for a fixed sleep to be reliable.
+
+    Exposed to test files only via the ``hold_flock_in_subprocess`` fixture
+    below, never via a direct ``from tests.conftest import ...`` — ``tests``
+    has no ``__init__.py``, so that import only resolves when the current
+    directory happens to be on ``sys.path`` (e.g. ``python -m pytest``); a
+    bare ``pytest`` invocation (what CI actually runs) does not add it,
+    and fails with ``ModuleNotFoundError: No module named 'tests'``.
+    pytest's own conftest.py resolution has no such dependency on
+    invocation style, so a fixture that returns this function is not just
+    a style preference — it is what makes both test collection and the
+    spawned subprocess's own re-import of this function (multiprocessing
+    pickles a target by module + qualified name) work the same way
+    regardless of how pytest was invoked.
     """
     import fcntl
     import os
@@ -199,3 +212,11 @@ def hold_flock_in_subprocess(lock_path: str, hold_seconds: float, acquired=None)
         time.sleep(hold_seconds)
     finally:
         os.close(fd)
+
+
+@pytest.fixture
+def hold_flock_in_subprocess():
+    """Fixture indirection for :func:`_hold_flock_in_subprocess` — see that
+    function's docstring for why a direct cross-file import is unsafe here.
+    """
+    return _hold_flock_in_subprocess

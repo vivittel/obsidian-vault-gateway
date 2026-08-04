@@ -19,7 +19,6 @@ from mcp.shared.exceptions import MCPError
 from app.application import GatewayApplication
 from app.config import get_settings
 from app.mcp_server import SERVER_INSTRUCTIONS, mcp
-from tests.conftest import hold_flock_in_subprocess
 
 pytestmark = pytest.mark.anyio
 
@@ -488,7 +487,7 @@ async def test_append_inbox_note_rejects_path_without_leaking_internals(
 
 
 async def test_append_inbox_note_maps_lock_timeout_to_mcp_error(
-    env: None, inbox_root: Path, monkeypatch, vault_root: Path
+    env: None, inbox_root: Path, monkeypatch, vault_root: Path, hold_flock_in_subprocess
 ) -> None:
     from app.services import inbox_service
 
