@@ -4,13 +4,18 @@ from conftest — never a real vault (AGENTS.md).
 
 from __future__ import annotations
 
+import errno
+import multiprocessing
 import os
 import stat
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests.conftest import hold_flock_in_subprocess
 
 
 def test_create_note_minimal(
@@ -588,3 +593,163 @@ def test_append_note_content_is_readable_via_get_notes(
     )
     assert read_response.status_code == 200
     assert "more content" in read_response.json()["content"]
+
+
+# --- append lock timeout: app/services/inbox_service.py's _acquire_exclusive_lock ---
+
+
+def test_acquire_exclusive_lock_retries_eagain_and_eacces_then_succeeds(monkeypatch) -> None:
+    # EACCES is the one flock() can raise on contention that BlockingIOError
+    # alone would not catch (BlockingIOError only maps EAGAIN/EWOULDBLOCK/
+    # EALREADY/EINPROGRESS) — both must be retried, not just EAGAIN.
+    from app.services import inbox_service
+
+    pending_errnos = [errno.EAGAIN, errno.EACCES]
+
+    def fake_flock(_fd: int, _flags: int) -> None:
+        if pending_errnos:
+            raise OSError(pending_errnos.pop(0), "locked")
+
+    monkeypatch.setattr(inbox_service.fcntl, "flock", fake_flock)
+    monkeypatch.setattr(inbox_service, "_LOCK_POLL_INTERVAL_SECONDS", 0.001)
+
+    inbox_service._acquire_exclusive_lock(-1)  # fd is unused by the fake
+    assert pending_errnos == []
+
+
+def test_acquire_exclusive_lock_reraises_unrelated_oserror_immediately(monkeypatch) -> None:
+    from app.exceptions import InboxLockTimeoutError
+    from app.services import inbox_service
+
+    def fake_flock(_fd: int, _flags: int) -> None:
+        raise OSError(errno.EIO, "disk error")
+
+    monkeypatch.setattr(inbox_service.fcntl, "flock", fake_flock)
+    # A large timeout would make this test slow if the retry loop swallowed
+    # EIO instead of re-raising it immediately.
+    monkeypatch.setattr(inbox_service, "_LOCK_TIMEOUT_SECONDS", 30.0)
+
+    with pytest.raises(OSError) as excinfo:
+        inbox_service._acquire_exclusive_lock(-1)
+    assert excinfo.value.errno == errno.EIO
+    assert not isinstance(excinfo.value, InboxLockTimeoutError)
+
+
+def test_acquire_exclusive_lock_times_out_on_sustained_contention(monkeypatch) -> None:
+    from app.exceptions import InboxLockTimeoutError
+    from app.services import inbox_service
+
+    monkeypatch.setattr(inbox_service, "_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(inbox_service, "_LOCK_POLL_INTERVAL_SECONDS", 0.01)
+
+    def always_blocked(_fd: int, _flags: int) -> None:
+        raise OSError(errno.EAGAIN, "locked")
+
+    monkeypatch.setattr(inbox_service.fcntl, "flock", always_blocked)
+
+    start = time.monotonic()
+    with pytest.raises(InboxLockTimeoutError):
+        inbox_service._acquire_exclusive_lock(-1)
+    # Bounded: the deadline is set before the first attempt, so the actual
+    # wait should not run away past the configured timeout.
+    assert time.monotonic() - start < 1.0
+
+
+# --- append lock timeout: end-to-end, against a real cross-process flock ---
+
+
+def test_append_times_out_when_lock_held_by_another_process_then_recovers(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    inbox_root: Path,
+    monkeypatch,
+    vault_root: Path,
+) -> None:
+    from app.services import inbox_service
+
+    monkeypatch.setattr(inbox_service, "_LOCK_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(inbox_service, "_LOCK_POLL_INTERVAL_SECONDS", 0.02)
+
+    note = inbox_root / "LockedOut.md"
+    note.write_text("original\n", encoding="utf-8")
+    lock_path = str(inbox_root / ".append.lock")
+
+    ctx = multiprocessing.get_context("spawn")
+    acquired = ctx.Event()
+    holder = ctx.Process(target=hold_flock_in_subprocess, args=(lock_path, 5.0, acquired))
+    holder.start()
+    try:
+        assert acquired.wait(timeout=5), "holder process never acquired the lock"
+        start = time.monotonic()
+        response = client.post(
+            "/api/v1/inbox/notes/append",
+            json={"path": "00_Inbox/ChatGPT/LockedOut.md", "content": "x\n"},
+            headers=auth_headers,
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        holder.terminate()
+        holder.join(timeout=5)
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["error"]["code"] == "INBOX_LOCK_TIMEOUT"
+    # Bounded by the timeout, not by the holder's 5-second hold.
+    assert elapsed < 3.0
+
+    # No absolute path, fd, or inode leaked into the response.
+    assert str(vault_root) not in response.text
+    assert "Errno" not in response.text
+    assert ".append.lock" not in response.text
+
+    # The target must be untouched, and no temp file left behind, while the
+    # lock was contended.
+    assert note.read_text(encoding="utf-8") == "original\n"
+    leftovers = [p for p in inbox_root.iterdir() if p.name.startswith(".tmp-")]
+    assert leftovers == []
+
+    # Once the holder process has exited (which releases its flock), the
+    # lock must not be stuck: the next append succeeds normally.
+    retry = client.post(
+        "/api/v1/inbox/notes/append",
+        json={"path": "00_Inbox/ChatGPT/LockedOut.md", "content": "second\n"},
+        headers=auth_headers,
+    )
+    assert retry.status_code == 200
+    assert note.read_text(encoding="utf-8") == "original\nsecond\n"
+
+
+def test_append_lock_timeout_is_logged_with_a_reason(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    inbox_root: Path,
+    monkeypatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.services import inbox_service
+
+    monkeypatch.setattr(inbox_service, "_LOCK_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(inbox_service, "_LOCK_POLL_INTERVAL_SECONDS", 0.02)
+
+    (inbox_root / "LoggedTimeout.md").write_text("original\n", encoding="utf-8")
+    lock_path = str(inbox_root / ".append.lock")
+
+    ctx = multiprocessing.get_context("spawn")
+    acquired = ctx.Event()
+    holder = ctx.Process(target=hold_flock_in_subprocess, args=(lock_path, 5.0, acquired))
+    holder.start()
+    try:
+        assert acquired.wait(timeout=5), "holder process never acquired the lock"
+        with caplog.at_level("INFO", logger="obsidian_gateway"):
+            response = client.post(
+                "/api/v1/inbox/notes/append",
+                json={"path": "00_Inbox/ChatGPT/LoggedTimeout.md", "content": "x\n"},
+                headers=auth_headers,
+            )
+    finally:
+        holder.terminate()
+        holder.join(timeout=5)
+
+    assert response.status_code == 503
+    records = [r for r in caplog.records if r.name == "obsidian_gateway"]
+    assert any(getattr(r, "code", None) == "INBOX_LOCK_TIMEOUT" for r in records)

@@ -167,3 +167,35 @@ def make_symlink_outside(vault_root: Path, target: Path) -> Path:
     link = vault_root / "escape.md"
     link.symlink_to(target)
     return link
+
+
+def hold_flock_in_subprocess(lock_path: str, hold_seconds: float, acquired=None) -> None:
+    """Hold an exclusive flock on ``lock_path`` from a separate process.
+
+    Module-level (not a closure) and taking only picklable arguments so
+    ``multiprocessing.get_context("spawn").Process`` can target it directly
+    — "spawn", not the default "fork", because the test process is
+    multi-threaded (pytest-anyio's worker threads) and CPython's own docs
+    warn that fork()ing a multi-threaded process can deadlock. Used by the
+    append lock timeout tests (tests/test_inbox.py, tests/test_mcp_tools.py)
+    to exercise real cross-process flock contention rather than two file
+    descriptors in the same process, which would not catch every platform
+    difference in flock's semantics.
+
+    ``acquired``, if given, is a ``multiprocessing.Event`` set the instant
+    the lock is held — callers must wait on it rather than sleeping a guessed
+    duration, since "spawn" starts a fresh interpreter and its startup time
+    is not bounded tightly enough for a fixed sleep to be reliable.
+    """
+    import fcntl
+    import os
+    import time
+
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if acquired is not None:
+            acquired.set()
+        time.sleep(hold_seconds)
+    finally:
+        os.close(fd)

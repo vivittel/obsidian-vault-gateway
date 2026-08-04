@@ -28,10 +28,12 @@ host-side tool such as LiveSync) touches the same file mid-operation. See
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 import secrets
 import stat
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +43,7 @@ import yaml
 
 from app.exceptions import (
     FileTooLargeError,
+    InboxLockTimeoutError,
     InternalError,
     InvalidFileTypeError,
     InvalidPathError,
@@ -56,6 +59,23 @@ MAX_SEQUENCE_ATTEMPTS = 100
 
 _LOCK_FILE_NAME = ".append.lock"
 _READ_CHUNK_SIZE = 1024 * 1024
+
+# How long append() waits for the inbox-wide lock before giving up. A plain
+# LOCK_EX blocks forever — fine when every holder releases promptly, but a
+# stuck request (or, before REST handlers ran in a worker thread, one simply
+# doing its own slow disk I/O) would otherwise hang every later append with
+# no client-visible error. Module constants rather than a Settings field:
+# nothing here needs tuning per deployment, only per test (tests monkeypatch
+# these directly).
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_INTERVAL_SECONDS = 0.05
+
+# EAGAIN and EWOULDBLOCK are the same value on Linux; POSIX also permits
+# flock() to signal contention with EACCES, which BlockingIOError alone does
+# not catch (BlockingIOError maps only EAGAIN/EWOULDBLOCK/EALREADY/
+# EINPROGRESS — verified against the installed CPython's OSError subclass
+# table), so contention is matched on errno directly instead.
+_LOCK_RETRY_ERRNOS = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
 
 
 @dataclass(frozen=True)
@@ -146,6 +166,30 @@ def _fsync_directory(directory: Path) -> None:
         os.close(fd)
 
 
+def _acquire_exclusive_lock(fd: int) -> None:
+    """Block on an exclusive flock, but never past ``_LOCK_TIMEOUT_SECONDS``.
+
+    The deadline is set before the first attempt, not after the first
+    failure, so the actual wait never exceeds the configured timeout by more
+    than one poll interval. Raises :class:`InboxLockTimeoutError` — with no
+    path, fd, or inode in its message (AGENTS.md: never expose absolute host
+    paths in anything client-visible) — rather than blocking forever.
+    """
+    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if exc.errno not in _LOCK_RETRY_ERRNOS:
+                raise
+            if time.monotonic() >= deadline:
+                raise InboxLockTimeoutError(
+                    log_detail="timed out waiting for the inbox append lock"
+                ) from exc
+            time.sleep(_LOCK_POLL_INTERVAL_SECONDS)
+
+
 def _open_append_lock(inbox_root: Path) -> int:
     """Open (or create) the inbox-wide append lock and hold an exclusive flock.
 
@@ -171,7 +215,7 @@ def _open_append_lock(inbox_root: Path) -> int:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise InvalidFileTypeError(log_detail="append lock is not a regular file")
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        _acquire_exclusive_lock(fd)
     except BaseException:
         os.close(fd)
         raise

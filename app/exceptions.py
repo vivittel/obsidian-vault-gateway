@@ -41,6 +41,7 @@ class ErrorCode(StrEnum):
     RATE_LIMITED = "RATE_LIMITED"
     INVALID_CURSOR = "INVALID_CURSOR"
     NOTE_MODIFIED = "NOTE_MODIFIED"
+    INBOX_LOCK_TIMEOUT = "INBOX_LOCK_TIMEOUT"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -123,6 +124,20 @@ class NoteModifiedError(GatewayError):
     code = ErrorCode.NOTE_MODIFIED
     status_code = 409
     default_message = "The note changed while the append was being prepared. Retry."
+
+
+class InboxLockTimeoutError(GatewayError):
+    """Raised when the inbox-wide append lock could not be acquired in time.
+
+    The message is fixed and generic on purpose — it must never carry the
+    lock file's path, an fd, an inode, or anything that could hint at which
+    process is holding the lock (AGENTS.md: never expose absolute host
+    paths in anything client-visible).
+    """
+
+    code = ErrorCode.INBOX_LOCK_TIMEOUT
+    status_code = 503
+    default_message = "The inbox is busy with another append. Retry shortly."
 
 
 class InternalError(GatewayError):
