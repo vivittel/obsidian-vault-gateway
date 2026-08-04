@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "obsidian-vault-gateway"
 version = "0.1.0"
-description = "Secure REST gateway for controlled access to an Obsidian Vault"
+description = "Secure REST and MCP gateway for controlled access to an Obsidian Vault"
 readme = "README.md"
 requires-python = ">=3.12"
 

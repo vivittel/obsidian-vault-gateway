@@ -17,3 +17,28 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Environment and local overrides
+.env.*
+!.env.example
+*.local
+compose.override.yaml
+docker-compose.override.yml
+
+# Credentials and certificates
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+*.csr
+id_rsa
+id_ed25519
+credentials.json
+service-account*.json
+
+# Local operational output
+*.log
+reports/private/
+tmp/
