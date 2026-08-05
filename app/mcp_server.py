@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import logging
 import time
+from functools import partial
 from types import TracebackType
 from typing import Annotated
 
+import anyio
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
@@ -37,6 +39,7 @@ from mcp.types import ToolAnnotations
 from mcp_types.jsonrpc import INTERNAL_ERROR, INVALID_PARAMS
 from pydantic import Field
 
+from app import runtime
 from app.application import GatewayApplication
 from app.config import Settings, get_settings
 from app.exceptions import GatewayError
@@ -211,7 +214,7 @@ def get_health() -> HealthResponse:
     ),
     annotations=_READ_ONLY_ANNOTATIONS,
 )
-def search_notes(
+async def search_notes(
     query: str | None = None,
     folder: str | None = None,
     tags: str | None = None,
@@ -219,8 +222,20 @@ def search_notes(
     cursor: str | None = None,
 ) -> SearchResponse:
     with _McpCall("search_notes") as call:
-        response = _application().search_notes(
-            query=query, folder=folder, tags=tags, limit=limit, cursor=cursor
+        # A full-vault scan — run through the same dedicated limiter as
+        # REST's /search (app/runtime.py), instead of the SDK's default
+        # thread pool, so MCP and REST scans are bounded together rather
+        # than each transport getting its own independent allowance.
+        response = await anyio.to_thread.run_sync(
+            partial(
+                _application().search_notes,
+                query=query,
+                folder=folder,
+                tags=tags,
+                limit=limit,
+                cursor=cursor,
+            ),
+            limiter=runtime.vault_scan_limiter,
         )
         call.result_count = len(response.results)
         return response
@@ -271,11 +286,15 @@ def get_vault_tree(
     ),
     annotations=_READ_ONLY_ANNOTATIONS,
 )
-def get_vault_summary(
+async def get_vault_summary(
     top_tags_limit: Annotated[int, Field(ge=1, le=200)] = 20,
 ) -> VaultSummaryResponse:
     with _McpCall("get_vault_summary"):
-        return _application().get_vault_summary(top_tags_limit=top_tags_limit)
+        # A full-vault scan — see search_notes's identical comment above.
+        return await anyio.to_thread.run_sync(
+            partial(_application().get_vault_summary, top_tags_limit=top_tags_limit),
+            limiter=runtime.vault_scan_limiter,
+        )
 
 
 @mcp.tool(

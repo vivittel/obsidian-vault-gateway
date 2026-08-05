@@ -365,3 +365,116 @@ Cursor→Tree→Summary→Appendの順に変更した（承認済み）。
   Completedなhistorical documentのため変更していない
 - ローテーションの実効確認（`docker inspect obsidian-api --format
   '{{json .HostConfig.LogConfig}}'`）は実機で未実施
+
+# Vaultスキャンの同時実行制限をREST/MCP間で共有（Phase 3 前倒し対応）
+
+新規フェーズではなく、`docs/IMPLEMENTATION_PLAN.md`§18 Phase 3の「同時実行
+制限」の一部を前倒しで修正。RESTの`search`/`vault/summary`は`app/main.py`が
+`CapacityLimiter(2)`を`rest_app.state`に持たせて全文スキャンを2並列に制限
+していたが、MCPの`search_notes`/`get_vault_summary`は`def`のまま
+`GatewayApplication`を直接呼んでおり、インストール済みSDK
+（`mcp/server/mcpserver/utilities/func_metadata.py`）のディスパッチを確認
+した結果、limiter未指定の`anyio.to_thread.run_sync`でデフォルトスレッド
+プール（40トークン）に流れ、この制限を完全に回避していることが分かった。
+REST/MCP合計のスキャン数は2に制限されていなかった。
+
+- [x] 0. 原因特定（MCPの2ツールが`def`のまま`_application()`を直接呼び、
+      SDKがlimiter未指定の`anyio.to_thread.run_sync`でデフォルトプールへ
+      流していた）
+- [x] 1. `app/runtime.py`新規: `vault_scan_limiter`をプロセス全体で1個だけ
+      保持
+- [x] 2. `app/main.py`: limiter構築と`rest_app.state`経由の参照を削除
+- [x] 3. `app/routers/search.py`, `app/routers/vault.py`:
+      `runtime.vault_scan_limiter`を直接参照するよう変更
+- [x] 4. `app/mcp_server.py`: `search_notes`/`get_vault_summary`のみ
+      `async def`化し、`GatewayApplication`呼び出しだけを同じlimiter経由
+      でスレッドへオフロード
+- [x] 5. `tests/test_vault_scan_concurrency.py`拡張: REST/MCP混在の相互
+      排他テスト2件、`/health`非枯渇テスト1件、形状チェック2件、capacity
+      guardテスト1件
+
+## 実装しないもの（対象外、別PRへ）
+
+- MCPのエラーログに`code`が残らない問題（`_McpCall`のerror側extra）
+- 413がAccessLogに残らない問題（`RequestSizeLimitMiddleware`と
+  `AccessLogMiddleware`の登録順）
+- `serverInfo.version`が空文字列のまま
+- searchのskipped件数が捨てられている問題
+- ドキュメントのPhaseステータス不整合、`AUTH_ENABLED`のADR化
+
+## Review
+
+### 変更ファイル
+
+- 新規: `app/runtime.py`
+- 変更: `app/main.py`（limiter構築の削除、未使用になった`anyio` importの
+  削除）
+- 変更: `app/routers/search.py`, `app/routers/vault.py`
+  （`runtime.vault_scan_limiter`参照。`get_vault_summary`から未使用の
+  `request: Request`引数を削除）
+- 変更: `app/mcp_server.py`（`search_notes`/`get_vault_summary`を
+  `async def`化）
+- 変更: `tests/test_vault_scan_concurrency.py`（新規6テスト、既存2テストの
+  拡張、モジュールdocstring更新）
+
+### テスト結果
+
+- `.venv/bin/ruff check .` → All checks passed
+- `.venv/bin/pytest -q` → 497 passed（既存491 + 新規6）
+- `.venv/bin/python scripts/export_openapi.py --check` → up to date
+  （REST側の変更はドキュメント化されたパラメータに影響しない）
+- 修正前の挙動を確認するため`app/mcp_server.py`のみ一時的に
+  `git stash`で戻し、新設した3件の振る舞いテストが実際に失敗することを
+  確認した
+  - `test_mcp_scan_waits_while_rest_holds_both_limiter_tokens`:
+    MCP呼び出しが即座に開始してしまう（limiter未共有を検出）
+  - `test_rest_scan_waits_while_mcp_holds_both_limiter_tokens`:
+    REST summaryが即座に開始してしまう
+  - `test_health_stays_responsive_while_mcp_scans_are_blocked`:
+    `TimeoutError`で失敗（2.5秒で終了）
+- `git stash pop`で修正を復元後、同3件を含む全11件が1.25秒で成功
+- コンテナ実機での負荷試験は未実施（開発機にDocker無し）。「MCPスキャンが
+  デフォルトプールを消費しうる」ことはインストール済みSDKのソースから確認
+  済みだが、実際に40並列に達すること・メモリが40倍になること・512MBの
+  `mem_limit`に達することは未検証であり、そのようには主張していない
+
+### 実装中に発見し、計画から逸脱した点
+
+1. **`get_vault_summary`から`request: Request`引数を削除した。**
+   limiter参照が`request.app.state.vault_scan_limiter`から
+   `runtime.vault_scan_limiter`（モジュール経由）に変わったことで、
+   `request`はこの関数内で完全に未使用になった。`result_count`を設定して
+   いるのは`get_vault_tree`のみで、`get_vault_summary`は元から設定して
+   いない
+2. **limiterをモジュール経由（`from app import runtime`;
+   `runtime.vault_scan_limiter`）で参照する形にした。**
+   `from app.runtime import vault_scan_limiter`だと各呼び出し元が別名で
+   オブジェクトを束縛するため、将来の再代入やmonkeypatchでREST/MCPが
+   別々のlimiterを参照する状態に分岐できてしまう。単一の参照経路を保証
+   するため、全呼び出し元がモジュール属性を参照する形に統一した
+3. **`/health`非枯渇テストで、テストダブルの`release.wait(timeout=...)`と
+   テスト側の`anyio.fail_after(...)`を同じ秒数にしてはいけないことが判明
+   した。** 最初の実装（両方5秒）では、修正前のコードでもダブル自身の
+   タイムアウトが偶然テストの合否判定と同時に発生し、`/health`が実際には
+   約5秒ブロックされていたにもかかわらずテストが誤ってパスした。さらに、
+   `release.set()`を`async with anyio.create_task_group()`ブロックの外
+   （`finally`）に置いたところ、`to_thread.run_sync`はデフォルトで
+   `cancellable=False`のため子タスクがキャンセルされてもワーカースレッド
+   は自然終了までブロックし続け、`__aexit__`がそれを待つ間`release.set()`
+   に到達できず、ダブルの30秒セーフティネットに達するまでテスト全体が
+   止まる、という制御フロー上のデッドロックも発見した。`release.set()`を
+   `async with tg:`ブロックの内側・`fail_after`の`finally`に置き、ダブル
+   のタイムアウトはテスト側の観測窓（2秒）よりずっと長い（30秒、実質
+   到達しないセーフティネット）に設定して両者を分離した
+
+### 未解決事項
+
+- A2〜A5相当（MCPエラーログの`code`欠落、413のAccessLog欠落、
+  `serverInfo.version`空文字列、searchのskipped件数）は範囲外として
+  別PRに残す
+- ドキュメント側（Phaseステータス矛盾、`AUTH_ENABLED`のADR化）も別PRに
+  残す
+- 複数uvicornワーカー構成にした場合、このlimiterは「プロセス全体」では
+  なく「ワーカーごと」に2並列になる。現行Dockerfileは単一ワーカーのため
+  影響しないが、`app/runtime.py`のdocstringに明記した
+- 実機でのVaultスキャン負荷試験は未実施

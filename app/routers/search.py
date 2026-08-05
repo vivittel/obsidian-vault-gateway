@@ -8,6 +8,7 @@ from typing import Annotated
 import anyio
 from fastapi import APIRouter, Depends, Query, Request
 
+from app import runtime
 from app.application import ApplicationDep
 from app.auth import require_token
 from app.models import SearchResponse
@@ -39,14 +40,15 @@ async def search(
     ] = None,
 ) -> SearchResponse:
     # A full-vault scan (app/services/search_service.py) — run in a worker
-    # thread through a dedicated limiter (app/main.py) instead of as a plain
-    # `def` endpoint sharing FastAPI's default thread pool, so this can never
-    # starve /health or any other lightweight REST request of a thread.
+    # thread through a dedicated limiter (app/runtime.py) shared with MCP's
+    # search_notes tool, instead of as a plain `def` endpoint sharing
+    # FastAPI's default thread pool, so this can never starve /health or any
+    # other lightweight request (on either transport) of a thread.
     response = await anyio.to_thread.run_sync(
         partial(
             application.search_notes, query=q, folder=folder, tags=tags, limit=limit, cursor=cursor
         ),
-        limiter=request.app.state.vault_scan_limiter,
+        limiter=runtime.vault_scan_limiter,
     )
     # Picked up by AccessLogMiddleware — IMPLEMENTATION_PLAN section 14's
     # "結果件数". Same request.state hand-off app/routers/notes.py uses for
