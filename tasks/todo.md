@@ -668,3 +668,37 @@ ADR-0001〜0003と同じ形式でADR-0004を新規作成した（D2）。
   （将来の再検証時に参照する手順として有効なため）。手順内の個別ステップに
   チェックマーク等は付けていない
 - A5、B/C系は引き続き未対応
+
+### PR #11レビュー対応（追加コミット）
+
+上記PRのレビューで4点の指摘を受け、マージ前に修正した。
+
+1. **ADRのContextで「loopbackならBearer認証は何のセキュリティも追加しない」
+   と断定していたのを限定した。** 同一ホスト上の別ユーザーや侵害済み
+   プロセスからは依然到達可能であり、proxy・port forwarding・sidecar等で
+   外部経路が生まれる可能性もある。「同一ホスト上の全principalを信頼し、
+   そのような経路が存在しないthreat modelでは追加のremote-access control
+   を提供しない場合がある」という限定表現へ修正した
+2. **`MCP_IMPLEMENTATION_PLAN.md`のStatus`Completed`と、§26のIDE拡張
+   「単独では未確認」が矛盾していた。** 確認済みにする・完了条件から除外
+   する・waiveするの3択のうち、実機確認ができないためwaiveを選択。
+   §26直下に「Phase 1.5 was accepted as Completed with the standalone
+   IDE-extension re-verification explicitly waived as a completion gate」
+   という注記を追加し、§5・§26のIDE拡張の記述もこれに揃えた
+3. **ADRのPositive consequencesで「1つのtoggleなら将来driftできない」と
+   断定していたのを修正した。** 1つの設定値が防ぐのは「運用者が
+   REST/MCPを別々の状態に設定すること」のみであり、RESTとMCPが別コード
+   パスである以上、将来の実装バグによる非対称化までは防げない。この区別を
+   明記した
+4. **`git diff --check`が新規追加した`Status:`行等でtrailing whitespace
+   警告を出していたのを解消した。** 該当行のみ、既存の「行末に半角スペース
+   2つ」規約から`<br>`タグへ変更（未変更の既存行はそのまま）。
+   `git diff --check`が exit 0 になることを確認済み
+
+レビューでは後続PRとして「`AUTH_ENABLED=false`時のREST/MCP parity test」の
+追加も提案された。価値はあるが今回はdocs-onlyの範囲を超えるため実装せず、
+上記の`app/auth.py`docstring修正と合わせて次のコード変更PRの候補として残す。
+
+再検証: `git diff --check` exit 0、`.venv/bin/ruff check .` All checks
+passed、`.venv/bin/pytest -q` 502 passed、
+`.venv/bin/python scripts/export_openapi.py --check` up to date。

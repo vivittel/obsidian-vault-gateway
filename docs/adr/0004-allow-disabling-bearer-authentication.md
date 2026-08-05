@@ -19,9 +19,20 @@ this project was originally designed around (a container reachable only
 through Caddy, itself reachable only over a private LAN or Tailscale
 address), but it forecloses a legitimate alternative: a deployment where an
 equivalent access-control boundary already exists outside the application
-itself — for example a listener bound to `127.0.0.1` with no network path
-to it at all. Requiring the application to also enforce Bearer in that case
-adds no security, only friction.
+itself — for example a listener bound to `127.0.0.1`.
+
+A loopback-only bind is not unconditionally sufficient on its own: it stops
+remote network access, but it does not stop another user or a compromised
+process on the same host, and it can be defeated by a proxy, a port-forward
+rule, a sidecar, or a network namespace that exposes it despite the bind
+address. For a deployment whose threat model trusts all same-host
+principals, and where no such path has been introduced, application-level
+Bearer authentication adds no additional remote-access control in that
+specific case — it is not a blanket claim that loopback binding is always
+sufficient. Requiring the application to also enforce Bearer there is, at
+best, redundant friction; getting the threat-model assumption wrong is the
+operator's responsibility, not something this application can verify from
+inside a container.
 
 Disabling authentication is not a plain feature flag: it removes a security
 control, and getting the default or the scope wrong has real consequences.
@@ -79,8 +90,11 @@ call or by a single cross-transport parity test.
 - Supports a legitimate deployment shape (an outer access-control boundary
   already present) without weakening the default for every other
   deployment.
-- One toggle governs both transports identically, so a future change
-  cannot leave REST and MCP in different enforcement states by accident.
+- One toggle prevents operators from *configuring* REST and MCP into
+  different enforcement states. It does not by itself prevent a future
+  *implementation* bug from making the two behave asymmetrically — REST and
+  MCP still check the setting through two separate code paths, each with
+  its own test coverage, not one shared enforcement call.
 - Explicit opt-in, plus a startup log line, keeps a disabled-auth
   deployment visible in `docker logs` rather than silent.
 

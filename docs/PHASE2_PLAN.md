@@ -1,6 +1,6 @@
 # Obsidian Vault Gateway Phase 2 実装計画
 
-> Status: Completed  
+> Status: Completed<br>
 > Prerequisite: Phase 1.5 completed  
 > Primary interface: MCP  
 > Secondary interface: REST API

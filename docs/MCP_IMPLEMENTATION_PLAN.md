@@ -1,8 +1,7 @@
 # Obsidian Vault Gateway — MCP実装計画
 
-> Status: Completed  
-> Historical design for Phase 1.5. Subsequent changes are recorded in ADRs
-> and the current README.  
+> Status: Completed<br>
+> Historical design for Phase 1.5. Subsequent changes are recorded in ADRs and the current README.<br>
 > Target phase: Phase 1.5  
 > Date: 2026-07-31  
 > Primary client: ChatGPTデスクトップアプリ  
@@ -1034,12 +1033,18 @@ MCP追加後に問題がある場合:
 
 - ChatGPTデスクトップ接続 → README.md「Client checks」で実機確認済み
 - Codex CLI接続 → README.md「Client checks」で実機確認済み
-- IDE拡張接続 → 同一Codexホストの`config.toml`を共有するが、単独では
-  別途再確認していない
+- IDE拡張接続 → 単独では再確認していない。Codex CLIと同じCodex-host
+  MCP設定を共有するため、Repository ownerの判断によりPhase 1.5の完了を
+  妨げない再検証項目としてwaiveした（下記の注記を参照）
 - 同一MCP設定を共有
 - read tool自動実行
 - write tool承認
 - 書き込み成功確認後のみ保存済みと回答
+
+Phase 1.5 was accepted as `Completed` with the standalone IDE-extension
+re-verification explicitly waived as a completion gate — it shares the
+same Codex-host MCP configuration ChatGPT desktop and Codex CLI were
+verified under, but has not itself been separately exercised.
 
 ## 27. Phase 1.5では実装しない
 
