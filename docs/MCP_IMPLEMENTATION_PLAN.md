@@ -1,6 +1,7 @@
 # Obsidian Vault Gateway — MCP実装計画
 
-> Status: Proposed  
+> Status: Completed<br>
+> Historical design for Phase 1.5. Subsequent changes are recorded in ADRs and the current README.<br>
 > Target phase: Phase 1.5  
 > Date: 2026-07-31  
 > Primary client: ChatGPTデスクトップアプリ  
@@ -136,7 +137,9 @@ mcp==2.0.0
 3. FastAPI/Starletteとの依存競合 → なし。`starlette==1.3.1`固定と`mcp`の下限
    （`starlette>=0.27`、上限なし）は共存する
 4. Python 3.13対応 → 問題なし（`requires-python>=3.10`）
-5. Codexクライアントとの接続確認 → 未実施（実機OMV環境での確認待ち。§26参照）
+5. Codexクライアントとの接続確認 → ChatGPTデスクトップ・Codex CLIはREADME.md
+   「Client checks」で実機確認済み。Codex IDE拡張は同一Codexホストの
+   MCP設定を共有するが、単独では別途再確認していない（§26参照）
 
 v1系は`docs/IMPLEMENTATION_PLAN.md`のコードには一度も取り込まれていないため、
 「v2への移行」ではなく最初からv2を採用した。本節9の概念コード（`FastMCP`ベース）は
@@ -260,6 +263,11 @@ Authorization header
 - トークン値をログへ出さない
 - 認証失敗理由を外部へ詳細表示しない
 - RESTとMCPで同一環境変数`API_TOKEN`
+
+> `AUTH_ENABLED`環境変数（既定`true`）により、上記の認証必須を両transportで
+> 同時に無効化できる。無効化は明示的なopt-inであり、外部に同等の
+> access-control boundaryが既に存在する場合のみを想定する。詳細は
+> `docs/adr/0004-allow-disabling-bearer-authentication.md`。
 
 ## 9. MCPサーバー生成
 
@@ -1023,13 +1031,20 @@ MCP追加後に問題がある場合:
 
 ### client
 
-- ChatGPTデスクトップ接続
-- Codex CLI接続
-- IDE拡張接続
+- ChatGPTデスクトップ接続 → README.md「Client checks」で実機確認済み
+- Codex CLI接続 → README.md「Client checks」で実機確認済み
+- IDE拡張接続 → 単独では再確認していない。Codex CLIと同じCodex-host
+  MCP設定を共有するため、Repository ownerの判断によりPhase 1.5の完了を
+  妨げない再検証項目としてwaiveした（下記の注記を参照）
 - 同一MCP設定を共有
 - read tool自動実行
 - write tool承認
 - 書き込み成功確認後のみ保存済みと回答
+
+Phase 1.5 was accepted as `Completed` with the standalone IDE-extension
+re-verification explicitly waived as a completion gate — it shares the
+same Codex-host MCP configuration ChatGPT desktop and Codex CLI were
+verified under, but has not itself been separately exercised.
 
 ## 27. Phase 1.5では実装しない
 

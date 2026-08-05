@@ -573,4 +573,132 @@ REST/MCP合計のスキャン数は2に制限されていなかった。
   `status_code`のみを記録し、`GatewayError.code`を記録できない。
   `log_detail=None`の4xxでは別の`gateway_error`ログも出ないため、
   HTTP statusだけでしか分類できない。MCP側のcode追加とは別PRで扱う
-- A5〜、ドキュメント整合（D1/D2）、B/C系は引き続き未対応
+- A5〜、B/C系は引き続き未対応
+
+# Phaseステータスの整合と`AUTH_ENABLED`のADR化（D1・D2）
+
+コードは変更せず、ドキュメントのみを修正。README.mdが既に正確に記述している
+内容（Phase 2のOMV/LiveSync/PC・iPhone実機検証は完了済み、コンテナメモリ
+制限とログローテーションのみ後から追加されて未確認）を、古いまま矛盾していた
+`docs/IMPLEMENTATION_PLAN.md`・`docs/PHASE2_PLAN.md`・
+`docs/MCP_IMPLEMENTATION_PLAN.md`へ反映した（D1）。また、`AUTH_ENABLED`が
+セキュリティ境界を変更する設定でありながらADR化されていなかったため、
+ADR-0001〜0003と同じ形式でADR-0004を新規作成した（D2）。
+
+- [x] 0. 現状確認
+  - README.mdの記述とdocs/配下のステータス行・本文の矛盾箇所を特定
+  - `docs/MCP_IMPLEMENTATION_PLAN.md`は先頭のステータス行だけでなく、
+    §5・§26本文にも「未実施」という古い記述が別途残っていることを発見
+  - `app/auth.py`のREST側と`app/mcp_auth.py`のMCP側で、`AUTH_ENABLED=false`
+    時の実装が微妙に異なることを発見（後述）
+- [x] 1. `docs/IMPLEMENTATION_PLAN.md`: Phase 2のステータスを`Completed`へ、
+      §10へADR-0004への前方参照を追加
+- [x] 2. `docs/PHASE2_PLAN.md`: ステータスを`Completed`へ、§12の完了条件
+      （実機検証が通るまでCompletedにしない、という記述）はそのまま残し、
+      その直後に「検証結果」節を追加して満たされたことを明記
+- [x] 3. `docs/MCP_IMPLEMENTATION_PLAN.md`: ステータスを`Completed`へ。
+      §5・§26本文の「Codexクライアント接続確認・IDE拡張接続」の記述を、
+      README.md「Client checks」で実際に確認されている範囲
+      （ChatGPTデスクトップ・Codex CLI）とされていない範囲（IDE拡張は
+      単独では未確認）に分けて修正。§8へADR-0004への前方参照を追加
+- [x] 4. `docs/adr/0004-allow-disabling-bearer-authentication.md`新規作成
+- [x] 5. `README.md`: 導入部のADR一覧とSecurity invariantsの`AUTH_ENABLED`
+      箇条書きの両方にADR-0004への参照を追加
+
+## Review
+
+### 変更ファイル
+
+- 変更: `docs/IMPLEMENTATION_PLAN.md`（Phase 2ステータス、§10前方参照）
+- 変更: `docs/PHASE2_PLAN.md`（ステータス、§12検証結果節）
+- 変更: `docs/MCP_IMPLEMENTATION_PLAN.md`（ステータス、§5・§26本文、
+  §8前方参照）
+- 新規: `docs/adr/0004-allow-disabling-bearer-authentication.md`
+- 変更: `README.md`（ADR一覧、Security invariantsの参照追加）
+
+### テスト結果
+
+- `git diff --check` → `docs/PHASE2_PLAN.md`と
+  `docs/MCP_IMPLEMENTATION_PLAN.md`のステータス行で「trailing whitespace」
+  警告が出るが、これは同じブロック内の`Prerequisite:`行など既存行にも
+  使われているMarkdownのhard-break規約（行末の半角スペース2つ）であり、
+  意図的なもの。修正不要
+- `.venv/bin/ruff check .` → All checks passed（コード変更なし）
+- `.venv/bin/pytest -q` → 502 passed（コード変更なしのため件数は前回と同じ）
+- `.venv/bin/python scripts/export_openapi.py --check` → up to date
+- ステータス行のgrep（`^> Status: (Proposed|Implemented — Deployment
+  verification pending)`）→ 該当なしを確認
+- `AUTH_ENABLED`・`ADR-0004`参照のgrep → 期待した箇所
+  （§10・§8・ADR本文、README・両プラン内の前方参照）にすべて出現することを
+  確認
+
+### 実装中に発見し、計画から逸脱した点
+
+1. **`docs/MCP_IMPLEMENTATION_PLAN.md`はステータス行だけでは不十分だった。**
+   レビューで指摘された通り、先頭を`Completed`にするだけでは§5・§26本文の
+   「未実施」という古い記述と矛盾したまま残る。README.md「Client checks」
+   （ChatGPTデスクトップ・Codex CLIの接続確認のみを明記、IDE拡張は単独では
+   触れていない）と照合し、確認済み・未確認を実際の記述範囲に合わせて
+   分けて修正した
+2. **ADR-0004でREST/MCPの挙動差を正確に書き分けた。** 当初案は
+   「`AUTH_ENABLED=false`ではAuthorizationヘッダーを両transportとも一切
+   検査しない」としていたが、`app/auth.py`の`require_token`は
+   `credentials: CredentialsDep`をパラメータに取るため、FastAPIが
+   `HTTPBearer`のsecurity dependencyを`require_token`本体より先に評価し、
+   ヘッダー自体は解析される（比較・検証はしないだけ）。MCP側
+   （`McpBearerAuthMiddleware`）は`settings.auth_enabled`を確認してから
+   ヘッダーを読むため、本当に一切読まない。ADRの本文とConsequencesの両方に
+   この違いを明記した
+3. **外部境界の表現を限定した。** 「loopback bindingやTailscaleは境界の例」
+   という書き方ではなく、「deploymentのthreat modelに適したexplicitな
+   access-control boundary（loopback-only listener、firewall allowlist、
+   restrictive reverse-proxy policy、またはTailscaleのACL/Grantsで
+   接続元を限定している場合）」という限定表現にした。「同一LAN/tailnetに
+   参加しているだけでは不十分」という一文もREADMEの既存表現と揃えた
+
+### 未解決事項
+
+- **`app/auth.py`の`require_token`docstring（46-47行目）の
+  「the Authorization header, if any, is not even inspected in that case」
+  はREST側について不正確。** 実際にはFastAPIの`HTTPBearer`security
+  dependencyがヘッダーを解析してから`require_token`本体が呼ばれるため、
+  「検査しない」のは比較・検証の部分のみ。今回はdocs-only PRのため
+  コードは変更せず、docstring修正は別PR（コード変更を伴うPR）で対応する
+- `docs/PHASE2_PLAN.md`§11の実機検証手順（15ステップ）自体はそのまま残した
+  （将来の再検証時に参照する手順として有効なため）。手順内の個別ステップに
+  チェックマーク等は付けていない
+- A5、B/C系は引き続き未対応
+
+### PR #11レビュー対応（追加コミット）
+
+上記PRのレビューで4点の指摘を受け、マージ前に修正した。
+
+1. **ADRのContextで「loopbackならBearer認証は何のセキュリティも追加しない」
+   と断定していたのを限定した。** 同一ホスト上の別ユーザーや侵害済み
+   プロセスからは依然到達可能であり、proxy・port forwarding・sidecar等で
+   外部経路が生まれる可能性もある。「同一ホスト上の全principalを信頼し、
+   そのような経路が存在しないthreat modelでは追加のremote-access control
+   を提供しない場合がある」という限定表現へ修正した
+2. **`MCP_IMPLEMENTATION_PLAN.md`のStatus`Completed`と、§26のIDE拡張
+   「単独では未確認」が矛盾していた。** 確認済みにする・完了条件から除外
+   する・waiveするの3択のうち、実機確認ができないためwaiveを選択。
+   §26直下に「Phase 1.5 was accepted as Completed with the standalone
+   IDE-extension re-verification explicitly waived as a completion gate」
+   という注記を追加し、§5・§26のIDE拡張の記述もこれに揃えた
+3. **ADRのPositive consequencesで「1つのtoggleなら将来driftできない」と
+   断定していたのを修正した。** 1つの設定値が防ぐのは「運用者が
+   REST/MCPを別々の状態に設定すること」のみであり、RESTとMCPが別コード
+   パスである以上、将来の実装バグによる非対称化までは防げない。この区別を
+   明記した
+4. **`git diff --check`が新規追加した`Status:`行等でtrailing whitespace
+   警告を出していたのを解消した。** 該当行のみ、既存の「行末に半角スペース
+   2つ」規約から`<br>`タグへ変更（未変更の既存行はそのまま）。
+   `git diff --check`が exit 0 になることを確認済み
+
+レビューでは後続PRとして「`AUTH_ENABLED=false`時のREST/MCP parity test」の
+追加も提案された。価値はあるが今回はdocs-onlyの範囲を超えるため実装せず、
+上記の`app/auth.py`docstring修正と合わせて次のコード変更PRの候補として残す。
+
+再検証: `git diff --check` exit 0、`.venv/bin/ruff check .` All checks
+passed、`.venv/bin/pytest -q` 502 passed、
+`.venv/bin/python scripts/export_openapi.py --check` up to date。

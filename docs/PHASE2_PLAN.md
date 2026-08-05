@@ -1,6 +1,6 @@
 # Obsidian Vault Gateway Phase 2 実装計画
 
-> Status: Implemented — Deployment verification pending  
+> Status: Completed<br>
 > Prerequisite: Phase 1.5 completed  
 > Primary interface: MCP  
 > Secondary interface: REST API
@@ -420,3 +420,18 @@ pending`のままとし、`Completed`へは変更しない:
 - 追記による所有者変化がLiveSync・PC/iPhone Obsidianの読み書きを妨げないこと
   を実機で確認済み
 - Phase 1およびPhase 1.5の機能・セキュリティ制約に回帰がない
+
+### 検証結果
+
+上記の条件はOMVホスト上で満たされた:
+
+- append前後のmode・UID・GID比較（§11手順10）
+- LiveSync同期（§11手順12）
+- PC/iPhone Obsidianへの反映（§11手順11）
+- append後のPC/iPhone Obsidianからの編集・保存（§11手順13）
+- Inbox外への追記拒否（§11手順14）
+
+したがってPhase 2は`Completed`である。`compose.yaml`のコンテナメモリ制限
+（`mem_limit: 512m`）とDockerログローテーション設定はPhase 2実装より後に
+追加されたものであり、最新デプロイイメージに対する実機確認は別途未完了の
+運用チェックとして残る（README.md「Known gaps」参照）。
