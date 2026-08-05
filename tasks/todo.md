@@ -478,3 +478,99 @@ REST/MCP合計のスキャン数は2に制限されていなかった。
   なく「ワーカーごと」に2並列になる。現行Dockerfileは単一ワーカーのため
   影響しないが、`app/runtime.py`のdocstringに明記した
 - 実機でのVaultスキャン負荷試験は未実施
+
+# MCPエラーコードのログ欠落・413のAccessLog欠落・MCPバージョン欠落の修正
+
+前回PR（Vaultスキャンのlimiter共有）に続き、レビューで洗い出した項目の
+優先度順（A3・A4・A2）に対応。いずれも1〜5行規模の修正だが、ログの
+「LogRecordに属性はあるがformatterが捨てて実ログには出ない」という
+このリポジトリで過去に実際起きた回帰パターンがあるため、`caplog`での
+属性検証だけでなく`tests/test_log_format.py`での実レンダリング検証も
+必須とした。
+
+- [x] 0. 原因特定
+  - A3: `_McpCall.__exit__`は`mcp_call`を常に出すが`code`を含めておらず、
+    補助的な`mcp_tool_error`は`status_code>=500`または`log_detail`が
+    truthyの場合しか出ない。`NoteNotFoundError()`はどちらも満たさないため、
+    最も一般的な拒否パターンで`code`がログのどこにも残らない
+  - A4: `app/main.py`は`AccessLogMiddleware`→`RequestSizeLimitMiddleware`の
+    順で`add_middleware`していたが、Starletteの`add_middleware`は
+    `insert(0, ...)`のため後から登録した方が外側になる。実際の呼び出し順は
+    `RequestSizeLimitMiddleware → AccessLogMiddleware → router`で、413は
+    外側から直接返るため`AccessLogMiddleware`に到達しない
+  - A2: `MCPServer(...)`に`version=`を渡していないため、インストール済み
+    SDKの既定値`""`が`serverInfo.version`に出る
+- [x] 1. A3: `app/mcp_server.py`の`_McpCall.__exit__`で、常に出る
+      `mcp_call`のerror extraに`error_code`（`GatewayError`ならその
+      `code.value`、それ以外なら`ErrorCode.INTERNAL_ERROR.value`）を追加
+- [x] 2. A4: `app/main.py`の`add_middleware`呼び出し順を入れ替え、
+      `AccessLogMiddleware`を最外周にした
+- [x] 3. A2: `app/config.py`に`PACKAGE_VERSION`（`importlib.metadata.version(
+      "obsidian-vault-gateway")`、フォールバックなし）を追加し、
+      `app/main.py`のFastAPI版と`app/mcp_server.py`のMCPServer版が
+      同じ値を参照するようにした
+- [x] 4. テスト追加（後述）
+
+## 実装しないもの（対象外、別PRへ）
+
+- RESTの`AccessLogMiddleware`自体に`GatewayError.code`を記録する変更
+  （後述の「未解決事項」参照）
+- A5（searchのskipped件数）、D1/D2（ドキュメントのPhaseステータス矛盾・
+  `AUTH_ENABLED`のADR化）、B/C系（mypy・coverage・CI強化・検索の
+  ページングコスト）
+
+## Review
+
+### 変更ファイル
+
+- 変更: `app/mcp_server.py`（`error_code`の追加、`ErrorCode` importの追加、
+  `PACKAGE_VERSION` importの追加、`MCPServer(...)`への`version=`追加）
+- 変更: `app/main.py`（`add_middleware`の順序入れ替え、`PACKAGE_VERSION`
+  importの追加、`FastAPI(...)`の`version=`を`PACKAGE_VERSION`参照に変更）
+- 変更: `app/config.py`（`PACKAGE_VERSION`定数の新規追加）
+- 変更: `tests/test_mcp_tools.py`（A3のLogRecordレベルテスト2件追加）
+- 変更: `tests/test_log_format.py`（A3・A4の実レンダリングテスト2件追加）
+- 変更: `tests/test_logging.py`（A4のLogRecordレベルテスト1件追加）
+- 変更: `tests/test_mcp_protocol.py`（A2のテスト、`PACKAGE_VERSION`と
+  `rest_app.version`の一致確認を追加）
+
+### テスト結果
+
+- `.venv/bin/ruff check .` → All checks passed
+- `.venv/bin/pytest -q` → 502 passed（既存497 + 新規5）
+- `.venv/bin/python scripts/export_openapi.py --check` → up to date
+  （`PACKAGE_VERSION`は現状`"0.1.0"`に解決され、既存の`version="0.1.0"`
+  ハードコードと同値のためdriftなし）
+- 3項目それぞれについて、対応する1ファイルの該当箇所だけを一時的に
+  修正前の状態に戻し（Edit差し戻し→pytest実行→Edit再適用）、新設テストが
+  意図した理由で失敗することを確認した
+  - A3: `NoteNotFoundError`テスト2件・renderedテスト1件が
+    `code=NOTE_NOT_FOUND`欠落で失敗
+  - A4: LogRecordテスト・renderedテストの両方が「該当ロガーの
+    レコードが0件」で失敗（413自体は返るが、AccessLogに一切残らない）
+  - A2: `serverInfo.version`が空文字列で失敗
+  - すべて差し戻しを元に戻した後、全502件が成功することを再確認
+
+### 実装中に発見し、計画から逸脱した点
+
+1. **A3のレンダリングテストは`mcp.call_tool(...)`直接呼び出しではなく、
+   `tests/test_log_format.py`の既存パターン（`mcp_client`
+   フィクスチャ経由の実HTTP POST）に合わせた。** 計画段階では
+   `test_mcp_tools.py`と同じ`mcp.call_tool(...)`直接呼び出しを想定していたが、
+   `test_log_format.py`の「driven through the real application」節は
+   既にmountされた`/mcp`エンドポイントへの生JSON-RPC POSTで統一されており
+   （`test_mcp_call_renders_tool_status_duration_and_result_count`等）、
+   そちらに合わせる方が一貫していた。結果として`pytestmark =
+   pytest.mark.anyio`と`anyio_backend`フィクスチャをこのファイルに追加する
+   計画も不要になった（`mcp_client`は同期`TestClient`のため）
+2. **`error_code`をGatewayError判定の`if/else`に分けた。** 計画の
+   三項演算子1行では`ruff`の行長制限（100文字）を超えた
+   （104文字）ため、素直な`if/else`に分解した
+
+### 未解決事項
+
+- **RESTの`AccessLogMiddleware`にも同種の欠落がある。**
+  `status_code`のみを記録し、`GatewayError.code`を記録できない。
+  `log_detail=None`の4xxでは別の`gateway_error`ログも出ないため、
+  HTTP statusだけでしか分類できない。MCP側のcode追加とは別PRで扱う
+- A5〜、ドキュメント整合（D1/D2）、B/C系は引き続き未対応

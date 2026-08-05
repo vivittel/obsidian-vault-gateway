@@ -9,6 +9,7 @@ tests point them at a throwaway vault under ``tmp_path``.
 from __future__ import annotations
 
 from functools import cached_property, lru_cache
+from importlib.metadata import version as _package_version
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -27,6 +28,16 @@ API_PREFIX = "/api/v1"
 # Streamable HTTP transport here and normalizes the bare path onto it, so
 # the two can't drift apart either.
 MCP_PREFIX = "/mcp"
+
+# The one source of truth for the version both transports advertise
+# (rest_app's FastAPI(version=...) and MCPServer's serverInfo.version) —
+# read from installed package metadata rather than duplicating
+# pyproject.toml's `version` as a second (or third) hardcoded literal. No
+# PackageNotFoundError fallback: this package is always pip-installed
+# before tests run or the Docker image is built, so an unresolvable version
+# means a broken install, which should fail loudly, not render as
+# "0.0.0+unknown".
+PACKAGE_VERSION = _package_version("obsidian-vault-gateway")
 
 
 class Settings(BaseSettings):
