@@ -8,6 +8,7 @@ from typing import Annotated
 import anyio
 from fastapi import APIRouter, Depends, Query, Request
 
+from app import runtime
 from app.application import ApplicationDep
 from app.auth import require_token
 from app.models import VaultSummaryResponse, VaultTreeResponse
@@ -52,7 +53,6 @@ def get_vault_tree(
     summary="Summarise vault-wide note counts, sizes, and tags",
 )
 async def get_vault_summary(
-    request: Request,
     application: ApplicationDep,
     top_tags_limit: Annotated[
         int, Query(ge=1, le=200, description="Maximum number of tags to return.")
@@ -61,5 +61,5 @@ async def get_vault_summary(
     # A full-vault scan — see app/routers/search.py's identical comment.
     return await anyio.to_thread.run_sync(
         partial(application.get_vault_summary, top_tags_limit=top_tags_limit),
-        limiter=request.app.state.vault_scan_limiter,
+        limiter=runtime.vault_scan_limiter,
     )
