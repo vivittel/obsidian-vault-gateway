@@ -133,3 +133,28 @@ def test_appended_note_relative_path_is_logged(
 
     access_records = [r for r in caplog.records if r.name == "obsidian_gateway.access"]
     assert any(getattr(r, "note_path", None) == appended_path for r in access_records)
+
+
+def test_oversized_request_is_logged_once(
+    client: TestClient, auth_headers: dict[str, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Before this fix, RequestSizeLimitMiddleware was registered outermost
+    (Starlette's add_middleware prepends, so the last-registered middleware
+    wraps everything else), so its 413 short-circuit never reached
+    AccessLogMiddleware at all — a rejected oversized request left no access
+    log line whatsoever.
+    """
+    from app.config import get_settings
+
+    content = "x" * (get_settings().max_request_bytes + 1)
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={"title": "oversized", "content": content},
+        headers=auth_headers,
+    )
+    assert response.status_code == 413
+
+    access_records = [r for r in caplog.records if r.name == "obsidian_gateway.access"]
+    assert len(access_records) == 1
+    assert access_records[0].status_code == 413
+    assert access_records[0].route == "/api/v1/inbox/notes"

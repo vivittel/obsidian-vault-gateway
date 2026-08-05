@@ -41,8 +41,8 @@ from pydantic import Field
 
 from app import runtime
 from app.application import GatewayApplication
-from app.config import Settings, get_settings
-from app.exceptions import GatewayError
+from app.config import PACKAGE_VERSION, Settings, get_settings
+from app.exceptions import ErrorCode, GatewayError
 from app.logging_config import configure_logging
 from app.mcp_auth import McpBearerAuthMiddleware
 from app.models import (
@@ -102,7 +102,9 @@ _WRITE_ANNOTATIONS = ToolAnnotations(
 # collection). See app/logging_config.py's module docstring.
 configure_logging()
 
-mcp = MCPServer(name="Obsidian Vault Gateway", instructions=SERVER_INSTRUCTIONS)
+mcp = MCPServer(
+    name="Obsidian Vault Gateway", version=PACKAGE_VERSION, instructions=SERVER_INSTRUCTIONS
+)
 
 
 class _McpCall:
@@ -157,6 +159,17 @@ class _McpCall:
             mcp_access_logger.info("mcp_call", extra=extra)
             return False
 
+        # Computed before the mcp_call log call below (not shadowed by the
+        # JSON-RPC `code` local further down, which is a different value —
+        # see this class's docstring) so every error, not only the ones with
+        # a status_code >= 500 or a log_detail, leaves the gateway error code
+        # somewhere in the log. Many GatewayError subclasses collapse onto
+        # the same JSON-RPC INVALID_PARAMS at the wire level, so this is the
+        # only place that distinguishes them.
+        if isinstance(exc, GatewayError):
+            error_code = exc.code.value
+        else:
+            error_code = ErrorCode.INTERNAL_ERROR.value
         mcp_access_logger.info(
             "mcp_call",
             extra={
@@ -165,6 +178,7 @@ class _McpCall:
                 "tool": self.tool_name,
                 "status": "error",
                 "duration_ms": duration_ms,
+                "code": error_code,
             },
         )
 

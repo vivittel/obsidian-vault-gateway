@@ -37,7 +37,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware import Middleware
 from starlette.routing import Mount
 
-from app.config import API_PREFIX, MCP_PREFIX, get_settings
+from app.config import API_PREFIX, MCP_PREFIX, PACKAGE_VERSION, get_settings
 from app.exceptions import ErrorCode, GatewayError, error_envelope
 
 # Importing this also configures logging for the whole process: the call has to
@@ -61,7 +61,7 @@ rest_app = FastAPI(
         "(mounted at /mcp) is the primary interface; this REST API is kept "
         "for health checks, curl-based diagnostics, and regression tests."
     ),
-    version="0.1.0",
+    version=PACKAGE_VERSION,
 )
 
 
@@ -104,8 +104,8 @@ async def handle_unexpected_error(_request: Request, _exc: Exception) -> JSONRes
     )
 
 
-rest_app.add_middleware(AccessLogMiddleware)
 rest_app.add_middleware(RequestSizeLimitMiddleware)
+rest_app.add_middleware(AccessLogMiddleware)
 
 rest_app.include_router(health.router, prefix=API_PREFIX)
 rest_app.include_router(search.router, prefix=API_PREFIX)

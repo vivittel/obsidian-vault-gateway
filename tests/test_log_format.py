@@ -358,6 +358,58 @@ def test_mcp_auth_failure_renders_the_reason(
     assert "reason=missing_or_non_bearer_authorization_header" in line
 
 
+def test_mcp_call_note_not_found_renders_the_error_code(
+    mcp_client: TestClient, mcp_headers: dict[str, str], rendered: Rendered
+) -> None:
+    """NoteNotFoundError sets no log_detail, so the supplementary
+    mcp_tool_error record never fires for it — before this fix, the
+    mcp_call record itself rendered with no code at all for the most
+    common rejection case.
+    """
+    mcp_client.post(
+        "/mcp/",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "read_note",
+                "arguments": {"path": "Knowledge/does-not-exist.md"},
+            },
+        },
+        headers=mcp_headers,
+    )
+
+    fields = _line_with(rendered(), "read_note").split()
+    assert fields[2] == "mcp"
+    assert fields[3] == "tools/call"
+    assert fields[4] == "read_note"
+    assert fields[5] == "error"
+    assert "code=NOTE_NOT_FOUND" in fields
+
+
+def test_oversized_request_renders_413_access_log(
+    client: TestClient, auth_headers: dict[str, str], rendered: Rendered
+) -> None:
+    from app.config import get_settings
+
+    content = "x" * (get_settings().max_request_bytes + 1)
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={"title": "oversized", "content": content},
+        headers=auth_headers,
+    )
+    assert response.status_code == 413
+
+    line = _line_with(rendered(), "/api/v1/inbox/notes")
+    fields = line.split()
+    assert fields[2] == "rest"
+    assert fields[3] == "POST"
+    assert fields[4] == "/api/v1/inbox/notes"
+    assert fields[5] == "413"
+    assert content[:100] not in line
+
+
 # --- configure_logging's own contract ----------------------------------------
 
 

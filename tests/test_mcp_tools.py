@@ -579,3 +579,50 @@ async def test_mcp_access_log_never_contains_bearer_token(
     for record in caplog.records:
         assert api_token not in record.getMessage()
         assert api_token not in str(record.__dict__)
+
+
+# --- logging: the error status line carries the gateway error code ----------
+
+
+async def test_mcp_call_error_status_carries_the_gateway_error_code(
+    env: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """NoteNotFoundError sets no log_detail, so the supplementary
+    mcp_tool_error record never fires for it (only logged when status_code
+    >= 500 or log_detail is truthy) — before this fix, that left the
+    mcp_call record itself with no code at all for the most common
+    rejection case.
+    """
+    caplog.set_level(logging.INFO, logger="obsidian_gateway.mcp")
+    with pytest.raises(MCPError):
+        await mcp.call_tool("read_note", {"path": "Knowledge/does-not-exist.md"})
+
+    mcp_call_records = [r for r in caplog.records if r.name == "obsidian_gateway.mcp"]
+    assert len(mcp_call_records) == 1
+    assert mcp_call_records[0].status == "error"
+    assert mcp_call_records[0].code == "NOTE_NOT_FOUND"
+
+
+async def test_mcp_call_error_status_falls_back_to_internal_error_code(
+    env: None, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-GatewayError exception (a real bug, not a validated rejection)
+    logs a second, separate mcp_tool_unhandled_error record under the plain
+    "obsidian_gateway" logger — filtering by logger name here is what keeps
+    this test about the mcp_call record specifically, not "the whole log has
+    one record".
+    """
+    caplog.set_level(logging.INFO, logger="obsidian_gateway.mcp")
+
+    def failing_health(self: GatewayApplication) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(GatewayApplication, "health", failing_health)
+
+    with pytest.raises(MCPError):
+        await mcp.call_tool("get_health", {})
+
+    mcp_call_records = [r for r in caplog.records if r.name == "obsidian_gateway.mcp"]
+    assert len(mcp_call_records) == 1
+    assert mcp_call_records[0].status == "error"
+    assert mcp_call_records[0].code == "INTERNAL_ERROR"

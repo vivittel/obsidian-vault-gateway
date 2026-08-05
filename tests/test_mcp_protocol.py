@@ -39,7 +39,7 @@ from mcp.types import ToolAnnotations
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
-from app.config import Settings, get_settings
+from app.config import PACKAGE_VERSION, Settings, get_settings
 from app.mcp_server import build_mcp_transport, get_health
 
 pytestmark = pytest.mark.anyio
@@ -224,7 +224,13 @@ def test_legacy_initialize_succeeds(mcp_client: TestClient, mcp_headers: dict) -
     result = response.json()["result"]
     assert result["protocolVersion"] == LEGACY_PROTOCOL_VERSION
     assert result["serverInfo"]["name"] == "Obsidian Vault Gateway"
+    assert result["serverInfo"]["version"]  # non-empty: catches both sides being blank
+    assert result["serverInfo"]["version"] == PACKAGE_VERSION
     assert "read-only" in result["instructions"]
+
+    from app.main import rest_app
+
+    assert rest_app.version == PACKAGE_VERSION
 
 
 def test_legacy_initialized_notification_is_accepted(
