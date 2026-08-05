@@ -412,6 +412,11 @@ def verify_token(provided: str, expected: str) -> bool:
 - 認証エラーは固定メッセージとする
 - RESTとMCPで同一の`API_TOKEN`を使用する
 
+> `AUTH_ENABLED`環境変数により、RESTとMCPの両方で認証を無効化できる
+> （既定は`true`＝有効）。無効化は明示的なopt-inであり、外部に同等の
+> access-control boundaryが既に存在する場合のみを想定する。詳細は
+> `docs/adr/0004-allow-disabling-bearer-authentication.md`。
+
 ## 11. パスセキュリティ
 
 以下を必須とする。
@@ -733,7 +738,7 @@ Status: Completed
 
 ### Phase 2: Vault構造参照
 
-Status: Implemented — Deployment verification pending
+Status: Completed
 
 - `get_vault_tree`
 - `get_vault_summary`
@@ -743,10 +748,11 @@ Status: Implemented — Deployment verification pending
 - `append_inbox_note`
 - 大規模Vault向け改善（Phase 2の範囲外。詳細は `docs/PHASE2_PLAN.md`）
 
-自動テスト・lint・OpenAPI回帰はすべて成功しているが、OMV・LiveSync・PC/iPhone
-Obsidianでの実機検証（README.md「OMV verification checklist」、特に
-`append_inbox_note`が使う`os.replace()`の所有者変化の確認）が完了するまで
-`Completed`へは変更しない。
+自動テスト・lint・OpenAPI回帰に加え、OMV・LiveSync・PC/iPhone Obsidianでの
+実機検証（README.md「OMV verification checklist」、特に`append_inbox_note`
+が使う`os.replace()`の所有者変化の確認を含む）も完了した。`compose.yaml`へ
+後から追加した`mem_limit`とDockerログローテーション設定は、最新デプロイ
+イメージに対する実機確認がまだ済んでいない（README.md「Known gaps」参照）。
 
 ### Phase 3: 運用強化
 

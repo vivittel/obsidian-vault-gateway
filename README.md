@@ -17,7 +17,9 @@ the latest deployed image (see the checklist below). See
 original ChatGPT Actions plan, `docs/adr/0002-use-mcp-python-sdk-v2.md` for
 why this runs on the MCP Python SDK's v2 line,
 `docs/adr/0003-allow-os-replace-for-inbox-append.md` for why note append is
-the one place `os.replace()` is used, and `docs/MCP_IMPLEMENTATION_PLAN.md`
+the one place `os.replace()` is used,
+`docs/adr/0004-allow-disabling-bearer-authentication.md` for when and how
+bearer authentication may be disabled, and `docs/MCP_IMPLEMENTATION_PLAN.md`
 for the MCP design in full. Phase 1 and Phase 1.5 (the REST-only and
 MCP-introduction predecessors) are documented as completed history in
 `docs/PHASE1_PLAN.md` and `docs/IMPLEMENTATION_PLAN.md`.
@@ -46,7 +48,9 @@ transports:
   localhost-only listener. Being on a private LAN or Tailscale tailnet is
   **not** by itself such a boundary — anyone else with access to that network
   or tailnet would reach every endpoint unauthenticated. `API_TOKEN` itself
-  stays required either way: it also signs pagination cursors.
+  stays required either way: it also signs pagination cursors. See
+  `docs/adr/0004-allow-disabling-bearer-authentication.md` for the decision
+  and accepted boundary conditions.
 
 MCP and REST call the same `app/application.py` and service functions
 (`app/services/`); neither transport calls the other over HTTP, so they can
