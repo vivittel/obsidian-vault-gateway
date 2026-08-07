@@ -64,3 +64,19 @@ def test_committed_openapi_json_file_exists_and_is_valid_json() -> None:
     path = REPO_ROOT / "openapi.json"
     assert path.exists()
     json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_inbox_note_create_request_documents_the_content_export_exclusion(
+    client: TestClient,
+) -> None:
+    # The `content`/`export` exclusion is enforced by a model_validator, not
+    # by an `oneOf` in the schema — the schema alone can't express it. This
+    # pins that the rule is at least documented in the generated OpenAPI
+    # (the FastAPI/pydantic docstring -> schema `description` path), so it
+    # doesn't silently vanish the way a LogRecord attribute can be dropped by
+    # a formatter without ever reaching the rendered output.
+    schema = client.get("/openapi.json").json()
+    description = schema["components"]["schemas"]["InboxNoteCreateRequest"]["description"]
+    assert "Exactly one of" in description
+    assert "`content`" in description
+    assert "`export`" in description

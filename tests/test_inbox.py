@@ -208,6 +208,92 @@ def test_create_note_rejects_nested_frontmatter_structures(
     assert response.status_code == 400
 
 
+def test_create_note_with_empty_content_is_still_accepted(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    # `content` became `str | None` so `export` could be introduced; the
+    # sentinel for "not provided" is `is None`, not falsiness, so an explicit
+    # empty string must remain valid exactly as before.
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={"title": "Empty content still valid", "content": ""},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    assert (inbox_root / "Empty content still valid.md").read_text(encoding="utf-8") == ""
+
+
+def test_create_note_with_structured_export(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={
+            "title": "Structured export test",
+            "export": {"mode": "summary", "tldr": ["ok"], "decisions": ["d1"]},
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    written = (inbox_root / "Structured export test.md").read_text(encoding="utf-8")
+    assert "export_mode: summary" in written
+    assert "## 決定事項" in written
+    assert "- d1" in written
+
+
+def test_create_note_structured_export_defaults_to_summary(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={"title": "Default mode via REST", "export": {"tldr": ["ok"]}},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    written = (inbox_root / "Default mode via REST.md").read_text(encoding="utf-8")
+    assert "export_mode: summary" in written
+
+
+def test_create_note_rejects_neither_content_nor_export(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={"title": "x"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_create_note_rejects_both_content_and_export(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={"title": "x", "content": "y\n", "export": {"tldr": ["z"]}},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_create_note_rejects_export_combined_with_frontmatter(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={
+            "title": "x",
+            "export": {"tldr": ["z"]},
+            "frontmatter": {"source": "not-chatgpt"},
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
 def test_created_note_is_readable_via_get_notes(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

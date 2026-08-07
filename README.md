@@ -19,10 +19,13 @@ why this runs on the MCP Python SDK's v2 line,
 `docs/adr/0003-allow-os-replace-for-inbox-append.md` for why note append is
 the one place `os.replace()` is used,
 `docs/adr/0004-allow-disabling-bearer-authentication.md` for when and how
-bearer authentication may be disabled, and `docs/MCP_IMPLEMENTATION_PLAN.md`
-for the MCP design in full. Phase 1 and Phase 1.5 (the REST-only and
-MCP-introduction predecessors) are documented as completed history in
-`docs/PHASE1_PLAN.md` and `docs/IMPLEMENTATION_PLAN.md`.
+bearer authentication may be disabled,
+`docs/adr/0005-single-structured-entry-point-for-chat-exports.md` for why
+`create_inbox_note` renders structured chat exports instead of exposing a
+second write tool, and `docs/MCP_IMPLEMENTATION_PLAN.md` for the MCP design
+in full. Phase 1 and Phase 1.5 (the REST-only and MCP-introduction
+predecessors) are documented as completed history in `docs/PHASE1_PLAN.md`
+and `docs/IMPLEMENTATION_PLAN.md`.
 
 ## Security invariants
 
@@ -93,6 +96,37 @@ existing file already directly inside it. Neither can overwrite, delete,
 move, or rename notes, and `create_inbox_note` does not accept a path from
 the caller.
 
+**`create_inbox_note` takes a structured summary, not raw Markdown** (issue
+#12 / `docs/adr/0005-*.md`). The client reads the conversation, picks an
+`export.mode`, and fills in the fields that mode defines; the Gateway
+performs no summarisation of its own and instead renders that input into a
+fixed section order and a fixed frontmatter schema. `export.mode` defaults to
+`summary`, so a plain "summarise this and save it" request needs no explicit
+mode. The seven modes are `summary`, `technical`, `history`, `full`,
+`procedure`, `issue`, and `reference` — each mode's own fields are described
+in the tool's generated input schema. Every export gets these headings, in
+this fixed order, regardless of mode:
+
+| Order | Heading | Notes |
+|---|---|---|
+| 1 | `## 要約` | Required; 2–5 sentences summarising the conversation |
+| 2 | `## 決定事項` | Adopted conclusions only; `なし` when empty |
+| 3 | *(mode-specific headings)* | See the tool's input schema for each mode's fields |
+| 4 | `## 未解決の論点` | Open questions, never merged with next actions; `なし` when empty |
+| 5 | `## 次のアクション` | Concrete next steps; `なし` when empty |
+| 6 | `## 関連ノート` | Always `なし` for now — issue #13 adds verified wikilinks here |
+| 7 | `## 出典` | `なし` when empty |
+
+`## 未解決の論点`/`## 次のアクション`/`## 決定事項`/`## 出典` use the
+placeholder `なし` when empty (nothing to record is complete information);
+most mode-specific sections use `未記録` (not captured); `## 原因`
+(`issue` mode's `root_cause`) uses `未解決` specifically, since an empty
+cause means the cause was not established. Frontmatter is generated with a
+stable key order — `title`, `created`, `updated`, `source: chatgpt`,
+`export_mode`, optionally `project` and `conversation_type`, then `tags` —
+and none of those keys can be supplied as free-form `frontmatter` alongside
+`export`.
+
 **Write approval is not left to `ToolAnnotations` alone.** Both
 `create_inbox_note` and `append_inbox_note` are annotated
 `readOnlyHint: false`, which is a signal a client's own policy can choose to
@@ -159,6 +193,8 @@ should run `search_notes`/`read_note` without a prompt. A save request:
 
 should prompt for approval before `create_inbox_note` runs, and Codex should
 only report the note as saved after the tool call actually returns success.
+A plain "summarise and save" prompt like this one exercises the default
+`export.mode: summary` path.
 
 ### MCP Inspector
 
@@ -207,6 +243,28 @@ after changing any router/model), or `GET /docs` on a running instance.
 `docs/PHASE1_PLAN.md` section 4.5 for why. `POST /api/v1/inbox/notes/append`
 follows the same reasoning: the target note's path is a JSON body field
 (`path`), not a URL path segment.
+
+`POST /api/v1/inbox/notes` accepts **either** the raw-Markdown fields
+(`content`, optionally `frontmatter`) that existing callers already use, or
+the structured `export` field described under MCP's "Tools" section above —
+never both, and never `export` together with `frontmatter` (its frontmatter
+is formatter-owned). Exactly one of `content` or `export` is required.
+
+```json
+{"title": "Gateway smoke test", "content": "# Gateway smoke test\n"}
+```
+
+```json
+{
+  "title": "MCPゲートウェイの構造化エクスポート設計",
+  "export": {"tldr": ["create_inbox_noteを構造化入力の単一窓口に拡張した。"]}
+}
+```
+
+`updated` in a structured export's frontmatter is set once, at creation
+time, to the same value as `created`. `POST /api/v1/inbox/notes/append`
+writes raw bytes and does not parse or rewrite frontmatter, so appending to
+a note does not currently advance its `updated` field.
 
 `GET /api/v1/search` and `GET /api/v1/vault/tree` both support an opaque
 `cursor` query parameter for pagination — take the previous response's
@@ -338,6 +396,14 @@ covers the seven tools directly, unmounted; `test_mcp_lifespan.py` and two
 tests in `test_mcp_protocol.py` that need their own event loop build an
 independent, throwaway MCP server instead.
 
+`tests/test_chat_export.py` covers the structured-chat-export formatter
+(`app/services/chat_export.py`) in isolation — a pure function of its
+arguments, so it needs no fixtures beyond a fixed clock: every mode's
+headings and required fields, empty-state placeholders, frontmatter key
+order and omission rules, tag normalisation, and the cases where validation
+must run against normalised text rather than the raw request (a field that
+is non-empty before normalisation but empty after it, e.g. `steps: ["\n"]`).
+
 ## Docker / Compose
 
 ```bash
@@ -431,6 +497,11 @@ curl -i -X POST "$BASE/mcp/" -H 'Content-Type: application/json' \
 curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+
+# MCP create_inbox_note: minimal structured export, mode defaults to "summary"
+curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
+     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_inbox_note","arguments":{"title":"MCP structured export check","export":{"tldr":["OMV checklist smoke test."]}}}}'
 ```
 
 Walk the vault tree a level at a time to confirm pagination works end to

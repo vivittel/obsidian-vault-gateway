@@ -12,6 +12,7 @@ in the adapter that calls in here.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import Depends
@@ -20,6 +21,7 @@ from app.config import Settings, SettingsDep
 from app.exceptions import ValidationError
 from app.models import (
     AppendedNoteResponse,
+    ChatExport,
     CreatedNoteResponse,
     FrontmatterValue,
     HealthResponse,
@@ -32,6 +34,7 @@ from app.models import (
     VaultTreeResponse,
 )
 from app.services import cursor_service, note_service
+from app.services.chat_export import render_chat_export
 from app.services.inbox_service import append_inbox_note, create_inbox_note
 from app.services.search_service import search_notes
 from app.services.vault_service import list_tree, resolve_folder, summarise_vault
@@ -272,6 +275,28 @@ class GatewayApplication:
             path=relative,
             title=created.title,
             modified_at=created.modified_at,
+        )
+
+    def create_chat_export_note(self, *, title: str, export: ChatExport) -> CreatedNoteResponse:
+        """Render a structured chat export and write it via :meth:`create_inbox_note`.
+
+        A second method rather than an extra parameter on
+        :meth:`create_inbox_note`: MCP can only ever send ``export`` (never
+        ``content``/``frontmatter``), so the "exactly one of" rule is a REST
+        request-shape concern that belongs on ``InboxNoteCreateRequest``, not
+        here. Both paths still converge on the one
+        ``inbox_service.create_inbox_note`` call, which is the invariant that
+        actually matters (single write path, single never-overwrite guarantee).
+
+        This is the only place ``datetime.now()`` appears in ``app/`` — the
+        formatter (``app.services.chat_export``) stays a pure function of its
+        arguments so it can be tested with a fixed clock, and this layer
+        already owns ``Settings`` (including the configured timezone).
+        """
+        now = datetime.now(tz=self.settings.timezone)
+        rendered = render_chat_export(export, title=title, now=now)
+        return self.create_inbox_note(
+            title=title, content=rendered.content, frontmatter=rendered.frontmatter
         )
 
     def append_inbox_note(self, *, path: str, content: str) -> AppendedNoteResponse:

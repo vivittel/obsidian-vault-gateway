@@ -39,11 +39,14 @@ def create_note(
     application: ApplicationDep,
     response: Response,
 ) -> CreatedNoteResponse:
-    created = application.create_inbox_note(
-        title=body.title,
-        content=body.content,
-        frontmatter=body.frontmatter,
-    )
+    if body.export is not None:
+        created = application.create_chat_export_note(title=body.title, export=body.export)
+    else:
+        created = application.create_inbox_note(
+            title=body.title,
+            content=body.content,
+            frontmatter=body.frontmatter,
+        )
     request.state.created_note = created.path
     response.headers["Location"] = f"/api/v1/notes?path={quote(created.path, safe='/')}"
     return created

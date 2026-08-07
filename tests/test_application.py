@@ -14,7 +14,7 @@ import pytest
 from app.application import GatewayApplication
 from app.config import Settings, get_settings
 from app.exceptions import InvalidCursorError, ValidationError
-from app.models import CreatedNoteResponse, HealthResponse, NoteResponse, SearchResponse
+from app.models import ChatExport, CreatedNoteResponse, HealthResponse, NoteResponse, SearchResponse
 
 TEST_API_TOKEN = "test-token-0123456789abcdef"  # noqa: S105 - test fixture, not a real secret
 
@@ -104,6 +104,84 @@ def test_create_inbox_note_returns_created_note_response(
     response = application.create_inbox_note(title="App layer test", content="x\n")
     assert isinstance(response, CreatedNoteResponse)
     assert response.path == "00_Inbox/ChatGPT/App layer test.md"
+
+
+def test_create_chat_export_note_returns_created_note_response(
+    application: GatewayApplication,
+) -> None:
+    response = application.create_chat_export_note(
+        title="App layer export test", export=ChatExport(tldr=["ok"])
+    )
+    assert isinstance(response, CreatedNoteResponse)
+    assert response.path == "00_Inbox/ChatGPT/App layer export test.md"
+
+
+def test_create_chat_export_note_writes_frontmatter_in_the_documented_order(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    application.create_chat_export_note(
+        title="Frontmatter order test",
+        export=ChatExport(tldr=["ok"], project="p", conversation_type="c", tags=["x"]),
+    )
+    note = application.read_note(path="00_Inbox/ChatGPT/Frontmatter order test.md")
+    assert list(note.frontmatter.keys()) == [
+        "title",
+        "created",
+        "updated",
+        "source",
+        "export_mode",
+        "project",
+        "conversation_type",
+        "tags",
+    ]
+
+
+def test_create_chat_export_note_timestamps_use_the_configured_timezone(
+    application: GatewayApplication,
+) -> None:
+    response = application.create_chat_export_note(
+        title="Timezone test", export=ChatExport(tldr=["ok"])
+    )
+    assert response.modified_at.utcoffset().total_seconds() == 9 * 3600
+
+
+def test_created_chat_export_note_is_readable_via_read_note(
+    application: GatewayApplication,
+) -> None:
+    application.create_chat_export_note(
+        title="Round trip test", export=ChatExport(tldr=["ok"], decisions=["d"])
+    )
+    note = application.read_note(path="00_Inbox/ChatGPT/Round trip test.md")
+    assert note.frontmatter["source"] == "chatgpt"
+    assert note.frontmatter["export_mode"] == "summary"
+    assert "## 決定事項" in note.content
+
+
+def test_create_chat_export_note_title_differs_from_frontmatter_and_h1_after_sanitising(
+    application: GatewayApplication,
+) -> None:
+    response = application.create_chat_export_note(
+        title="a/b:c*d", export=ChatExport(tldr=["ok"])
+    )
+    assert response.title == "a-b-c-d"
+    note = application.read_note(path=response.path)
+    assert note.frontmatter["title"] == "a/b:c*d"
+    # NoteResponse.content is the body markdown_parser split off after the
+    # closing frontmatter delimiter; the blank line _render_note always
+    # inserts between the delimiter and the body (pre-existing, untouched
+    # behaviour) is part of that body, hence the leading "\n" here.
+    assert note.content.startswith("\n# a/b:c*d\n")
+
+
+def test_create_chat_export_note_title_injection_stays_confined_to_one_line(
+    application: GatewayApplication,
+) -> None:
+    response = application.create_chat_export_note(
+        title="正常タイトル\n## 偽見出し\n---", export=ChatExport(tldr=["ok"])
+    )
+    note = application.read_note(path=response.path)
+    heading_lines = [line for line in note.content.splitlines() if line.startswith("## ")]
+    assert not any("偽見出し" in line for line in heading_lines)
 
 
 def test_no_response_field_contains_an_absolute_path(
