@@ -133,6 +133,28 @@ def test_create_chat_export_note_verifies_and_links_related_notes(
     assert "## 関連ノート\n\n- [[Knowledge/PC/GPU/RTX 5070]]" in written
 
 
+def test_create_chat_export_note_oversized_related_note_candidate_does_not_block_export(
+    application: GatewayApplication, vault_root: Path
+) -> None:
+    # A path over path_security.MAX_PATH_LENGTH (1024) must be dropped like
+    # any other unresolvable candidate, not reject the whole export — the
+    # schema (ChatExport.related_notes's NotePath) deliberately carries no
+    # per-item length bound for exactly this reason.
+    oversized = "Knowledge/" + "a" * 1020 + ".md"
+    response = application.create_chat_export_note(
+        title="Oversized related note candidate test",
+        export=ChatExport(
+            tldr=["ok"],
+            related_notes=[oversized, "Knowledge/PC/GPU/RTX 5070.md"],
+        ),
+    )
+    assert response.related_notes_linked == 1
+    assert response.related_notes_skipped == 1
+
+    written = (vault_root / response.path).read_text(encoding="utf-8")
+    assert "## 関連ノート\n\n- [[Knowledge/PC/GPU/RTX 5070]]" in written
+
+
 def test_create_inbox_note_reports_zero_related_notes(
     application: GatewayApplication,
 ) -> None:

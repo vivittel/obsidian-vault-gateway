@@ -135,13 +135,17 @@ The Gateway re-verifies every path against the Vault at write time and
 renders only the survivors as `[[Vault/relative/path]]` wikilinks — the full
 path, with no alias, so a link never depends on a basename lookup and two
 notes sharing a basename in different folders still resolve unambiguously.
-A path that no longer resolves, is a duplicate, is syntactically hazardous
-(e.g. contains `[`, `]`, `|`, `#`, or `^`), or is submitted beyond the
-maximum is silently omitted rather than blocking the save; the response's
+A single candidate that no longer resolves, is a duplicate, or is
+syntactically hazardous (e.g. contains `[`, `]`, `|`, `#`, or `^`) is
+silently omitted rather than blocking the save; the response's
 `related_notes_linked` / `related_notes_skipped` counts — not the input —
-are the record of what was actually linked. This canonical format governs
-only links the Gateway itself renders; pre-existing hand-authored wikilinks
-elsewhere in the Vault are untouched.
+are the record of what was actually linked. Submitting *more than* the
+documented maximum is a different, harder failure: unlike an individual bad
+path, an over-count list is rejected outright (the whole request fails
+validation), the same way every other list field on `export` already
+behaves. This canonical format governs only links the Gateway itself
+renders; pre-existing hand-authored wikilinks elsewhere in the Vault are
+untouched.
 
 **Write approval is not left to `ToolAnnotations` alone.** Both
 `create_inbox_note` and `append_inbox_note` are annotated

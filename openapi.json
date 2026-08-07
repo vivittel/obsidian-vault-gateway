@@ -211,7 +211,6 @@
           "related_notes": {
             "description": "Vault-relative .md paths of existing notes this conversation relates to — call search_notes first and pass paths exactly as it returned them; never invent or guess a path. Usually 3-5 items, at most 10. The Gateway re-verifies every path when writing the note: a path it cannot verify is left out rather than blocking the export, so the rendered '## 関連ノート' section — not this input — is the record of what actually got linked.",
             "items": {
-              "maxLength": 1024,
               "type": "string"
             },
             "maxItems": 10,
@@ -379,7 +378,7 @@
             "type": "integer"
           },
           "related_notes_skipped": {
-            "description": "Number of export.related_notes candidates omitted — invalid, missing, duplicate, or over the maximum link count. Always 0 for the raw content/frontmatter path.",
+            "description": "Number of export.related_notes candidates omitted because they could not be verified — invalid, missing, or duplicate. Always 0 for the raw content/frontmatter path. Submitting more than the documented maximum is a separate, harder failure: the whole request is rejected before this count is ever produced.",
             "minimum": 0.0,
             "title": "Related Notes Skipped",
             "type": "integer"

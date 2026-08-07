@@ -1013,3 +1013,44 @@ ADR-0005決定8の制約を保ったまま実装する。設計判断は
 ### 未解決事項
 
 - 上記「未解決 / 実機でのみ確認できること」を参照
+
+### PR #17レビュー対応（追加コミット）
+
+PR #17へのコードレビューで指摘（マージブロッカー1件・ドキュメント矛盾1件）を
+受け、マージ前に修正した。P1は実際に`ChatExport(...)`を実行して再現し、
+技術的に正しいと確認した上で対応した。
+
+1. **[P1] `NotePath`の`max_length=1024`が、1件の長すぎる候補でexport全体を
+   拒否していた。** `resolve_related_notes`（S3）は1100文字の候補をサービス
+   単体では正しく除外できていたが、その手前の`ChatExport`モデル自体が
+   pydanticスキーマで1024文字超を拒否するため、実際のMCP/REST経路では
+   `resolve_related_notes`まで到達する前にexport全体が失敗していた
+   （`test_related_notes.py`のサービス単体テストは`resolve_related_notes`を
+   直接呼ぶため、この矛盾を検出できていなかった）。issue #13の「個別の無効
+   候補はexportを阻害しない」契約に反する。`NotePath`を`str`（長さ制約なし）
+   へ変更し、長さの妥当性判定は既存の`path_security`の`MAX_PATH_LENGTH`
+   チェック（`resolve_read_path`経由、`resolve_related_notes`が
+   `GatewayError`として捕捉）に一元化した。リスト全体の件数上限
+   （`max_length=MAX_RELATED_NOTES`）だけがスキーマ強制のままであることは
+   変えていない。`app/application.py`・`app/mcp_server.py`（MCP経由）・
+   REST経由の3層それぞれで「1025文字の候補+有効な候補」を渡し、有効な方だけ
+   リンクされexportが成功することを確認するテストを追加した
+   （`tests/test_application.py`・`tests/test_mcp_tools.py`・
+   `tests/test_inbox.py`）
+2. **[P2] `related_notes_skipped`のdescriptionとREADMEが「上限超過は
+   silently omitted」と実装と矛盾する説明をしていた。** 実際は
+   `ChatExport.related_notes`自体のリスト件数上限（10件）はpydanticスキーマ
+   レベルでexport全体を拒否する（P1と同じ理由で「個別候補の除外」とは別の
+   失敗モード）。`CreatedNoteResponse.related_notes_skipped`のdescriptionから
+   「or over the maximum link count」を削除し、上限超過は別の失敗モードで
+   ある旨を明記。`README.md`の関連ノート段落も同様に「個別候補の除外」と
+   「上限超過の拒否」を明確に分けて説明する形へ修正した
+
+`openapi.json`を再生成した（`ChatExport.related_notes.items`から
+`maxLength`が消える）。`tests/test_mcp_tools.py`の
+`test_create_inbox_note_export_schema_related_notes_is_bounded`をこの
+スキーマ変更に合わせて修正した。
+
+再検証: `.venv/bin/ruff check .` → All checks passed、`.venv/bin/pytest -q` →
+711 passed（PR #17時点708件 + 本修正で3件追加）、
+`.venv/bin/python scripts/export_openapi.py --check` → up to date。

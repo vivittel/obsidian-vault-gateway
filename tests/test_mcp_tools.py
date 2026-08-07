@@ -100,8 +100,11 @@ async def test_create_inbox_note_export_schema_related_notes_is_bounded() -> Non
     schema = tools["create_inbox_note"].input_schema
     export_schema = schema["$defs"]["ChatExport"]["properties"]
     related_notes_schema = export_schema["related_notes"]
+    # Only the list's item COUNT is schema-enforced; an individual item's
+    # shape (e.g. length) is not, so one oversized candidate never blocks
+    # the whole export — see the oversized-candidate test further below.
     assert related_notes_schema["maxItems"] == 10
-    assert related_notes_schema["items"]["maxLength"] == 1024
+    assert "maxLength" not in related_notes_schema["items"]
     assert "search_notes" in related_notes_schema["description"]
 
 
@@ -490,6 +493,25 @@ async def test_create_inbox_note_accepts_related_notes_and_links_verified_target
             },
         },
     )
+    assert result.structured_content["related_notes_linked"] == 1
+    assert result.structured_content["related_notes_skipped"] == 1
+
+
+async def test_create_inbox_note_oversized_related_note_candidate_does_not_block_export(
+    env: None,
+) -> None:
+    oversized = "Knowledge/" + "a" * 1020 + ".md"
+    result = await mcp.call_tool(
+        "create_inbox_note",
+        {
+            "title": "Oversized related note MCP test",
+            "export": {
+                "tldr": ["y"],
+                "related_notes": [oversized, "Knowledge/PC/GPU/RTX 5070.md"],
+            },
+        },
+    )
+    assert result.is_error is False
     assert result.structured_content["related_notes_linked"] == 1
     assert result.structured_content["related_notes_skipped"] == 1
 

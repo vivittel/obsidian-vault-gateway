@@ -159,15 +159,17 @@ Label = Annotated[str, Field(min_length=1, max_length=_MAX_LABEL_CHARS)]
 # follows. Sharing Label here (min_length=1) would reject "" before the
 # formatter ever saw it, contradicting that convention for tags specifically.
 Tag = Annotated[str, Field(max_length=_MAX_LABEL_CHARS)]
-# No min_length either, for the same reason as Tag: an empty, whitespace-only,
-# or otherwise unresolvable candidate is silently omitted by
-# app.services.related_notes.resolve_related_notes rather than rejected by the
-# schema, so "" must reach that layer instead of failing validation first. The
-# 1024 bound matches app.services.path_security.MAX_PATH_LENGTH; it is
-# repeated here (as InboxNoteAppendRequest.path already does below) rather
-# than imported, since app/models.py deliberately depends on nothing under
-# app/services.
-NotePath = Annotated[str, Field(max_length=1024)]
+# No length bound either, unlike every other string field in this module:
+# an empty, over-length, or otherwise unresolvable candidate must be silently
+# omitted by app.services.related_notes.resolve_related_notes (via
+# path_security's own MAX_PATH_LENGTH check, which raises a GatewayError that
+# service already catches) rather than rejected by the schema. A
+# Field(max_length=...) here would reject the *entire* export over one
+# oversized candidate — exactly the "must not block export" contract issue
+# #13 forbids for an individual invalid path. Only the list's own item COUNT
+# is schema-enforced (ChatExport.related_notes's max_length=MAX_RELATED_NOTES
+# below); an individual item's shape never is.
+NotePath = str
 
 
 class TimelineEntry(BaseModel):
@@ -546,9 +548,11 @@ class CreatedNoteResponse(BaseModel):
     related_notes_skipped: int = Field(
         ge=0,
         description=(
-            "Number of export.related_notes candidates omitted — invalid, "
-            "missing, duplicate, or over the maximum link count. Always 0 for "
-            "the raw content/frontmatter path."
+            "Number of export.related_notes candidates omitted because they "
+            "could not be verified — invalid, missing, or duplicate. Always 0 "
+            "for the raw content/frontmatter path. Submitting more than the "
+            "documented maximum is a separate, harder failure: the whole "
+            "request is rejected before this count is ever produced."
         ),
     )
 
