@@ -881,3 +881,135 @@ passed、`.venv/bin/pytest -q` 502 passed、
 再検証: `.venv/bin/ruff check .` → All checks passed、`.venv/bin/pytest -q` →
 642 passed（Fix適用前628件+新規14件）、
 `.venv/bin/python scripts/export_openapi.py --check` → up to date。
+
+# 検証済み関連ノートwikilink（issue #13）
+
+`ChatExport`に`related_notes`入力を追加し、Gateway側で全件再検証してから
+`## 関連ノート`をwikilinkとして決定的にレンダリングする。検証（Vaultアクセス）と
+整形（純粋関数）を分離し、`app/services/chat_export.py`のfilesystem非依存という
+ADR-0005決定8の制約を保ったまま実装する。設計判断は
+`docs/adr/0006-verified-related-note-wikilinks.md`に記録した。
+
+- [x] 1. S1: `app/models.py`に`MAX_RELATED_NOTES`（公開定数、10）・`NotePath`
+      （`min_length`なし）を追加。`ChatExport.related_notes`を`next_actions`と
+      `sources`の間に宣言。`ChatExport`docstringを差し替え。`CreatedNoteResponse`に
+      `related_notes_linked`/`related_notes_skipped`（defaultなし・required）を追加
+- [x] 2. S2: `app/services/chat_export.py`に`is_renderable_wikilink_target`・
+      `format_wikilink`を追加（危険文字`[` `]` `|` `#` `^`・改行・制御文字・
+      `.md.md`を拒否）。`render_chat_export`に`verified_related_notes`引数を追加
+      （既定値`()`）。`_render_related_notes_section`が検証済みリストのみを
+      レンダリングし、`export.related_notes`は直接読まない
+- [x] 3. S3: 新規`app/services/related_notes.py`。`resolve_related_notes`が
+      `path_security.resolve_read_path`で候補を再検証。上限判定はループ先頭で
+      `>=`（`max_links=0`が機能するように）。重複排除はvault相対パス文字列のみ
+      （inodeでは畳まない）。`FileNotFoundError`は不存在として除外、その他の
+      `OSError`は伝播させる
+- [x] 4. S4: `app/application.py`の`create_chat_export_note`が
+      `resolve_related_notes`→`render_chat_export(verified_related_notes=...)`→
+      `create_inbox_note`→`model_copy`でカウントを付与する順に配線。
+      `create_inbox_note`のレスポンス構築に明示的な`0`/`0`を追加。limiterや
+      `to_thread`は使わない（SDKの`func_metadata.py`実測により、対象ツールは
+      既にイベントループ外で実行されることを確認済み）
+- [x] 5. S5: `app/mcp_server.py`の`create_inbox_note`の`description=`に
+      関連ノートの段落を追加。`SERVER_INSTRUCTIONS`・ミドルウェアは変更不要
+- [x] 6. S6: 新規`tests/test_related_notes.py`（サービス単体、共有fixture
+      vaultへファイルを追加しない）。`tests/test_chat_export.py`・
+      `test_mcp_tools.py`・`test_mcp_protocol.py`・`test_rest_regression.py`・
+      `test_application.py`・`test_inbox.py`を更新
+- [x] 7. S7: `openapi.json`再生成
+- [x] 8. S8: ADR-0006新規作成。ADR-0005へ前方参照を追加。`README.md`・
+      `docs/IMPLEMENTATION_PLAN.md`§12・§17・本セクションを更新
+
+各スライス完了後に`.venv/bin/pytest -q`・`.venv/bin/ruff check .`・
+`.venv/bin/python scripts/export_openapi.py --check`を実行した（全件通過）。
+
+## 実装しないもの（対象外、別issueへ）
+
+- 短縮形`[[Note]]`（basename一意時）— 書き込み経路での全Vault走査が必要、かつ
+  時間をまたいだ決定性が壊れる（ADR-0006 Alternative 3）
+- alias（`|Title`）— リンク識別子は検証済みvault相対パスだけで完結させる
+  （ADR-0006 決定1・Alternative 1・2）
+- 落としたパスそのものをレスポンスに載せること（今回は件数のみ、ADR-0006
+  Alternative 6）
+- 重複ノート検出 → issue #14 / 昇格ワークフロー → issue #15
+- `append_inbox_note`での関連ノート追記
+- 非Markdownファイルへのリンク（issueのopen questionだが将来検討）
+
+## 未解決 / 実機でのみ確認できること
+
+- OMV / LiveSync / PC Obsidianでの実機検証は本PRでは未実施（開発機にdockerが
+  無いため）→ README「OMV verification checklist」の新設curl（`related_notes`
+  付きの`create_inbox_note`呼び出し）に従い、実在ノートを指すリンクが
+  Obsidian上で解決すること・バックリンクに現れることを実機で確認する
+- LiveSyncが実際にVaultへ書き込んでいる最中の`resolve_read_path`の
+  TOCTOU（`resolve()`成功後の`stat()`失敗）は、テストではmockで再現したのみで
+  実際のLiveSync書き込みタイミングとの競合は未確認
+
+## Review
+
+### 変更ファイル
+
+- 新規: `app/services/related_notes.py`, `tests/test_related_notes.py`,
+  `docs/adr/0006-verified-related-note-wikilinks.md`
+- 変更: `app/models.py`（`MAX_RELATED_NOTES`・`NotePath`・
+  `ChatExport.related_notes`・`ChatExport`docstring・`CreatedNoteResponse`の
+  2フィールド追加）
+- 変更: `app/services/chat_export.py`（`_WIKILINK_HAZARD_RE`・
+  `is_renderable_wikilink_target`・`format_wikilink`を追加、
+  `_render_related_notes_section`/`_build_content`/`render_chat_export`の
+  シグネチャ変更、モジュールdocstring更新）
+- 変更: `app/application.py`（`create_chat_export_note`の配線、
+  `create_inbox_note`のレスポンス構築）
+- 変更: `app/mcp_server.py`（`create_inbox_note`の`description=`）
+- 変更: `openapi.json`（再生成。`ChatExport.related_notes`・
+  `CreatedNoteResponse`の2フィールド追加を反映）
+- 変更: `docs/adr/0005-*.md`（ADR-0006への前方参照を1行追加）
+- 変更: `tests/test_chat_export.py`, `tests/test_mcp_tools.py`,
+  `tests/test_mcp_protocol.py`, `tests/test_rest_regression.py`,
+  `tests/test_application.py`, `tests/test_inbox.py`
+- 変更: `README.md`（Tools節の表・責務分担段落、Testing節、OMV checklist）
+- 変更: `docs/IMPLEMENTATION_PLAN.md`（§12「検証済み関連ノートwikilink」小節、
+  §17テスト構成）
+
+### テスト結果
+
+- `.venv/bin/ruff check .` → All checks passed
+- `.venv/bin/pytest -q` → 708 passed（前PR時点642件 + 本PRで66件追加）
+- `.venv/bin/python scripts/export_openapi.py --check` → up to date
+
+### 計画段階のレビューで修正した点（コードを書く前に発見）
+
+計画レビュー（3ラウンド）で発見・修正した設計上の誤りをここに記録する。実装は
+最終版の計画に沿って行ったため、実装中の逸脱ではない。
+
+1. **`related_notes`を必須入力にしていた。** 当初案`list[NotePath]`のまま
+   `default_factory=list`を付けないと、検索0件・関連ノートなしのexportが
+   常に失敗する。`default_factory=list`を追加した
+2. **`CreatedNoteResponse`のカウンタに`= 0`を付けると「defaultありのrequired
+   field」という用語矛盾になる。** JSON Schema上、default付きフィールドは
+   requiredにならない。`Field(ge=0)`（defaultなし）に変更し、raw content経路で
+   明示的に`0`/`0`を渡す形にした
+3. **`except (GatewayError, OSError)`は広すぎた。** `resolve_read_path`の
+   末尾`stat()`はtry/except外にあり、LiveSyncとのTOCTOUで`FileNotFoundError`が
+   伝播し得ることは正しい着眼点だったが、`OSError`を丸ごと捕まえると
+   `PermissionError`等のI/O障害まで「候補が無効だった」扱いで握り込んでしまう。
+   `except (GatewayError, FileNotFoundError)`に絞った
+4. **重複排除に`(st_dev, st_ino)`を使う案を一度採用しかけて撤回した。**
+   このGatewayではノートの同一性が一貫してvault相対パスであり
+   （`SearchResultItem.id`/`path`、`ResolvedNote.relative`）、
+   `resolve_read_path`はhardlinkを禁止していない。inodeで畳むと、クライアントが
+   `search_notes`の結果から正当に選んだリンクの片方を勝手に消すことになる
+5. **上限判定をループ末尾（`links.append`の後に`len(links) == max_links`）に
+   置く案は`max_links=0`で機能しない。** 1件目追加後に`1 == 0`が偽になり、
+   上限0が効かず全候補が入ってしまう矛盾に気づき、判定をループ先頭・`>=`へ
+   修正した
+6. **alias却下の理由づけを一度誤った。** 「aliasにはfrontmatter読み取りが
+   必須」と書いたが、basenameからもalias文字列は作れるため事実として誤り。
+   「リンク識別子は検証済みvault相対パスだけで完結させる。aliasは解決に不要な
+   表示情報で、frontmatter由来なら内容読み取りが増え、basename由来なら別の
+   表示名生成規則が増える」という正確な言い方へ修正した（ADR-0006決定1・
+   Alternative 1・2）
+
+### 未解決事項
+
+- 上記「未解決 / 実機でのみ確認できること」を参照

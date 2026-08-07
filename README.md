@@ -114,7 +114,7 @@ this fixed order, regardless of mode:
 | 3 | *(mode-specific headings)* | See the tool's input schema for each mode's fields |
 | 4 | `## 未解決の論点` | Open questions, never merged with next actions; `なし` when empty |
 | 5 | `## 次のアクション` | Concrete next steps; `なし` when empty |
-| 6 | `## 関連ノート` | Always `なし` for now — issue #13 adds verified wikilinks here |
+| 6 | `## 関連ノート` | Verified wikilinks, or `なし` when none survive verification |
 | 7 | `## 出典` | `なし` when empty |
 
 `## 未解決の論点`/`## 次のアクション`/`## 決定事項`/`## 出典` use the
@@ -126,6 +126,22 @@ stable key order — `title`, `created`, `updated`, `source: chatgpt`,
 `export_mode`, optionally `project` and `conversation_type`, then `tags` —
 and none of those keys can be supplied as free-form `frontmatter` alongside
 `export`.
+
+**Related notes are client-selected, Gateway-verified** (issue #13 /
+`docs/adr/0006-*.md`). The client calls `search_notes`, picks relevant
+results, and passes their vault-relative `.md` paths in
+`export.related_notes` (usually 3-5, at most 10) — it never invents a path.
+The Gateway re-verifies every path against the Vault at write time and
+renders only the survivors as `[[Vault/relative/path]]` wikilinks — the full
+path, with no alias, so a link never depends on a basename lookup and two
+notes sharing a basename in different folders still resolve unambiguously.
+A path that no longer resolves, is a duplicate, is syntactically hazardous
+(e.g. contains `[`, `]`, `|`, `#`, or `^`), or is submitted beyond the
+maximum is silently omitted rather than blocking the save; the response's
+`related_notes_linked` / `related_notes_skipped` counts — not the input —
+are the record of what was actually linked. This canonical format governs
+only links the Gateway itself renders; pre-existing hand-authored wikilinks
+elsewhere in the Vault are untouched.
 
 **Write approval is not left to `ToolAnnotations` alone.** Both
 `create_inbox_note` and `append_inbox_note` are annotated
@@ -404,6 +420,13 @@ order and omission rules, tag normalisation, and the cases where validation
 must run against normalised text rather than the raw request (a field that
 is non-empty before normalisation but empty after it, e.g. `steps: ["\n"]`).
 
+`tests/test_related_notes.py` covers `app/services/related_notes.py` —
+verified related-note wikilink resolution (issue #13 / `docs/adr/0006-*.md`)
+— against disposable vaults built directly under `tmp_path`, including
+ambiguous same-basename paths, hazardous filenames, duplicate/hardlinked
+targets, and the maximum-link boundary; it deliberately never adds files to
+the shared `tests/fixtures/vault/` tree other tests' counts depend on.
+
 ## Docker / Compose
 
 ```bash
@@ -502,6 +525,15 @@ curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
 curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_inbox_note","arguments":{"title":"MCP structured export check","export":{"tldr":["OMV checklist smoke test."]}}}}'
+
+# MCP create_inbox_note with related_notes: substitute $REAL_NOTE_PATH with a
+# real vault-relative .md path from a prior search_notes result. The response
+# should show related_notes_linked=1, related_notes_skipped=1 (the invalid
+# entry is dropped, not blocking the write), and the created note's
+# "## 関連ノート" section should contain exactly one wikilink, not two.
+curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
+     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_inbox_note","arguments":{"title":"MCP related notes check","export":{"tldr":["OMV checklist related-notes smoke test."],"related_notes":["'"$REAL_NOTE_PATH"'","Knowledge/does-not-exist.md"]}}}}'
 ```
 
 Walk the vault tree a level at a time to confirm pagination works end to
@@ -509,6 +541,10 @@ end: request `/api/v1/vault/tree` with a small `limit`, follow `next_cursor`
 until it comes back null, and confirm every entry was seen exactly once.
 Repeat for `/api/v1/search` with `$QUERY` and a `limit` smaller than its
 match count.
+
+For the `related_notes` check above: open the created note in Obsidian and
+confirm the wikilink resolves (not shown as unresolved/red) and that the note
+appears in the linked note's backlinks pane.
 
 **The `POST /api/v1/inbox/notes` and any `create_inbox_note` calls above
 create a real note in `00_Inbox/ChatGPT` on your vault; `append_inbox_note`

@@ -508,7 +508,7 @@ frontmatterキー順）だけを転記する。
 | 3 | *(モード固有ブロック)* | モードごとに異なる |
 | 4 | `## 未解決の論点` | `なし` |
 | 5 | `## 次のアクション` | `なし` |
-| 6 | `## 関連ノート` | `なし`（issue #13が入力フィールドを追加するまで常にこれ） |
+| 6 | `## 関連ノート` | `なし`（検証済みリンクが0件のとき） |
 | 7 | `## 出典` | `なし` |
 
 モード固有ブロックの見出しはモードごとに固定（例: `summary`→`## 概要`/`## 要点`、
@@ -525,6 +525,21 @@ frontmatterキー順）だけを転記する。
 対して行う。MCP SDKの引数スキーマ検証はツール本体より先に走るため、後者の検証を
 pydanticの`model_validator`に置くと`_McpCall`のサニタイズ処理を経由しない
 生の`ToolError`になってしまう（ADR-0005決定6）。
+
+**検証済み関連ノートwikilink（issue #13）**: `ChatExport.related_notes`は
+クライアントが`search_notes`の結果から選んだvault相対`.md`パスの候補
+（既定・任意入力、上限10件）。`app/services/chat_export.py`は純粋関数のまま
+（Vaultへアクセスしない）で、`export.related_notes`を直接レンダリングしない。
+新規`app/services/related_notes.py`の`resolve_related_notes`が
+`app/application.py`の`create_chat_export_note`から呼ばれ、候補ごとに
+`path_security.resolve_read_path`で再検証してから、検証済みの生存パスだけを
+`render_chat_export`の`verified_related_notes`引数へ渡す。無効・不存在・重複・
+上限超過の個別候補は黙って除外され（exportは失敗しない）、11件以上の指定は
+pydanticスキーマで拒否される（他の全リストフィールドと同じ規約）。
+正規リンク形式は`[[Vault/相対パス]]`（`.md`を除いたフルパス、aliasなし）。
+詳細な決定はすべて`docs/adr/0006-verified-related-note-wikilinks.md`に記録。
+レスポンスの`related_notes_linked`/`related_notes_skipped`が実際にリンクされた
+件数を示す。
 
 ## 13. エラー仕様
 
@@ -721,6 +736,18 @@ handle @obsidian_api {
 - 正規化後データに対する検証（正規化前は非空だが正規化後に空になる入力）
 - タイトル・本文への構造注入（偽見出し）耐性
 - 決定性（同一`now`での再実行がバイト一致すること）
+
+### 検証済み関連ノートwikilink（`tests/test_related_notes.py`、issue #13）
+
+- 実在ノートの受理・指定順の保持
+- 不存在・重複・曖昧なbasename（フルパス形式により推測が発生しないことの証明）
+- 危険文字（`[` `]` `|` `#` `^`）を含む実在ファイル名の除外
+- `Foo.md.md`の除外、symlink・非Markdown・hidden要素の除外
+- 上限件数での打ち切り（`max_links`境界: 負数・0・生存者ちょうど上限）
+- `FileNotFoundError`は不存在として除外、その他の`OSError`は伝播する
+  ことの区別
+- `linked + skipped == candidates`の不変条件
+- `00_Inbox/ChatGPT`内ノートへのリンク許可
 
 ### MCP transport
 
