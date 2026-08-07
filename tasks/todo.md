@@ -702,3 +702,125 @@ ADR-0001〜0003と同じ形式でADR-0004を新規作成した（D2）。
 再検証: `git diff --check` exit 0、`.venv/bin/ruff check .` All checks
 passed、`.venv/bin/pytest -q` 502 passed、
 `.venv/bin/python scripts/export_openapi.py --check` up to date。
+
+# ChatGPTエクスポートの構造化入力対応（issue #12）
+
+`create_inbox_note`を「タイトル + 自由記述Markdown + 任意frontmatter」から
+「タイトル + 構造化サマリー」へ拡張し、Gateway側の決定的フォーマッタが見出し順・
+空セクションの表現・frontmatterキー順を固定する。専用の`export_chat_note`ツールは
+追加しない（書き込みツールが2つになるとツール選択が曖昧になるため）。設計判断は
+`docs/adr/0005-single-structured-entry-point-for-chat-exports.md`に記録した。
+
+- [x] 0. 現状確認（既存の`_render_note`が唯一の整形箇所であること、Markdownレンダラが
+      リポジトリに無いこと、MCPの引数スキーマ検証がツール本体より先に走ることを確認）
+- [x] 1. S1: `app/models.py`に`ChatExport`家族（`ExportMode`/`TimelineEntry`/
+      `TopicSection`/`TermDefinition`）を追加。`app/services/chat_export.py`を新規
+      作成（純粋フォーマッタ）。`tests/test_chat_export.py`を新規作成
+- [x] 2. S2: `app/application.py`に`create_chat_export_note`を追加（`app/`内で
+      唯一`datetime.now()`を呼ぶ箇所）。`CreatedNoteResponse.title`のdescriptionを
+      「ファイル名ステム」へ修正。`tests/test_application.py`に追加
+- [x] 3. S3: MCPツール`create_inbox_note`を`title` + `export`のみに変更し、
+      `content`/`frontmatter`パラメータを削除。`tests/test_mcp_tools.py`・
+      `tests/test_mcp_protocol.py`を更新
+- [x] 4. S4: REST `InboxNoteCreateRequest`に`export`フィールドと排他制約
+      （`content`/`export`のどちらか一方必須、`export`+`frontmatter`拒否）を追加。
+      `app/routers/inbox.py`で分岐。`tests/test_inbox.py`・`tests/test_openapi.py`に
+      追加。`openapi.json`再生成
+- [x] 5. S5: ADR-0005新規作成。`README.md`・`docs/IMPLEMENTATION_PLAN.md`§9・§12・§17
+      を更新。本セクション追加
+
+各スライス完了前に`.venv/bin/pytest -q`・`.venv/bin/ruff check .`・
+`.venv/bin/python scripts/export_openapi.py --check`を実行した（全件通過）。
+
+## 実装しないもの（対象外、別PRへ）
+
+- **`related_notes`入力とwikilink生成 → issue #13**（`Depends on: #12`）。今回は
+  `## 関連ノート`の見出し・位置・空状態（常に`なし`）だけを確定させた
+- **エクスポート前の重複ノート検出 → issue #14**
+- **会話→知識への昇格ワークフロー → issue #15**
+- 作成時のバイト上限（`MAX_REQUEST_BYTES`のみが境界のまま）
+- `append_inbox_note`での`updated`更新（append自体がframtmatterを解析・再直列化しない）
+- クライアント`frontmatter`とフォーマッタ所有キーのマージ（`export`+`frontmatter`は
+  無条件拒否）
+- `FrontmatterValue`の拡張（スカラーとスカラーの平坦リストのまま）
+- 英語見出しモード、8番目のモード、モード別既定タグ・タグ語彙
+- MCP `clientInfo`を`source`へ通すこと（transport非依存の不変条件を壊すため）
+
+## 未解決 / 実機でのみ確認できること
+
+- ChatGPTデスクトップ・Codex CLIが素の「保存して」で実際に`export.mode: summary`を
+  選ぶかは実クライアントでのみ確認できる
+- `ChatExport`が約30フィールド+3 `$defs`に膨らんだことで、モデルがモード外フィールドを
+  誤って埋める頻度が増えないかは実クライアントセッションでの観察が必要
+- Obsidianの Properties UI 上で`project`/`conversation_type`省略時の表示（キー自体が
+  出ないこと）は実機Obsidianでの目視確認が必要
+- Docker・LiveSync・PC/iPhone Obsidianでの実機検証は本PRでは未実施
+  （開発機にdockerが無いため）→ README「OMV verification checklist」の新設curl
+  （MCP `create_inbox_note`の構造化summaryエクスポート呼び出し）に従い実機で確認する
+
+## Review
+
+### 変更ファイル
+
+- 新規: `app/services/chat_export.py`, `tests/test_chat_export.py`,
+  `docs/adr/0005-single-structured-entry-point-for-chat-exports.md`
+- 変更: `app/models.py`（`ChatExport`家族の追加、`InboxNoteCreateRequest`の
+  `export`フィールドと排他制約`model_validator`、`CreatedNoteResponse.title`の
+  description修正。`ChatExport`をファイル先頭寄りへ移動して前方参照エラーを回避）
+- 変更: `app/application.py`（`create_chat_export_note`追加）
+- 変更: `app/mcp_server.py`（`create_inbox_note`のシグネチャと`description=`を
+  構造化専用に変更。`FrontmatterValue` importを削除、`ChatExport` importを追加）
+- 変更: `app/routers/inbox.py`（`body.export`の有無で`create_chat_export_note`/
+  `create_inbox_note`を分岐）
+- 変更: `openapi.json`（再生成。`CreatedNoteResponse.title`のdescription変更と
+  `InboxNoteCreateRequest`のフィールド追加を反映）
+- 変更: `tests/test_application.py`, `tests/test_inbox.py`,
+  `tests/test_mcp_protocol.py`, `tests/test_mcp_tools.py`, `tests/test_openapi.py`
+- 変更: `README.md`（イントロのADR一覧、Tools節の見出しマッピング表、REST節の
+  raw/structured両リクエスト例、Testing節、OMV checklistへのMCP構造化呼び出し追加）
+- 変更: `docs/IMPLEMENTATION_PLAN.md`（§9ツール分類表の下に注記、§12へ
+  「構造化エクスポート」小節を追加、§17テスト構成へ`test_chat_export.py`を追加）
+
+### テスト結果
+
+- `.venv/bin/ruff check .` → All checks passed
+- `.venv/bin/pytest -q` → 628 passed（直前のPR時点の502件 + 本PRで126件追加）
+- `.venv/bin/python scripts/export_openapi.py --check` → up to date
+
+### 実装中に発見し、計画から逸脱した点
+
+1. **MCP SDKの動的引数モデル（`ArgModelBase`）は`extra="forbid"`を設定していない。**
+   計画では「トップレベルに`content`/`frontmatter`を送るとToolErrorになる」と想定
+   していたが、実際は pydanticの既定`extra="ignore"`により静かに無視されるだけで
+   あることをインストール済みSDK（`mcp/server/mcpserver/utilities/func_metadata.py`）
+   のソースと実行確認で発見した。`extra="forbid"`が効くのは`ChatExport`自身のような
+   個別パラメータ型（明示的に`ConfigDict(extra="forbid")`を持つ）に限られる。
+   `tests/test_mcp_tools.py`のテストをこの実挙動（無視されるが、その内容は書き込みへ
+   一切反映されない）を検証する形に修正した
+2. **タイトル301文字以上の挙動が変わった。** 旧シグネチャでは`title: str`が
+   bareパラメータのため上限が無く、`sanitise_title`が100文字へ切り詰めていた。
+   REST parityのため`title`に`Annotated[str, Field(min_length=1, max_length=300)]`
+   を追加した結果、301文字以上は`ToolError`（スキーマ拒否）になる。RESTは元から
+   この挙動なので新たな非対称性ではない
+3. **`app/models.py`内で`ChatExport`を`InboxNoteCreateRequest`より前方へ移動する
+   必要があった。** `from __future__ import annotations`下でも、pydanticはクラス
+   定義時にモジュール名前空間で型を解決するため、`InboxNoteCreateRequest.export:
+   ChatExport | None`が`ChatExport`定義より前にあるとエラーになる
+4. **`NoteResponse.content`は`_render_note`の既存挙動により先頭に空行を1つ持つ。**
+   `_render_note`がfrontmatterとbodyの間に空行を1つ挿入し、`markdown_parser`の
+   `_split_frontmatter`は閉じdelimiter直後から`body`を切り出すため、その空行は
+   bodyの一部として残る。chat_export由来ではなく既存の挙動であり、
+   `tests/test_application.py`のタイトル注入テストのアサーションをこれに合わせて
+   修正した
+5. **`CreatedNoteResponse.title`のdescription修正を、計画のS2ではなくS1の
+   モデル追加と同時に`app/models.py`へ適用した。** 同一ファイルの変更なので
+   まとめる方が自然だったため。`openapi.json`もその時点で1回再生成し、S4で
+   再度再生成した
+
+### 未解決事項
+
+- 上記「未解決 / 実機でのみ確認できること」を参照
+- レビューで指摘された「フィールド一覧の列挙順を`frozenset`ではなく`tuple`にする」
+  「`verification`のようなモード共有フィールドのdescriptionが全所有モードを含む
+  ことをテストする」等の計画修正はすべて実装へ反映済み（`_ALL_MODE_FIELDS_IN_ORDER`、
+  `_FIELD_OWNER_MODES`の導出、対応するテスト）

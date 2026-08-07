@@ -387,6 +387,12 @@ find_stale_inbox_notes
 
 MCPツールのread/writeメタデータを正確に設定し、Codex側で`default_tools_approval_mode = "writes"`を使用できるようにする。
 
+`create_inbox_note`はPhase 2以降、構造化入力（`title` + `export`）のみを受け付ける
+（issue #12、`docs/adr/0005-single-structured-entry-point-for-chat-exports.md`）。
+REST `POST /api/v1/inbox/notes`は既存の`content`/`frontmatter`を後方互換として
+維持したうえで同じ`export`フィールドを追加しており、MCPとRESTでツール数・承認方針の
+表は変わらない。
+
 ## 10. 認証
 
 ### 共通トークン検証
@@ -484,6 +490,41 @@ Title-3.md
 > Phase 2の`append_inbox_note`（既存ノートへの追記）は例外として`os.replace()`
 > を使用する — 対象は既存であることが検証済みのノートに限られ、新規作成の
 > 上書き禁止は緩めない。詳細は `docs/adr/0003-allow-os-replace-for-inbox-append.md`。
+
+### 構造化エクスポート
+
+`create_inbox_note`の`export`入力（issue #12）は`app/services/chat_export.py`が
+決定的に整形する。詳細な決定はすべて
+`docs/adr/0005-single-structured-entry-point-for-chat-exports.md`に記録されており、
+本節はその契約のうち後から参照する頻度が高い部分（見出し順・プレースホルダ・
+frontmatterキー順）だけを転記する。
+
+**共通セクション順序（全モード固定）**
+
+| # | 見出し | 空時のプレースホルダ |
+|---|---|---|
+| 1 | `## 要約` | （必須・非空） |
+| 2 | `## 決定事項` | `なし` |
+| 3 | *(モード固有ブロック)* | モードごとに異なる |
+| 4 | `## 未解決の論点` | `なし` |
+| 5 | `## 次のアクション` | `なし` |
+| 6 | `## 関連ノート` | `なし`（issue #13が入力フィールドを追加するまで常にこれ） |
+| 7 | `## 出典` | `なし` |
+
+モード固有ブロックの見出しはモードごとに固定（例: `summary`→`## 概要`/`## 要点`、
+`issue`→`## 症状`/`## 環境`/`## 調査`/`## 原因`/`## 回避策`）。空時は`未記録`が
+既定だが、`issue`モードの`## 原因`のみ`未解決`（原因が未確定であることの明示）。
+全モードの見出し一覧はADR-0005参照。
+
+**frontmatterキー順**: `title` → `created` → `updated` → `source`（常に`chatgpt`）
+→ `export_mode` → `project`（任意、省略可）→ `conversation_type`（任意、省略可）
+→ `tags`。
+
+**検証の分担**: 型・上限はpydantic（`app/models.py`の`ChatExport`）、モードと
+フィールドの組み合わせ検証は`app/services/chat_export.py`が正規化後のデータに
+対して行う。MCP SDKの引数スキーマ検証はツール本体より先に走るため、後者の検証を
+pydanticの`model_validator`に置くと`_McpCall`のサニタイズ処理を経由しない
+生の`ToolError`になってしまう（ADR-0005決定6）。
 
 ## 13. エラー仕様
 
@@ -670,6 +711,16 @@ handle @obsidian_api {
 - `create_inbox_note`
 - tool error変換
 - 構造化レスポンス
+
+### 構造化チャットエクスポート（`tests/test_chat_export.py`、issue #12）
+
+- 全7モードの見出し・順序
+- 空セクションのプレースホルダ（`なし`/`未記録`/`未解決`）
+- frontmatterキー順・省略規則・タグ正規化
+- モード外フィールド・背骨フィールド欠落の拒否とエラーメッセージ
+- 正規化後データに対する検証（正規化前は非空だが正規化後に空になる入力）
+- タイトル・本文への構造注入（偽見出し）耐性
+- 決定性（同一`now`での再実行がバイト一致すること）
 
 ### MCP transport
 

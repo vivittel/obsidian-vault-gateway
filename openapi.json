@@ -34,6 +34,317 @@
         "title": "AppendedNoteResponse",
         "type": "object"
       },
+      "ChatExport": {
+        "additionalProperties": false,
+        "description": "Structured summary of a conversation, ready to be formatted into a note.\n\nOne flat model rather than a discriminated union, because `mode` must\ndefault to \"summary\" when the client omits it and a pydantic discriminated\nunion requires the tag to be present. Fields that do not belong to the\nselected `mode` are rejected by app/services/chat_export.py — inside the\ntool body, so the rejection travels through _McpCall's GatewayError\nconversion instead of the SDK's raw ToolError path.\n\nDeliberately has no `related_notes` field: issue #13 (depends on #12) owns\nverified related-note wikilinks, which require an existence check this\npure model cannot perform. This model and app/services/chat_export.py only\nfix the `## 関連ノート` heading, its position, and its empty placeholder;\nissue #13 adds the input field on top of that without moving either.",
+        "properties": {
+          "context": {
+            "description": "technical mode only. The problem or constraints the design starts from.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Context",
+            "type": "array"
+          },
+          "conversation_type": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional. A short free-form label for the kind of conversation, e.g. 'design', 'debugging', 'review'. Omit it rather than guessing.",
+            "title": "Conversation Type"
+          },
+          "decisions": {
+            "description": "Only conclusions that were actually adopted or choices that were explicitly agreed. Not options still under discussion, and not things left to do — those belong in unresolved_issues and next_actions, never here. Leave empty when nothing was decided.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Decisions",
+            "type": "array"
+          },
+          "definitions": {
+            "description": "reference mode only. Term and meaning pairs.",
+            "items": {
+              "$ref": "#/components/schemas/TermDefinition"
+            },
+            "maxItems": 50,
+            "title": "Definitions",
+            "type": "array"
+          },
+          "design": {
+            "description": "technical mode only. The design or approach itself, one point per item.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Design",
+            "type": "array"
+          },
+          "environment": {
+            "description": "issue mode only. Versions, hosts, configuration relevant to the problem.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Environment",
+            "type": "array"
+          },
+          "examples": {
+            "description": "reference mode only. Concrete examples, one per item.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Examples",
+            "type": "array"
+          },
+          "facts": {
+            "description": "reference mode only. Standalone facts worth looking up later.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Facts",
+            "type": "array"
+          },
+          "implementation_notes": {
+            "description": "technical mode only. Details that matter when implementing: file names, function names, gotchas.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Implementation Notes",
+            "type": "array"
+          },
+          "investigation": {
+            "description": "issue mode only. What was checked and what it showed, in order.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Investigation",
+            "type": "array"
+          },
+          "key_points": {
+            "description": "summary mode only. The points worth remembering, one per item.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Key Points",
+            "type": "array"
+          },
+          "mode": {
+            "default": "summary",
+            "description": "Which export shape to render. Use 'summary' for a plain 'summarise this and save it' request and whenever no other mode clearly fits. 'technical': a design or implementation discussion. 'history': how something changed over time. 'full': a long conversation covering several distinct topics. 'procedure': repeatable steps someone will follow later. 'issue': a problem, its investigation, and its cause. 'reference': terms, facts, and examples to look up later.",
+            "enum": [
+              "summary",
+              "technical",
+              "history",
+              "full",
+              "procedure",
+              "issue",
+              "reference"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_actions": {
+            "description": "Concrete things someone will do next, one per item. Keep this separate from unresolved_issues — a task is not an open question, and the two must never be merged. Leave empty when there is nothing to do next.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Next Actions",
+            "type": "array"
+          },
+          "overview": {
+            "description": "summary mode only. What the conversation was about, in a few points.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Overview",
+            "type": "array"
+          },
+          "prerequisites": {
+            "description": "procedure mode only. What must already be true before starting.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Prerequisites",
+            "type": "array"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional. The project or repository this belongs to, when the conversation names one. Omit it rather than guessing.",
+            "title": "Project"
+          },
+          "rollback": {
+            "description": "procedure mode only. How to undo it if it goes wrong.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Rollback",
+            "type": "array"
+          },
+          "root_cause": {
+            "description": "issue mode only. The established cause. Leave empty when the cause was not established — do not put a guess here.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Root Cause",
+            "type": "array"
+          },
+          "sources": {
+            "description": "Where the information came from: a URL, a document name, a command that was run. One per item.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Sources",
+            "type": "array"
+          },
+          "steps": {
+            "description": "procedure mode only, and required for it. One action per item, in the order they must be performed. Rendered as a numbered list; do not put your own numbering in the text.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Steps",
+            "type": "array"
+          },
+          "symptom": {
+            "description": "issue mode only, and required for it. What was observed going wrong — the behaviour, not the cause.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Symptom",
+            "type": "array"
+          },
+          "tags": {
+            "description": "Open-ended Obsidian tags you choose for this note. No fixed vocabulary. Write them without a leading '#'; spaces are replaced with '-'. title, created, updated, source and export_mode are generated by the Gateway and cannot be set here.",
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Tags",
+            "type": "array"
+          },
+          "timeline": {
+            "description": "history mode only, and required for it. Events in the order they happened, oldest first.",
+            "items": {
+              "$ref": "#/components/schemas/TimelineEntry"
+            },
+            "maxItems": 50,
+            "title": "Timeline",
+            "type": "array"
+          },
+          "tldr": {
+            "description": "Required. Normally 2-5 short sentences covering the subject, the conclusion, and the current state. One sentence per item; they are joined into a single paragraph directly under the title.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Tldr",
+            "type": "array"
+          },
+          "topics": {
+            "description": "full mode only, and required for it. One entry per distinct topic the conversation covered, in the order they came up. Each becomes a '###' subsection.",
+            "items": {
+              "$ref": "#/components/schemas/TopicSection"
+            },
+            "maxItems": 20,
+            "title": "Topics",
+            "type": "array"
+          },
+          "turning_points": {
+            "description": "history mode only. The moments where the direction actually changed.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Turning Points",
+            "type": "array"
+          },
+          "unresolved_issues": {
+            "description": "Questions still open: things not yet decided or not yet known. Keep this separate from next_actions — an open question is not a task, and the two must never be merged. Leave empty when nothing is open.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Unresolved Issues",
+            "type": "array"
+          },
+          "verification": {
+            "description": "technical and procedure modes only. How to confirm it works: tests, commands, expected output.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Verification",
+            "type": "array"
+          },
+          "workaround": {
+            "description": "issue mode only. What makes it usable without a full fix.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Workaround",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tldr"
+        ],
+        "title": "ChatExport",
+        "type": "object"
+      },
       "CreatedNoteResponse": {
         "properties": {
           "id": {
@@ -53,7 +364,7 @@
             "type": "string"
           },
           "title": {
-            "description": "Title as stored (may differ from the request after sanitising).",
+            "description": "Sanitised file-name stem of the created note, without .md. May differ from the H1 and frontmatter title of a structured export.",
             "title": "Title",
             "type": "string"
           }
@@ -137,12 +448,31 @@
       },
       "InboxNoteCreateRequest": {
         "additionalProperties": false,
+        "description": "Exactly one of `content` or `export` is required; sending both, or\nsending neither, is rejected. `export` and `frontmatter` are also\nmutually exclusive — `export`'s frontmatter (title/created/updated/\nsource/export_mode/tags) is formatter-owned and cannot be supplied as\narbitrary free-form frontmatter alongside it. `content`/`frontmatter`\nremain the raw-Markdown path kept for existing callers; `export` is the\nstructured chat-export path (issue #12 / docs/adr/0005-*.md).",
         "properties": {
           "content": {
-            "description": "Markdown body. Written as-is with LF line endings.",
-            "maxLength": 2000000,
-            "title": "Content",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 2000000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Markdown body. Written as-is with LF line endings. Exactly one of `content` or `export` is required.",
+            "title": "Content"
+          },
+          "export": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatExport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Structured chat-export input (issue #12). The Gateway renders this into deterministic Markdown and frontmatter; the client never supplies raw Markdown or frontmatter alongside it. Exactly one of `content` or `export` is required."
           },
           "frontmatter": {
             "anyOf": [
@@ -194,7 +524,7 @@
                 "type": "null"
               }
             ],
-            "description": "Optional YAML frontmatter. Scalars and flat lists of scalars only.",
+            "description": "Optional YAML frontmatter for the `content` path. Scalars and flat lists of scalars only. Rejected together with `export`, whose frontmatter is formatter-owned.",
             "title": "Frontmatter"
           },
           "title": {
@@ -206,8 +536,7 @@
           }
         },
         "required": [
-          "title",
-          "content"
+          "title"
         ],
         "title": "InboxNoteCreateRequest",
         "type": "object"
@@ -338,6 +667,89 @@
           "modified_at"
         ],
         "title": "SearchResultItem",
+        "type": "object"
+      },
+      "TermDefinition": {
+        "additionalProperties": false,
+        "description": "One term/description pair, for `reference` mode.",
+        "properties": {
+          "description": {
+            "description": "What it means, in one sentence.",
+            "maxLength": 1000,
+            "title": "Description",
+            "type": "string"
+          },
+          "term": {
+            "description": "The term being defined.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Term",
+            "type": "string"
+          }
+        },
+        "required": [
+          "term",
+          "description"
+        ],
+        "title": "TermDefinition",
+        "type": "object"
+      },
+      "TimelineEntry": {
+        "additionalProperties": false,
+        "description": "One dated or ordered event, for `history` mode.",
+        "properties": {
+          "event": {
+            "description": "What happened, in one sentence.",
+            "maxLength": 1000,
+            "title": "Event",
+            "type": "string"
+          },
+          "when": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When it happened, exactly as the conversation stated it — a date, a phase name, or a relative marker such as 'after the review'. Omit it when the conversation did not say; never guess a date.",
+            "title": "When"
+          }
+        },
+        "required": [
+          "event"
+        ],
+        "title": "TimelineEntry",
+        "type": "object"
+      },
+      "TopicSection": {
+        "additionalProperties": false,
+        "description": "One '###' subsection of a `full` export.",
+        "properties": {
+          "heading": {
+            "description": "Short label for this topic, rendered as a '###' subheading.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Heading",
+            "type": "string"
+          },
+          "points": {
+            "description": "What was covered under this topic, one point per item.",
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Points",
+            "type": "array"
+          }
+        },
+        "required": [
+          "heading"
+        ],
+        "title": "TopicSection",
         "type": "object"
       },
       "ValidationError": {

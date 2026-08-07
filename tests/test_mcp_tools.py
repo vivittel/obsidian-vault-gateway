@@ -74,10 +74,43 @@ async def test_create_inbox_note_has_write_annotations() -> None:
     assert annotations.open_world_hint is False
 
 
-async def test_create_inbox_note_input_schema_has_no_path_field() -> None:
+async def test_create_inbox_note_input_schema_is_title_plus_structured_export() -> None:
     tools = {t.name: t for t in await mcp.list_tools()}
     schema = tools["create_inbox_note"].input_schema
-    assert set(schema["properties"]) == {"title", "content", "frontmatter"}
+    assert set(schema["properties"]) == {"title", "export"}
+    assert "content" not in schema["properties"]
+    assert "frontmatter" not in schema["properties"]
+    export_schema = schema["$defs"]["ChatExport"]["properties"]
+    assert "path" not in export_schema
+    assert "related_notes" not in export_schema
+
+
+async def test_create_inbox_note_export_mode_defaults_to_summary_in_schema() -> None:
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["create_inbox_note"].input_schema
+    mode_schema = schema["$defs"]["ChatExport"]["properties"]["mode"]
+    assert mode_schema["default"] == "summary"
+    assert set(mode_schema["enum"]) == {
+        "summary",
+        "technical",
+        "history",
+        "full",
+        "procedure",
+        "issue",
+        "reference",
+    }
+
+
+async def test_create_inbox_note_export_schema_describes_every_mode_specific_field() -> None:
+    from app.services.chat_export import _FIELD_OWNER_MODES
+
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["create_inbox_note"].input_schema
+    export_schema = schema["$defs"]["ChatExport"]["properties"]
+    for field_name, owner_modes in _FIELD_OWNER_MODES.items():
+        description = export_schema[field_name]["description"]
+        for mode in owner_modes:
+            assert mode in description, f"{field_name}'s description omits '{mode}'"
 
 
 async def test_append_inbox_note_has_write_annotations() -> None:
@@ -137,7 +170,7 @@ async def test_read_note_matches_application_layer(application: GatewayApplicati
 
 async def test_create_inbox_note_matches_application_layer_shape(env: None) -> None:
     result = await mcp.call_tool(
-        "create_inbox_note", {"title": "MCP parity check", "content": "x\n"}
+        "create_inbox_note", {"title": "MCP parity check", "export": {"tldr": ["x"]}}
     )
     assert set(result.structured_content) == {"id", "path", "title", "modified_at"}
     assert result.structured_content["path"] == "00_Inbox/ChatGPT/MCP parity check.md"
@@ -309,27 +342,35 @@ async def test_create_inbox_note_writes_only_inside_inbox_root(env: None, inbox_
     import os
 
     before = set(os.listdir(inbox_root.parent))
-    await mcp.call_tool("create_inbox_note", {"title": "MCP contained write", "content": "x\n"})
+    await mcp.call_tool(
+        "create_inbox_note", {"title": "MCP contained write", "export": {"tldr": ["x"]}}
+    )
     after = set(os.listdir(inbox_root.parent))
     assert before == after
 
 
 async def test_create_inbox_note_does_not_overwrite_existing(env: None, inbox_root: Path) -> None:
     (inbox_root / "Duplicate.md").write_text("original\n", encoding="utf-8")
-    result = await mcp.call_tool("create_inbox_note", {"title": "Duplicate", "content": "new\n"})
+    result = await mcp.call_tool(
+        "create_inbox_note", {"title": "Duplicate", "export": {"tldr": ["x"]}}
+    )
     assert result.structured_content["path"] == "00_Inbox/ChatGPT/Duplicate-2.md"
     assert (inbox_root / "Duplicate.md").read_text(encoding="utf-8") == "original\n"
 
 
 async def test_create_inbox_note_leaves_no_temp_files_behind(env: None, inbox_root: Path) -> None:
-    await mcp.call_tool("create_inbox_note", {"title": "MCP no leftovers", "content": "x\n"})
+    await mcp.call_tool(
+        "create_inbox_note", {"title": "MCP no leftovers", "export": {"tldr": ["x"]}}
+    )
     leftovers = [p for p in inbox_root.iterdir() if p.name.startswith(".tmp-")]
     assert leftovers == []
 
 
 async def test_create_inbox_note_sequence_numbers_increment(env: None, inbox_root: Path) -> None:
     for _ in range(3):
-        result = await mcp.call_tool("create_inbox_note", {"title": "MCP repeat", "content": "x\n"})
+        result = await mcp.call_tool(
+            "create_inbox_note", {"title": "MCP repeat", "export": {"tldr": ["x"]}}
+        )
         assert result.is_error is False
     names = sorted(p.name for p in inbox_root.glob("MCP repeat*.md"))
     assert names == ["MCP repeat-2.md", "MCP repeat-3.md", "MCP repeat.md"]
@@ -343,13 +384,13 @@ async def test_create_inbox_note_hits_sequence_limit_as_note_already_exists(
         (inbox_root / f"Full{suffix}.md").write_text("x\n", encoding="utf-8")
 
     with pytest.raises(MCPError) as excinfo:
-        await mcp.call_tool("create_inbox_note", {"title": "Full", "content": "x\n"})
+        await mcp.call_tool("create_inbox_note", {"title": "Full", "export": {"tldr": ["x"]}})
     assert excinfo.value.data == {"code": "NOTE_ALREADY_EXISTS"}
 
 
 async def test_create_inbox_note_rejects_reserved_windows_name(env: None) -> None:
     with pytest.raises(MCPError) as excinfo:
-        await mcp.call_tool("create_inbox_note", {"title": "CON", "content": "x\n"})
+        await mcp.call_tool("create_inbox_note", {"title": "CON", "export": {"tldr": ["x"]}})
     assert excinfo.value.data == {"code": "INVALID_TITLE"}
 
 
@@ -357,18 +398,56 @@ async def test_create_inbox_note_rejects_control_characters_leaving_nothing_usab
     env: None,
 ) -> None:
     with pytest.raises(MCPError) as excinfo:
-        await mcp.call_tool("create_inbox_note", {"title": "\x01\x02\x03", "content": "x\n"})
+        await mcp.call_tool(
+            "create_inbox_note", {"title": "\x01\x02\x03", "export": {"tldr": ["x"]}}
+        )
     assert excinfo.value.data == {"code": "INVALID_TITLE"}
 
 
-async def test_create_inbox_note_title_over_max_length_is_truncated_not_rejected(
-    env: None,
-) -> None:
-    result = await mcp.call_tool("create_inbox_note", {"title": "x" * 300, "content": "y\n"})
+async def test_create_inbox_note_title_over_max_length_is_rejected(env: None) -> None:
+    # Unlike REST, bare-str MCP params carry no length constraint from the SDK
+    # unless declared via Annotated[..., Field(...)] — this tool declares
+    # max_length=300 on `title` for REST parity, so 301 chars is a schema
+    # rejection (ToolError), not a silent truncation to the 100-char file stem.
+    with pytest.raises(ToolError):
+        await mcp.call_tool("create_inbox_note", {"title": "x" * 301, "export": {"tldr": ["y"]}})
+
+
+async def test_create_inbox_note_title_at_max_length_is_accepted(env: None) -> None:
+    result = await mcp.call_tool(
+        "create_inbox_note", {"title": "x" * 300, "export": {"tldr": ["y"]}}
+    )
     assert len(result.structured_content["title"]) <= 100
 
 
-async def test_create_inbox_note_rejects_nested_frontmatter_structures(env: None) -> None:
+async def test_create_inbox_note_ignores_stray_content_and_frontmatter_arguments(
+    env: None, inbox_root: Path
+) -> None:
+    # The SDK's dynamically-generated top-level argument model
+    # (mcp.server.mcpserver.utilities.func_metadata.ArgModelBase) does not set
+    # extra="forbid" — only ChatExport itself does. A `content`/`frontmatter`
+    # key alongside a valid `export` is therefore silently dropped by pydantic,
+    # not rejected: verified directly against the installed SDK's source
+    # (ArgModelBase.model_config == ConfigDict(arbitrary_types_allowed=True),
+    # no `extra` set, so pydantic's own default of "ignore" applies). The
+    # written note must come only from `export` — the stray fields must never
+    # reach the body.
+    result = await mcp.call_tool(
+        "create_inbox_note",
+        {
+            "title": "Stray legacy args",
+            "content": "should not appear anywhere",
+            "frontmatter": {"nested": {"a": 1}},
+            "export": {"tldr": ["real content"]},
+        },
+    )
+    assert result.is_error is False
+    written = (inbox_root / "Stray legacy args.md").read_text(encoding="utf-8")
+    assert "should not appear anywhere" not in written
+    assert "real content" in written
+
+
+async def test_create_inbox_note_rejects_unknown_export_field(env: None) -> None:
     # Rejected by the SDK's own argument-schema validation before the tool body
     # (and therefore _McpCall) ever runs — the resulting ToolError embeds a raw
     # pydantic ValidationError message, which only echoes the caller's own
@@ -376,8 +455,83 @@ async def test_create_inbox_note_rejects_nested_frontmatter_structures(env: None
     with pytest.raises(ToolError):
         await mcp.call_tool(
             "create_inbox_note",
-            {"title": "x", "content": "y\n", "frontmatter": {"nested": {"a": 1}}},
+            {"title": "x", "export": {"tldr": ["y"], "nested": {"a": 1}}},
         )
+
+
+async def test_create_inbox_note_rejects_related_notes_field(env: None) -> None:
+    # issue #13 (depends on #12) owns this field; #12 only fixes the
+    # "## 関連ノート" heading, its position, and its always-empty placeholder.
+    with pytest.raises(ToolError):
+        await mcp.call_tool(
+            "create_inbox_note",
+            {"title": "x", "export": {"tldr": ["y"], "related_notes": ["Knowledge/Foo.md"]}},
+        )
+
+
+async def test_create_inbox_note_is_the_only_write_create_tool() -> None:
+    tools = await mcp.list_tools()
+    assert not any("export" in t.name for t in tools)
+
+
+async def test_create_inbox_note_mode_defaults_to_summary(env: None, inbox_root: Path) -> None:
+    result = await mcp.call_tool(
+        "create_inbox_note", {"title": "Default mode check", "export": {"tldr": ["x"]}}
+    )
+    written = (inbox_root / "Default mode check.md").read_text(encoding="utf-8")
+    assert "export_mode: summary" in written
+    assert "## 概要" in written
+    assert result.is_error is False
+
+
+async def test_create_inbox_note_wrong_mode_field_maps_to_validation_error_code(
+    env: None, inbox_root: Path
+) -> None:
+    with pytest.raises(MCPError) as excinfo:
+        await mcp.call_tool(
+            "create_inbox_note",
+            {"title": "Wrong mode field", "export": {"tldr": ["x"], "steps": ["s"]}},
+        )
+    assert excinfo.value.data == {"code": "VALIDATION_ERROR"}
+    assert excinfo.value.message == "Fields not valid for export_mode 'summary': steps."
+    assert not (inbox_root / "Wrong mode field.md").exists()
+
+
+async def test_create_inbox_note_wrong_mode_field_error_leaks_nothing(env: None) -> None:
+    with pytest.raises(MCPError) as excinfo:
+        await mcp.call_tool(
+            "create_inbox_note",
+            {"title": "x", "export": {"tldr": ["secret sentence"], "steps": ["classified"]}},
+        )
+    message = excinfo.value.message
+    assert "secret sentence" not in message
+    assert "classified" not in message
+    assert "Traceback" not in message
+    assert "Errno" not in message
+
+
+@pytest.mark.parametrize(
+    "mode,export_extra,heading",
+    [
+        ("summary", {}, "## 概要"),
+        ("technical", {}, "## 背景"),
+        ("history", {"timeline": [{"event": "e"}]}, "## 経緯"),
+        ("full", {"topics": [{"heading": "h", "points": ["p"]}]}, "## トピック"),
+        ("procedure", {"steps": ["do it"]}, "## 手順"),
+        ("issue", {"symptom": ["broke"]}, "## 症状"),
+        ("reference", {"facts": ["f"]}, "## 用語"),
+    ],
+)
+async def test_each_mode_writes_a_note_with_its_headings(
+    env: None, inbox_root: Path, mode: str, export_extra: dict, heading: str
+) -> None:
+    title = f"Mode {mode} check"
+    export = {"mode": mode, "tldr": ["x"], **export_extra}
+    result = await mcp.call_tool("create_inbox_note", {"title": title, "export": export})
+    assert result.is_error is False
+    written = (inbox_root / f"{title}.md").read_text(encoding="utf-8")
+    assert f"export_mode: {mode}" in written
+    assert heading in written
 
 
 async def test_append_inbox_note_matches_application_layer(
@@ -541,7 +695,9 @@ async def test_mcp_access_log_never_contains_a_note_path_field(
     """
     caplog.set_level(logging.INFO, logger="obsidian_gateway.mcp")
     await mcp.call_tool("read_note", {"path": "Knowledge/PC/GPU/RTX 5070.md"})
-    await mcp.call_tool("create_inbox_note", {"title": "log path check", "content": "x\n"})
+    await mcp.call_tool(
+        "create_inbox_note", {"title": "log path check", "export": {"tldr": ["x"]}}
+    )
     with pytest.raises(MCPError):
         await mcp.call_tool("read_note", {"path": "../secret.md"})
 
@@ -551,7 +707,7 @@ async def test_mcp_access_log_never_contains_a_note_path_field(
         assert "log path check" not in record.getMessage()
 
 
-async def test_mcp_access_log_never_contains_note_content_or_frontmatter(
+async def test_mcp_access_log_never_contains_structured_export_fields(
     env: None, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO, logger="obsidian_gateway.mcp")
@@ -560,8 +716,7 @@ async def test_mcp_access_log_never_contains_note_content_or_frontmatter(
         "create_inbox_note",
         {
             "title": "log test",
-            "content": secret_content,
-            "frontmatter": {"source": "top-secret-value"},
+            "export": {"tldr": [secret_content], "project": "top-secret-value"},
         },
     )
     for record in caplog.records:

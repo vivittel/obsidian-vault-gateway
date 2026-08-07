@@ -187,7 +187,7 @@ def test_modern_tools_list_has_seven_tools(mcp_client: TestClient, mcp_headers: 
         ("get_health", {}),
         ("search_notes", {"query": "RTX 5070"}),
         ("read_note", {"path": "Knowledge/PC/GPU/RTX 5070.md"}),
-        ("create_inbox_note", {"title": "Modern flow note", "content": "x\n"}),
+        ("create_inbox_note", {"title": "Modern flow note", "export": {"tldr": ["x"]}}),
     ],
 )
 def test_modern_tools_call_succeeds(
@@ -269,7 +269,7 @@ def test_legacy_tools_list_has_seven_tools(mcp_client: TestClient, mcp_headers: 
         ("get_health", {}),
         ("search_notes", {"query": "RTX 5070"}),
         ("read_note", {"path": "Knowledge/PC/GPU/RTX 5070.md"}),
-        ("create_inbox_note", {"title": "Legacy flow note", "content": "x\n"}),
+        ("create_inbox_note", {"title": "Legacy flow note", "export": {"tldr": ["x"]}}),
     ],
 )
 def test_legacy_tools_call_succeeds(
@@ -534,7 +534,7 @@ def test_oversized_request_is_rejected(mcp_client: TestClient, mcp_headers: dict
         mcp_headers,
         request_id=1,
         name="create_inbox_note",
-        arguments={"title": "too big", "content": oversized_content},
+        arguments={"title": "too big", "export": {"tldr": [oversized_content]}},
     )
     assert response.status_code == 413
 
