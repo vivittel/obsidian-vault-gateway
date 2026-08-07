@@ -116,6 +116,31 @@ def test_create_chat_export_note_returns_created_note_response(
     assert response.path == "00_Inbox/ChatGPT/App layer export test.md"
 
 
+def test_create_chat_export_note_verifies_and_links_related_notes(
+    application: GatewayApplication, vault_root: Path
+) -> None:
+    response = application.create_chat_export_note(
+        title="Related notes wiring test",
+        export=ChatExport(
+            tldr=["ok"],
+            related_notes=["Knowledge/PC/GPU/RTX 5070.md", "Knowledge/missing.md"],
+        ),
+    )
+    assert response.related_notes_linked == 1
+    assert response.related_notes_skipped == 1
+
+    written = (vault_root / response.path).read_text(encoding="utf-8")
+    assert "## 関連ノート\n\n- [[Knowledge/PC/GPU/RTX 5070]]" in written
+
+
+def test_create_inbox_note_reports_zero_related_notes(
+    application: GatewayApplication,
+) -> None:
+    response = application.create_inbox_note(title="Raw content test", content="x\n")
+    assert response.related_notes_linked == 0
+    assert response.related_notes_skipped == 0
+
+
 def test_create_chat_export_note_writes_frontmatter_in_the_documented_order(
     application: GatewayApplication, inbox_root: Path
 ) -> None:
