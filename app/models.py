@@ -147,6 +147,10 @@ _MAX_TOPIC_ITEMS = 20
 _MAX_DEFINITION_ITEMS = 50
 _MAX_TAG_ITEMS = 20
 
+# Public (unlike the _MAX_* constants above): app/application.py reads this
+# too, as the max_links argument to app.services.related_notes.resolve_related_notes.
+MAX_RELATED_NOTES = 10
+
 Line = Annotated[str, Field(max_length=_MAX_LINE_CHARS)]
 Label = Annotated[str, Field(min_length=1, max_length=_MAX_LABEL_CHARS)]
 # No min_length, unlike Label: an empty/whitespace-only tag is normalised
@@ -155,6 +159,15 @@ Label = Annotated[str, Field(min_length=1, max_length=_MAX_LABEL_CHARS)]
 # follows. Sharing Label here (min_length=1) would reject "" before the
 # formatter ever saw it, contradicting that convention for tags specifically.
 Tag = Annotated[str, Field(max_length=_MAX_LABEL_CHARS)]
+# No min_length either, for the same reason as Tag: an empty, whitespace-only,
+# or otherwise unresolvable candidate is silently omitted by
+# app.services.related_notes.resolve_related_notes rather than rejected by the
+# schema, so "" must reach that layer instead of failing validation first. The
+# 1024 bound matches app.services.path_security.MAX_PATH_LENGTH; it is
+# repeated here (as InboxNoteAppendRequest.path already does below) rather
+# than imported, since app/models.py deliberately depends on nothing under
+# app/services.
+NotePath = Annotated[str, Field(max_length=1024)]
 
 
 class TimelineEntry(BaseModel):
@@ -208,11 +221,12 @@ class ChatExport(BaseModel):
     tool body, so the rejection travels through _McpCall's GatewayError
     conversion instead of the SDK's raw ToolError path.
 
-    Deliberately has no `related_notes` field: issue #13 (depends on #12) owns
-    verified related-note wikilinks, which require an existence check this
-    pure model cannot perform. This model and app/services/chat_export.py only
-    fix the `## 関連ノート` heading, its position, and its empty placeholder;
-    issue #13 adds the input field on top of that without moving either.
+    `related_notes` carries only the client's candidate paths — it is not what
+    gets rendered. app/services/related_notes.py re-verifies every path
+    against the Vault (this model cannot: it has no filesystem access), and
+    app/services/chat_export.render_chat_export takes the verified survivors
+    through a separate `verified_related_notes` argument, never this field
+    directly. See docs/adr/0006-verified-related-note-wikilinks.md.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -267,6 +281,19 @@ class ChatExport(BaseModel):
             "separate from unresolved_issues — a task is not an open question, "
             "and the two must never be merged. Leave empty when there is nothing "
             "to do next."
+        ),
+    )
+    related_notes: list[NotePath] = Field(
+        default_factory=list,
+        max_length=MAX_RELATED_NOTES,
+        description=(
+            "Vault-relative .md paths of existing notes this conversation "
+            "relates to — call search_notes first and pass paths exactly as it "
+            "returned them; never invent or guess a path. Usually 3-5 items, "
+            "at most 10. The Gateway re-verifies every path when writing the "
+            "note: a path it cannot verify is left out rather than blocking "
+            "the export, so the rendered '## 関連ノート' section — not this "
+            "input — is the record of what actually got linked."
         ),
     )
     sources: list[Line] = Field(
@@ -509,6 +536,21 @@ class CreatedNoteResponse(BaseModel):
         )
     )
     modified_at: datetime = Field(description="Creation time in the configured timezone.")
+    related_notes_linked: int = Field(
+        ge=0,
+        description=(
+            "Number of export.related_notes candidates that were verified and "
+            "rendered as wikilinks. Always 0 for the raw content/frontmatter path."
+        ),
+    )
+    related_notes_skipped: int = Field(
+        ge=0,
+        description=(
+            "Number of export.related_notes candidates omitted — invalid, "
+            "missing, duplicate, or over the maximum link count. Always 0 for "
+            "the raw content/frontmatter path."
+        ),
+    )
 
 
 class InboxNoteAppendRequest(BaseModel):

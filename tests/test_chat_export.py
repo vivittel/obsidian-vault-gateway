@@ -18,6 +18,8 @@ from app.services.chat_export import (
     _FIELD_OWNER_MODES,
     _MODE_SECTIONS,
     _one_line,
+    format_wikilink,
+    is_renderable_wikilink_target,
     render_chat_export,
 )
 
@@ -141,6 +143,66 @@ def test_summary_mode_worked_example_renders_exactly() -> None:
     )
 
 
+def test_summary_mode_worked_example_with_related_notes_renders_exactly() -> None:
+    export = ChatExport(tldr=["ok"])
+    rendered = render_chat_export(
+        export,
+        title="t",
+        now=_NOW,
+        verified_related_notes=["Knowledge/PC/GPU/RTX 5070.md", "Knowledge/no_frontmatter.md"],
+    )
+    yaml_block = yaml.safe_dump(
+        rendered.frontmatter, allow_unicode=True, sort_keys=False, default_flow_style=False
+    )
+    full = f"---\n{yaml_block}---\n\n{rendered.content}"
+
+    assert full == (
+        "---\n"
+        "title: t\n"
+        "created: '2026-08-06T14:30:00+09:00'\n"
+        "updated: '2026-08-06T14:30:00+09:00'\n"
+        "source: chatgpt\n"
+        "export_mode: summary\n"
+        "tags: []\n"
+        "---\n"
+        "\n"
+        "# t\n"
+        "\n"
+        "## 要約\n"
+        "\n"
+        "ok\n"
+        "\n"
+        "## 決定事項\n"
+        "\n"
+        "なし\n"
+        "\n"
+        "## 概要\n"
+        "\n"
+        "未記録\n"
+        "\n"
+        "## 要点\n"
+        "\n"
+        "未記録\n"
+        "\n"
+        "## 未解決の論点\n"
+        "\n"
+        "なし\n"
+        "\n"
+        "## 次のアクション\n"
+        "\n"
+        "なし\n"
+        "\n"
+        "## 関連ノート\n"
+        "\n"
+        "- [[Knowledge/PC/GPU/RTX 5070]]\n"
+        "- [[Knowledge/no_frontmatter]]\n"
+        "\n"
+        "## 出典\n"
+        "\n"
+        "なし\n"
+    )
+
+
 # --- Common sections always present, in order --------------------------------
 
 
@@ -155,10 +217,38 @@ def test_common_headings_appear_in_required_order(mode: str) -> None:
 
 
 @pytest.mark.parametrize("mode", list(_MODE_SECTIONS))
-def test_related_notes_is_always_present_and_empty(mode: str) -> None:
+def test_related_notes_is_present_and_empty_when_no_links(mode: str) -> None:
     export = _build(mode)
     rendered = render_chat_export(export, title="t", now=_NOW)
     assert "## 関連ノート\n\nなし" in rendered.content
+
+
+def test_related_notes_renders_verified_links_in_supplied_order() -> None:
+    export = _build("summary")
+    rendered = render_chat_export(
+        export,
+        title="t",
+        now=_NOW,
+        verified_related_notes=["Knowledge/B.md", "Knowledge/A.md"],
+    )
+    assert "## 関連ノート\n\n- [[Knowledge/B]]\n- [[Knowledge/A]]" in rendered.content
+
+
+def test_related_notes_ignores_export_related_notes_field_directly() -> None:
+    # render_chat_export only renders verified_related_notes; the raw client
+    # field on ChatExport is never read by the formatter (docs/adr/0006-*.md).
+    export = _build("summary", related_notes=["Knowledge/Unverified.md"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "## 関連ノート\n\nなし" in rendered.content
+    assert "Unverified" not in rendered.content
+
+
+def test_rendering_with_related_notes_is_byte_identical_across_calls() -> None:
+    export = _build("summary")
+    links = ["Knowledge/B.md", "Knowledge/A.md"]
+    a = render_chat_export(export, title="t", now=_NOW, verified_related_notes=links)
+    b = render_chat_export(export, title="t", now=_NOW, verified_related_notes=links)
+    assert a == b
 
 
 # --- Every mode renders its own headings, in position -------------------------
@@ -593,6 +683,52 @@ def test_steps_render_as_a_one_indexed_ordered_list() -> None:
     assert "1. first\n2. second\n3. third" in rendered.content
 
 
+# --- Related-note wikilink target predicate (issue #13) -------------------------
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "Knowledge/has[bracket].md",
+        "Knowledge/has]bracket.md",
+        "Knowledge/has|pipe.md",
+        "Knowledge/has#hash.md",
+        "Knowledge/has^caret.md",
+        "Knowledge/Foo.md.md",
+        "Knowledge/note.txt",
+        ".md",
+        "Knowledge/line\nbreak.md",
+        "Knowledge/control\x00char.md",
+    ],
+)
+def test_is_renderable_wikilink_target_rejects_hazards(relative_path: str) -> None:
+    assert is_renderable_wikilink_target(relative_path) is False
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["Knowledge/PC/GPU/RTX 5070.md", "Knowledge/GPU比較.md", "note.md"],
+)
+def test_is_renderable_wikilink_target_accepts_ordinary_paths(relative_path: str) -> None:
+    assert is_renderable_wikilink_target(relative_path) is True
+
+
+def test_format_wikilink_strips_the_md_suffix() -> None:
+    assert format_wikilink("Knowledge/PC/GPU/RTX 5070.md") == "[[Knowledge/PC/GPU/RTX 5070]]"
+
+
+def test_related_notes_section_drops_a_hazardous_link_defensively() -> None:
+    # render_chat_export re-filters verified_related_notes with the same
+    # predicate, so it cannot emit a corrupt "]]" even if a future caller
+    # skips verification — this is a defensive re-check, not the primary
+    # guard (that lives in app.services.related_notes).
+    export = _build("summary")
+    rendered = render_chat_export(
+        export, title="t", now=_NOW, verified_related_notes=["Knowledge/has|pipe.md"]
+    )
+    assert "## 関連ノート\n\nなし" in rendered.content
+
+
 # --- Model-level bounds (pydantic) ----------------------------------------------
 
 
@@ -611,10 +747,14 @@ def test_unknown_field_is_rejected() -> None:
         ChatExport(tldr=["ok"], made_up_field="x")
 
 
-def test_related_notes_is_not_a_field_yet() -> None:
-    # issue #13 owns this field; #12 only fixes the heading/position/placeholder.
+def test_related_notes_accepts_up_to_the_maximum() -> None:
+    export = ChatExport(tldr=["ok"], related_notes=[f"Knowledge/{i}.md" for i in range(10)])
+    assert len(export.related_notes) == 10
+
+
+def test_related_notes_over_the_maximum_is_rejected() -> None:
     with pytest.raises(PydanticValidationError):
-        ChatExport(tldr=["ok"], related_notes=["Knowledge/Foo.md"])
+        ChatExport(tldr=["ok"], related_notes=[f"Knowledge/{i}.md" for i in range(11)])
 
 
 # --- Field-owner-mode consistency (drives the MCP schema description test) ----

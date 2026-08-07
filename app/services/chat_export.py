@@ -18,12 +18,29 @@ mode allows, which fields a mode requires, whether required text survived
 normalisation — has to raise from inside the tool body instead, so it is
 sanitised by ``_McpCall`` into a coded ``MCPError``. That is why the checks
 below run only after normalisation, not as pydantic validators.
+
+Related-note wikilinks (GitHub issue #13;
+docs/adr/0006-verified-related-note-wikilinks.md) are the one deliberate
+exception to "no filesystem access": this module still never touches the
+Vault, but it also never renders ``ChatExport.related_notes`` — that field is
+raw, unverified client input. ``render_chat_export`` instead takes an
+explicit ``verified_related_notes`` argument, which app/application.py fills
+in by calling app.services.related_notes.resolve_related_notes against the
+Vault *before* calling here. Two rendering rules follow from that split:
+related-note paths are the one client-supplied string this module does not
+run through ``_one_line`` (rewriting a path can make it name a different
+file), and the rendered wikilink bullets are the one list this module does
+not run through ``_escape_block_start`` (escaping would corrupt the `[[...]]`
+syntax). Both are safe only because the caller has already restricted the
+values to paths that passed ``is_renderable_wikilink_target`` and resolved to
+a real note.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import chain
@@ -44,9 +61,9 @@ _PLACEHOLDER_NONE = "なし"
 _PLACEHOLDER_NOT_RECORDED = "未記録"
 _PLACEHOLDER_UNRESOLVED = "未解決"
 
-# Every rendered heading, common and mode-specific. "related_notes" has no
-# backing field yet (issue #13 adds one; this module only fixes the heading,
-# its position, and its always-empty placeholder — see ChatExport's docstring).
+# Every rendered heading, common and mode-specific. "related_notes" renders
+# from the verified_related_notes argument, never from ChatExport.related_notes
+# directly — see the module docstring and docs/adr/0006-*.md.
 _HEADINGS: dict[str, str] = {
     "tldr": "要約",
     "decisions": "決定事項",
@@ -143,6 +160,18 @@ _BLOCK_HAZARD_RE = re.compile(
     r"^(?:#{1,6}(?:\s|$)|>|<|\[|[-*+](?:\s|$)|```|~~~|-{3,}$|={3,}$|_{3,}$)"
 )
 
+# app.services.path_security._check_syntax accepts all five of these
+# characters in a filename — verified empirically against a real, resolvable
+# note. Left in, a genuinely existing "has|pipe.md" or "has#hash.md" renders
+# as "[[Knowledge/has|pipe]]" or "[[Knowledge/has#hash]]", and Obsidian reads
+# "|"/"#" as an alias/heading-anchor separator, producing a wikilink that
+# resolves to the wrong target (or no target) rather than the intended note.
+# This is the sole guard against that — path_security has no reason to reject
+# these characters for its own (read/write) purposes, so it does not.
+_WIKILINK_HAZARD_RE = re.compile(r"[\[\]|#^]")
+
+_MARKDOWN_SUFFIX = ".md"
+
 
 @dataclass(frozen=True)
 class RenderedExport:
@@ -183,13 +212,66 @@ class _Normalised:
     tags: list[str]
 
 
-def render_chat_export(export: ChatExport, *, title: str, now: datetime) -> RenderedExport:
+def is_renderable_wikilink_target(relative_path: str) -> bool:
+    """Whether ``relative_path`` can be rendered as ``[[relative_path]]`` without
+    ambiguity or corruption.
+
+    This is the single definition of "safe wikilink target" shared by
+    app.services.related_notes (which calls it before touching the
+    filesystem) and this module's own render path (which calls it again,
+    defensively, on whatever it is given — see ``_render_related_notes_section``).
+    Keeping one definition means the count a caller reports as "linked" can
+    never diverge from what actually gets rendered.
+
+    Does not check the Vault: this module has no filesystem access. A path
+    passing this check may still not exist; that is
+    app.services.related_notes.resolve_related_notes's job.
+    """
+    if not relative_path.endswith(_MARKDOWN_SUFFIX):
+        return False
+    stem = relative_path[: -len(_MARKDOWN_SUFFIX)]
+    if not stem or stem.endswith(_MARKDOWN_SUFFIX):
+        # An empty stem can't happen via path_security (hidden components are
+        # already rejected), but this function has to be correct on its own.
+        # A stem still ending in ".md" (i.e. "Foo.md.md") would silently
+        # rename the link target to a *different*, possibly real, note once
+        # the suffix below is stripped — worse than a broken link.
+        return False
+    if _WIKILINK_HAZARD_RE.search(relative_path):
+        return False
+    return not (_LINE_BREAK_RE.search(relative_path) or _CONTROL_RE.search(relative_path))
+
+
+def format_wikilink(relative_path: str) -> str:
+    """Render a verified vault-relative path as a canonical wikilink.
+
+    Callers must have already checked ``is_renderable_wikilink_target``.
+    """
+    return f"[[{relative_path[: -len(_MARKDOWN_SUFFIX)]}]]"
+
+
+def render_chat_export(
+    export: ChatExport,
+    *,
+    title: str,
+    now: datetime,
+    verified_related_notes: Sequence[str] = (),
+) -> RenderedExport:
+    """Render ``export`` into deterministic Markdown and frontmatter.
+
+    ``verified_related_notes`` — never ``export.related_notes`` — is what
+    renders as the '## 関連ノート' section. The caller (app/application.py)
+    is responsible for turning the client's raw, unverified
+    ``export.related_notes`` candidates into this argument by calling
+    app.services.related_notes.resolve_related_notes first; this module
+    stays filesystem-free and cannot do that verification itself.
+    """
     normalised = _normalise_export(export)
     _check_mode_fields(normalised)
     _check_mode_required(normalised)
 
     frontmatter = _build_frontmatter(normalised, title=title, now=now)
-    content = _build_content(normalised, title=title)
+    content = _build_content(normalised, title=title, verified_related_notes=verified_related_notes)
     return RenderedExport(frontmatter=frontmatter, content=content)
 
 
@@ -451,11 +533,23 @@ def _render_section(field_name: str, normalised: _Normalised) -> str:
     return f"## {heading}\n\n{body}"
 
 
-def _render_related_notes_section() -> str:
-    return f"## {_HEADINGS['related_notes']}\n\n{_PLACEHOLDER_NONE}"
+def _render_related_notes_section(verified_related_notes: Sequence[str]) -> str:
+    # Re-filters even though every real caller already verified these paths
+    # via the same is_renderable_wikilink_target predicate: this function is
+    # then structurally incapable of emitting a corrupt "]]" no matter what a
+    # future caller passes, without raising — related-note failures must
+    # never block export, and that non-blocking rule applies here too.
+    links = [path for path in verified_related_notes if is_renderable_wikilink_target(path)]
+    if not links:
+        body = _PLACEHOLDER_NONE
+    else:
+        body = "\n".join(f"- {format_wikilink(path)}" for path in links)
+    return f"## {_HEADINGS['related_notes']}\n\n{body}"
 
 
-def _build_content(normalised: _Normalised, *, title: str) -> str:
+def _build_content(
+    normalised: _Normalised, *, title: str, verified_related_notes: Sequence[str]
+) -> str:
     display_title = _one_line(title)
     blocks = [f"# {display_title}"]
     blocks.append(_render_section("tldr", normalised))
@@ -464,7 +558,7 @@ def _build_content(normalised: _Normalised, *, title: str) -> str:
         blocks.append(_render_section(field_name, normalised))
     blocks.append(_render_section("unresolved_issues", normalised))
     blocks.append(_render_section("next_actions", normalised))
-    blocks.append(_render_related_notes_section())
+    blocks.append(_render_related_notes_section(verified_related_notes))
     blocks.append(_render_section("sources", normalised))
     return "\n\n".join(blocks) + "\n"
 
