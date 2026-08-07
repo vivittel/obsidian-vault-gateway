@@ -36,7 +36,7 @@
       },
       "ChatExport": {
         "additionalProperties": false,
-        "description": "Structured summary of a conversation, ready to be formatted into a note.\n\nOne flat model rather than a discriminated union, because `mode` must\ndefault to \"summary\" when the client omits it and a pydantic discriminated\nunion requires the tag to be present. Fields that do not belong to the\nselected `mode` are rejected by app/services/chat_export.py — inside the\ntool body, so the rejection travels through _McpCall's GatewayError\nconversion instead of the SDK's raw ToolError path.\n\nDeliberately has no `related_notes` field: issue #13 (depends on #12) owns\nverified related-note wikilinks, which require an existence check this\npure model cannot perform. This model and app/services/chat_export.py only\nfix the `## 関連ノート` heading, its position, and its empty placeholder;\nissue #13 adds the input field on top of that without moving either.",
+        "description": "Structured summary of a conversation, ready to be formatted into a note.\n\nOne flat model rather than a discriminated union, because `mode` must\ndefault to \"summary\" when the client omits it and a pydantic discriminated\nunion requires the tag to be present. Fields that do not belong to the\nselected `mode` are rejected by app/services/chat_export.py — inside the\ntool body, so the rejection travels through _McpCall's GatewayError\nconversion instead of the SDK's raw ToolError path.\n\n`related_notes` carries only the client's candidate paths — it is not what\ngets rendered. app/services/related_notes.py re-verifies every path\nagainst the Vault (this model cannot: it has no filesystem access), and\napp/services/chat_export.render_chat_export takes the verified survivors\nthrough a separate `verified_related_notes` argument, never this field\ndirectly. See docs/adr/0006-verified-related-note-wikilinks.md.",
         "properties": {
           "context": {
             "description": "technical mode only. The problem or constraints the design starts from.",
@@ -208,6 +208,16 @@
             "description": "Optional. The project or repository this belongs to, when the conversation names one. Omit it rather than guessing.",
             "title": "Project"
           },
+          "related_notes": {
+            "description": "Vault-relative .md paths of existing notes this conversation relates to — call search_notes first and pass paths exactly as it returned them; never invent or guess a path. Usually 3-5 items, at most 10. The Gateway re-verifies every path when writing the note: a path it cannot verify is left out rather than blocking the export, so the rendered '## 関連ノート' section — not this input — is the record of what actually got linked.",
+            "items": {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Related Notes",
+            "type": "array"
+          },
           "rollback": {
             "description": "procedure mode only. How to undo it if it goes wrong.",
             "items": {
@@ -362,6 +372,18 @@
             "title": "Path",
             "type": "string"
           },
+          "related_notes_linked": {
+            "description": "Number of export.related_notes candidates that were verified and rendered as wikilinks. Always 0 for the raw content/frontmatter path.",
+            "minimum": 0.0,
+            "title": "Related Notes Linked",
+            "type": "integer"
+          },
+          "related_notes_skipped": {
+            "description": "Number of export.related_notes candidates omitted — invalid, missing, duplicate, or over the maximum link count. Always 0 for the raw content/frontmatter path.",
+            "minimum": 0.0,
+            "title": "Related Notes Skipped",
+            "type": "integer"
+          },
           "title": {
             "description": "Sanitised file-name stem of the created note, without .md. May differ from the H1 and frontmatter title of a structured export.",
             "title": "Title",
@@ -372,7 +394,9 @@
           "id",
           "path",
           "title",
-          "modified_at"
+          "modified_at",
+          "related_notes_linked",
+          "related_notes_skipped"
         ],
         "title": "CreatedNoteResponse",
         "type": "object"
