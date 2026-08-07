@@ -10,7 +10,8 @@
   - GitHub issue #12 ("P1: Extend create_inbox_note with structured chat
     export formatting")
   - GitHub issue #13 ("P2: Add automatic related-note linking to structured
-    chat exports"), depends on #12
+    chat exports"), depends on #12 — resolved by
+    [`docs/adr/0006-verified-related-note-wikilinks.md`](0006-verified-related-note-wikilinks.md)
 
 ## Context
 

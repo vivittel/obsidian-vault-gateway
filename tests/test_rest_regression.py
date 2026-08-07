@@ -61,7 +61,19 @@ def test_create_inbox_note_still_works_the_same(
     )
     assert response.status_code == 201
     body = response.json()
-    assert set(body.keys()) == {"id", "path", "title", "modified_at"}
+    # related_notes_linked/related_notes_skipped (issue #13) are a deliberate,
+    # additive CreatedNoteResponse extension — always 0/0 on this raw-content
+    # path, since there is no export.related_notes to verify.
+    assert set(body.keys()) == {
+        "id",
+        "path",
+        "title",
+        "modified_at",
+        "related_notes_linked",
+        "related_notes_skipped",
+    }
+    assert body["related_notes_linked"] == 0
+    assert body["related_notes_skipped"] == 0
     assert body["path"] == "00_Inbox/ChatGPT/Coexistence check.md"
 
 

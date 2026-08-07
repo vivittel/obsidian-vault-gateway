@@ -20,6 +20,7 @@ from fastapi import Depends
 from app.config import Settings, SettingsDep
 from app.exceptions import ValidationError
 from app.models import (
+    MAX_RELATED_NOTES,
     AppendedNoteResponse,
     ChatExport,
     CreatedNoteResponse,
@@ -36,6 +37,7 @@ from app.models import (
 from app.services import cursor_service, note_service
 from app.services.chat_export import render_chat_export
 from app.services.inbox_service import append_inbox_note, create_inbox_note
+from app.services.related_notes import resolve_related_notes
 from app.services.search_service import search_notes
 from app.services.vault_service import list_tree, resolve_folder, summarise_vault
 
@@ -275,6 +277,8 @@ class GatewayApplication:
             path=relative,
             title=created.title,
             modified_at=created.modified_at,
+            related_notes_linked=0,
+            related_notes_skipped=0,
         )
 
     def create_chat_export_note(self, *, title: str, export: ChatExport) -> CreatedNoteResponse:
@@ -292,11 +296,30 @@ class GatewayApplication:
         formatter (``app.services.chat_export``) stays a pure function of its
         arguments so it can be tested with a fixed clock, and this layer
         already owns ``Settings`` (including the configured timezone).
+
+        ``export.related_notes`` is re-verified against the Vault here, before
+        rendering — never inside ``render_chat_export``, which has no
+        filesystem access (issue #13; docs/adr/0006-*.md). The verification is
+        a handful of ``stat()`` calls at most (``MAX_RELATED_NOTES``), far
+        cheaper than a single ``read_note``, so it runs directly on this call
+        — no ``anyio.to_thread``, no ``runtime.vault_scan_limiter``; those
+        exist to bound full-Vault scans, not this.
         """
         now = datetime.now(tz=self.settings.timezone)
-        rendered = render_chat_export(export, title=title, now=now)
-        return self.create_inbox_note(
+        related = resolve_related_notes(
+            export.related_notes, read_root=self.settings.read_root, max_links=MAX_RELATED_NOTES
+        )
+        rendered = render_chat_export(
+            export, title=title, now=now, verified_related_notes=related.links
+        )
+        created = self.create_inbox_note(
             title=title, content=rendered.content, frontmatter=rendered.frontmatter
+        )
+        return created.model_copy(
+            update={
+                "related_notes_linked": len(related.links),
+                "related_notes_skipped": related.skipped,
+            }
         )
 
     def append_inbox_note(self, *, path: str, content: str) -> AppendedNoteResponse:

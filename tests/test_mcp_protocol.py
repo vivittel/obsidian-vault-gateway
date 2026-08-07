@@ -536,6 +536,8 @@ def test_extra_unexpected_argument_is_ignored_not_rejected(
         {"frontmatter": {"source": "x"}, "export": {"tldr": ["y"]}},
         {"path": "00_Inbox/ChatGPT/x.md", "export": {"tldr": ["y"]}},
         {"totally_unknown_key": "z", "export": {"tldr": ["y"]}},
+        # related_notes belongs inside export, not at the top level (issue #13).
+        {"related_notes": ["Knowledge/Foo.md"], "export": {"tldr": ["y"]}},
     ],
 )
 def test_create_inbox_note_rejects_unexpected_top_level_arguments(

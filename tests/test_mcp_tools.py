@@ -92,7 +92,28 @@ async def test_create_inbox_note_input_schema_is_title_plus_structured_export() 
     assert "frontmatter" not in schema["properties"]
     export_schema = schema["$defs"]["ChatExport"]["properties"]
     assert "path" not in export_schema
-    assert "related_notes" not in export_schema
+    assert "related_notes" in export_schema
+
+
+async def test_create_inbox_note_export_schema_related_notes_is_bounded() -> None:
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["create_inbox_note"].input_schema
+    export_schema = schema["$defs"]["ChatExport"]["properties"]
+    related_notes_schema = export_schema["related_notes"]
+    # Only the list's item COUNT is schema-enforced; an individual item's
+    # shape (e.g. length) is not, so one oversized candidate never blocks
+    # the whole export — see the oversized-candidate test further below.
+    assert related_notes_schema["maxItems"] == 10
+    assert "maxLength" not in related_notes_schema["items"]
+    assert "search_notes" in related_notes_schema["description"]
+
+
+async def test_create_inbox_note_export_schema_orders_related_notes_field() -> None:
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["create_inbox_note"].input_schema
+    property_names = list(schema["$defs"]["ChatExport"]["properties"])
+    assert property_names.index("next_actions") < property_names.index("related_notes")
+    assert property_names.index("related_notes") < property_names.index("sources")
 
 
 async def test_create_inbox_note_export_mode_defaults_to_summary_in_schema() -> None:
@@ -182,7 +203,14 @@ async def test_create_inbox_note_matches_application_layer_shape(env: None) -> N
     result = await mcp.call_tool(
         "create_inbox_note", {"title": "MCP parity check", "export": {"tldr": ["x"]}}
     )
-    assert set(result.structured_content) == {"id", "path", "title", "modified_at"}
+    assert set(result.structured_content) == {
+        "id",
+        "path",
+        "title",
+        "modified_at",
+        "related_notes_linked",
+        "related_notes_skipped",
+    }
     assert result.structured_content["path"] == "00_Inbox/ChatGPT/MCP parity check.md"
 
 
@@ -452,13 +480,53 @@ async def test_create_inbox_note_rejects_unknown_export_field(env: None) -> None
         )
 
 
-async def test_create_inbox_note_rejects_related_notes_field(env: None) -> None:
-    # issue #13 (depends on #12) owns this field; #12 only fixes the
-    # "## 関連ノート" heading, its position, and its always-empty placeholder.
+async def test_create_inbox_note_accepts_related_notes_and_links_verified_targets(
+    env: None,
+) -> None:
+    result = await mcp.call_tool(
+        "create_inbox_note",
+        {
+            "title": "Related notes MCP test",
+            "export": {
+                "tldr": ["y"],
+                "related_notes": ["Knowledge/PC/GPU/RTX 5070.md", "Knowledge/missing.md"],
+            },
+        },
+    )
+    assert result.structured_content["related_notes_linked"] == 1
+    assert result.structured_content["related_notes_skipped"] == 1
+
+
+async def test_create_inbox_note_oversized_related_note_candidate_does_not_block_export(
+    env: None,
+) -> None:
+    oversized = "Knowledge/" + "a" * 1020 + ".md"
+    result = await mcp.call_tool(
+        "create_inbox_note",
+        {
+            "title": "Oversized related note MCP test",
+            "export": {
+                "tldr": ["y"],
+                "related_notes": [oversized, "Knowledge/PC/GPU/RTX 5070.md"],
+            },
+        },
+    )
+    assert result.is_error is False
+    assert result.structured_content["related_notes_linked"] == 1
+    assert result.structured_content["related_notes_skipped"] == 1
+
+
+async def test_create_inbox_note_rejects_too_many_related_notes(env: None) -> None:
     with pytest.raises(ToolError):
         await mcp.call_tool(
             "create_inbox_note",
-            {"title": "x", "export": {"tldr": ["y"], "related_notes": ["Knowledge/Foo.md"]}},
+            {
+                "title": "x",
+                "export": {
+                    "tldr": ["y"],
+                    "related_notes": [f"Knowledge/{i}.md" for i in range(11)],
+                },
+            },
         )
 
 
