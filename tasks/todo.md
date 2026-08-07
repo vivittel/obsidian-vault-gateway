@@ -824,3 +824,60 @@ passed、`.venv/bin/pytest -q` 502 passed、
   「`verification`のようなモード共有フィールドのdescriptionが全所有モードを含む
   ことをテストする」等の計画修正はすべて実装へ反映済み（`_ALL_MODE_FIELDS_IN_ORDER`、
   `_FIELD_OWNER_MODES`の導出、対応するテスト）
+
+### PR #16レビュー対応（追加コミット）
+
+上記PRへのコードレビューで**Request changes**（マージブロッカー2件・要修正1件）を
+受け、マージ前に修正した。3件とも実機検証（`markdown-it-py`によるレンダリング確認、
+インストール済みSDKのソース読解、実際のPython実行での再現）で技術的に正しいと確認
+した上で対応した。
+
+1. **箇条書き・番号付き・timeline/definitions結合文字列でMarkdown構造注入を防げて
+   いなかった。** `_escape_paragraph`（`tldr`の段落レンダリングのみに適用）を
+   `_escape_block_start`へ改名し、`app/services/chat_export.py`の全レンダリング
+   経路（`decisions`等の箇条書き、`steps`の番号付き、`timeline`/`definitions`の
+   結合後文字列、`topics.points`）へ適用した。`decisions=["# 偽の見出し"]`は
+   `markdown-it-py`で実際に`<li><h1>偽の見出し</h1></li>`（リスト内に本物のH1）
+   を生成することを確認して発見した。ハザード集合に先頭`<`（HTMLブロック全7種が
+   必ず`<`で始まる）と先頭`[`（リンク参照定義がリスト項目の表示テキストを消す・
+   タスクリストチェックボックスになる）を追加した。数字+区切り文字
+   （`"1. nested"`）は句読点側へ`\`を挿入する専用処理（`_ORDERED_MARKER_RE`）を
+   追加した——数字の前へ`\`を置くとCommonMarkのエスケープ対象外（数字はASCII
+   句読点でない）のため`\`がそのまま表示に残ってしまうことを実機確認した
+2. **MCPトップレベルの未知引数（`content`/`frontmatter`）が静かに破棄されていた。**
+   `mcp==2.0.0`の動的引数モデル（`ArgModelBase`）に`extra="forbid"`を設定する
+   公開手段が無いことを確認した上（`**kwargs`追加・`model_config`後書き換え・
+   ラッパーモデル化の3案を検討し、いずれも不採用と判断）、SDKが提供する
+   `mcp.server.context.ServerMiddleware`拡張点を使い、`_StrictCreateInboxNoteArgumentsMiddleware`
+   を`app/mcp_server.py`に追加してフェイルクローズ化した。この保護は実際の
+   JSON-RPCディスパッチ（マウント済み`/mcp`）を通る経路にのみ働き、
+   `tests/test_mcp_tools.py`の直接呼び出し便利メソッド（`mcp.call_tool(...)`）は
+   `ServerRunner`のミドルウェア連鎖を経由しないため対象外——同モジュールの
+   docstringをこの非対称性を明記する形に修正した。ミドルウェアで拒否すると
+   `_McpCall`が実行されず監査ログから書き込み試行が欠落する問題も指摘され、
+   `_log_mcp_call`共通ヘルパーを抽出して`_McpCall.__exit__`とミドルウェアの
+   両方から使う形にした
+3. **タグ正規化テストが公開契約（`ChatExport`→pydantic検証）を経由していなかった。**
+   `tags: list[Label]`（`Label`は`min_length=1`）のため`ChatExport(tags=[""])`は
+   pydanticレベルで拒否され、空要素を落とす`_normalise_tags`の実装へ到達しない
+   矛盾があった。`Label`から`min_length`を除いた`Tag`型を新設し`tags`をこれへ
+   変更。`_normalise_tags`の直接テストを`ChatExport(...)`→`render_chat_export(...)`
+   経由の公開契約テストへ書き換えた。`ChatExport`はREST
+   `InboxNoteCreateRequest.export`から参照されるため、この型変更は
+   `openapi.json`（`ChatExport.tags.items.minLength`が消える）にも反映され、
+   再生成した
+
+いずれの修正でも、`docs/adr/0005-*.md`の該当記述（`_escape_paragraph`のみに
+触れていたリスク節、「silently ignored」としていたNegative節）と
+`tests/test_mcp_protocol.py`の既存コメント（`test_extra_unexpected_argument_is_ignored_not_rejected`）
+を実装後の挙動に合わせて更新した。
+
+実装中に副次的に発見した点: モダンプロトコル（2026-07-28）とレガシープロトコル
+（2025-06-18）では、JSON-RPCレベルのエラーがHTTPステータスへマッピングされる際の
+挙動が異なる（レガシーは常にHTTP 200 + bodyの`error`フィールド、モダンはHTTP 400）
+ことを新規テスト作成時に実機確認した。計画時点では未把握だった既存SDK挙動であり、
+今回追加した`_StrictCreateInboxNoteArgumentsMiddleware`固有の挙動ではない。
+
+再検証: `.venv/bin/ruff check .` → All checks passed、`.venv/bin/pytest -q` →
+642 passed（Fix適用前628件+新規14件）、
+`.venv/bin/python scripts/export_openapi.py --check` → up to date。

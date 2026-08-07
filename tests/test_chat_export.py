@@ -17,7 +17,6 @@ from app.services.chat_export import (
     _ALL_MODE_FIELDS_IN_ORDER,
     _FIELD_OWNER_MODES,
     _MODE_SECTIONS,
-    _normalise_tags,
     _one_line,
     render_chat_export,
 )
@@ -308,7 +307,7 @@ def test_created_equals_updated_and_is_iso_seconds() -> None:
 
 
 @pytest.mark.parametrize(
-    "raw,expected",
+    ("raw", "expected"),
     [
         ("", []),
         (" ", []),
@@ -320,11 +319,19 @@ def test_created_equals_updated_and_is_iso_seconds() -> None:
     ],
 )
 def test_tag_normalisation_edge_cases(raw: str, expected: list[str]) -> None:
-    assert _normalise_tags([raw]) == expected
+    # Through the public contract, not the private _normalise_tags helper:
+    # `Tag` (unlike `Label`) has no min_length, so raw="" must be pydantic-valid
+    # on ChatExport itself — that gap between the model and the formatter is
+    # exactly what this test would otherwise fail to catch.
+    export = ChatExport(tldr=["ok"], tags=[raw])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert rendered.frontmatter["tags"] == expected
 
 
 def test_tag_normalisation_deduplicates_preserving_first_occurrence() -> None:
-    assert _normalise_tags(["x", "x", "y"]) == ["x", "y"]
+    export = ChatExport(tldr=["ok"], tags=["x", "x", "y"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert rendered.frontmatter["tags"] == ["x", "y"]
 
 
 def test_empty_tags_render_as_flow_style_empty_list() -> None:
@@ -464,6 +471,73 @@ def test_paragraph_starting_with_hash_is_escaped() -> None:
     export = ChatExport(mode="summary", tldr=["# looks like a heading"])
     rendered = render_chat_export(export, title="t", now=_NOW)
     assert "\\# looks like a heading" in rendered.content
+
+
+# --- Block-start hazards in list/ordered/timeline/definitions rendering ------
+#
+# A bullet or numbered prefix does not, by itself, stop a client value from
+# opening a *nested* block inside that list item (CommonMark list items may
+# contain arbitrary block content). Verified against markdown-it-py during
+# design (not a project dependency): "- # forged" renders as a real nested
+# <h1>, "<script>" opens an unclosed HTML block that swallows every
+# following heading, "- [ref]: url" disappears as a link reference
+# definition, and "- [ ] task" becomes a task-list checkbox. Each test below
+# both asserts the escaped literal text and that the fixed headings that
+# follow survive as real "## " lines.
+
+
+def test_decisions_item_starting_with_hash_cannot_forge_a_nested_heading() -> None:
+    export = _build("summary", decisions=["# forged"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "- \\# forged" in rendered.content
+    assert _heading_lines(rendered.content)[:2] == ["## 要約", "## 決定事項"]
+
+
+def test_steps_item_that_is_a_bare_code_fence_is_escaped() -> None:
+    export = _build("procedure", steps=["```", "do it"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "1. \\```" in rendered.content
+    assert "2. do it" in rendered.content
+    assert "## 検証" in _heading_lines(rendered.content)
+
+
+def test_facts_item_starting_with_blockquote_marker_is_escaped() -> None:
+    export = _build("reference", facts=["> quote"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "- \\> quote" in rendered.content
+    assert "## 例" in _heading_lines(rendered.content)
+
+
+def test_tldr_item_that_opens_an_html_block_is_escaped() -> None:
+    export = ChatExport(mode="summary", tldr=["<script>"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "\\<script>" in rendered.content
+    # The whole point: an unclosed <script> HTML block would otherwise
+    # swallow every following heading as raw HTML block content.
+    assert "## 決定事項" in _heading_lines(rendered.content)
+    assert "## 出典" in _heading_lines(rendered.content)
+
+
+def test_decisions_item_starting_with_task_checkbox_is_escaped() -> None:
+    export = _build("summary", decisions=["[ ] task"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "- \\[ ] task" in rendered.content
+
+
+def test_facts_item_that_looks_like_a_link_reference_definition_is_escaped() -> None:
+    export = _build("reference", facts=["[ref]: https://example.com"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "- \\[ref]: https://example.com" in rendered.content
+
+
+def test_steps_item_starting_with_ordered_marker_escapes_the_punctuation_not_the_digit() -> None:
+    # A bare backslash before a digit is not a CommonMark escape and would
+    # render literally ("\1. nested") — the punctuation itself must be
+    # escaped instead ("1\. nested").
+    export = _build("procedure", steps=["1. nested", "second"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "1. 1\\. nested" in rendered.content
+    assert "2. second" in rendered.content
 
 
 def test_control_characters_are_stripped() -> None:

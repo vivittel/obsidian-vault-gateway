@@ -124,8 +124,23 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _ASCII_SPACE_RUN_RE = re.compile(r"[ \t]+")
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 _SENTENCE_END_CHARS = "。！？」）"
-_PARAGRAPH_HAZARD_RE = re.compile(
-    r"^(#{1,6}(\s|$)|>|[-*+](\s|$)|\d+[.)](\s|$)|```|~~~|-{3,}$|={3,}$|_{3,}$)"
+
+# A digit+punctuation prefix (e.g. "1. nested") needs its own branch: escaping
+# it like every other hazard (a bare leading backslash) would produce
+# "\1. nested" on the wire, and a backslash before a digit is not a CommonMark
+# escape sequence at all (only ASCII punctuation is escapable) — the backslash
+# would render literally. The correct fix is to escape the punctuation itself
+# ("1\. nested"), which both displays cleanly and blocks the nested-list read.
+_ORDERED_MARKER_RE = re.compile(r"^(\d+)([.)])(?=\s|$)")
+
+# Leading '<' covers every CommonMark HTML block type (1-7 all start with it)
+# without enumerating tag names; leading '[' covers link reference
+# definitions ("[foo]: url", which would silently disappear as list content
+# and rewire any other "[foo]" reference in the same note) and task-list
+# checkboxes ("[ ] "/"[x] ", a GFM/Obsidian extension). The digit+punctuation
+# case is handled separately by _ORDERED_MARKER_RE above, not here.
+_BLOCK_HAZARD_RE = re.compile(
+    r"^(?:#{1,6}(?:\s|$)|>|<|\[|[-*+](?:\s|$)|```|~~~|-{3,}$|={3,}$|_{3,}$)"
 )
 
 
@@ -365,17 +380,26 @@ def _join_sentences(items: list[str]) -> str:
     return result
 
 
-def _escape_paragraph(line: str) -> str:
-    """Escape a bare paragraph line that would otherwise read as Markdown
-    structure (heading, blockquote, list marker, fence, thematic break).
+def _escape_block_start(value: str) -> str:
+    """Escape ``value`` so it cannot be misread as the start of a new
+    Markdown block (heading, blockquote, HTML block, link reference
+    definition, list marker, fence, thematic break) once it is placed after
+    a bullet/ordered marker or rendered as a bare paragraph (``tldr``).
 
-    Only ``tldr`` renders as a bare paragraph; every other field is rendered
-    as a bullet or numbered item, which already carries a prefix that a
-    client value cannot forge past.
+    A bullet or numbered prefix ("- "/"N. ") does not, by itself, stop a
+    client value from opening a *nested* block — CommonMark list items may
+    contain arbitrary block content, so "- # forged" is a real, rendered
+    ``<h1>`` inside the list item, not literal text. Every rendering path in
+    this module therefore calls this as the last step before adding its own
+    prefix, not only the bare-paragraph ``tldr`` path.
     """
-    if _PARAGRAPH_HAZARD_RE.match(line):
-        return f"\\{line}"
-    return line
+    ordered = _ORDERED_MARKER_RE.match(value)
+    if ordered:
+        number, punctuation = ordered.groups()
+        return f"{number}\\{punctuation}{value[ordered.end():]}"
+    if _BLOCK_HAZARD_RE.match(value):
+        return f"\\{value}"
+    return value
 
 
 def _placeholder_for(field_name: str) -> str:
@@ -386,8 +410,16 @@ def _placeholder_for(field_name: str) -> str:
     return _PLACEHOLDER_NOT_RECORDED
 
 
+def _render_timeline_line(when: str | None, event: str) -> str:
+    text = f"{when}: {event}" if when else event
+    return f"- {_escape_block_start(text)}"
+
+
 def _render_topic(heading: str, points: list[str]) -> str:
-    body = "\n".join(f"- {point}" for point in points) if points else _PLACEHOLDER_NOT_RECORDED
+    if points:
+        body = "\n".join(f"- {_escape_block_start(point)}" for point in points)
+    else:
+        body = _PLACEHOLDER_NOT_RECORDED
     return f"### {heading}\n\n{body}"
 
 
@@ -397,16 +429,20 @@ def _render_body(field_name: str, normalised: _Normalised) -> str:
         return _placeholder_for(field_name)
 
     if field_name == "tldr":
-        return _escape_paragraph(_join_sentences(value))
+        return _escape_block_start(_join_sentences(value))
     if field_name == "steps":
-        return "\n".join(f"{index}. {line}" for index, line in enumerate(value, start=1))
+        return "\n".join(
+            f"{index}. {_escape_block_start(line)}" for index, line in enumerate(value, start=1)
+        )
     if field_name == "timeline":
-        return "\n".join(f"- {when}: {event}" if when else f"- {event}" for when, event in value)
+        return "\n".join(_render_timeline_line(when, event) for when, event in value)
     if field_name == "topics":
         return "\n\n".join(_render_topic(heading, points) for heading, points in value)
     if field_name == "definitions":
-        return "\n".join(f"- {term}: {description}" for term, description in value)
-    return "\n".join(f"- {line}" for line in value)
+        return "\n".join(
+            f"- {_escape_block_start(f'{term}: {description}')}" for term, description in value
+        )
+    return "\n".join(f"- {_escape_block_start(line)}" for line in value)
 
 
 def _render_section(field_name: str, normalised: _Normalised) -> str:

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import logging
 
 import anyio
 import httpx2
@@ -505,11 +506,133 @@ def test_extra_unexpected_argument_is_ignored_not_rejected(
 ) -> None:
     # Confirmed against the installed SDK: the auto-generated argument model
     # silently ignores unrecognised keys rather than rejecting them.
+    #
+    # This is no longer true for `create_inbox_note`: it alone has
+    # `_StrictCreateInboxNoteArgumentsMiddleware` (app/mcp_server.py) fail
+    # closed on stray top-level arguments instead, since silently dropping
+    # `content`/`frontmatter` on a write tool is user-visible data loss, not
+    # a compatibility nicety — see
+    # test_create_inbox_note_rejects_unexpected_top_level_arguments below.
     response = _legacy_call_tool(
         mcp_client, mcp_headers, request_id=1, name="get_health", arguments={"bogus": "x"}
     )
     assert response.status_code == 200
     assert response.json()["result"]["isError"] is False
+
+
+# --- create_inbox_note: fail-closed on unexpected top-level arguments -------
+#
+# _StrictCreateInboxNoteArgumentsMiddleware (app/mcp_server.py) only engages
+# for requests that actually go through the JSON-RPC dispatch, which is
+# exactly this module's mcp_client — unlike tests/test_mcp_tools.py's direct
+# mcp.call_tool(...) calls, which bypass it (see that module's docstring).
+
+
+@pytest.mark.parametrize(
+    "extra_arguments",
+    [
+        {"content": "legacy body"},
+        {"content": "legacy body", "export": {"tldr": ["y"]}},
+        {"frontmatter": {"source": "x"}, "export": {"tldr": ["y"]}},
+        {"path": "00_Inbox/ChatGPT/x.md", "export": {"tldr": ["y"]}},
+        {"totally_unknown_key": "z", "export": {"tldr": ["y"]}},
+    ],
+)
+def test_create_inbox_note_rejects_unexpected_top_level_arguments(
+    mcp_client: TestClient, mcp_headers: dict, extra_arguments: dict
+) -> None:
+    inbox_root = get_settings().inbox_root
+    response = _legacy_call_tool(
+        mcp_client,
+        mcp_headers,
+        request_id=1,
+        name="create_inbox_note",
+        arguments={"title": "x", **extra_arguments},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["data"] == {"code": "VALIDATION_ERROR"}
+    assert not list(inbox_root.glob("x*.md"))
+
+
+def test_create_inbox_note_rejects_unexpected_top_level_arguments_modern(
+    mcp_client: TestClient, mcp_headers: dict
+) -> None:
+    inbox_root = get_settings().inbox_root
+    response = _modern_call_tool(
+        mcp_client,
+        mcp_headers,
+        request_id=1,
+        name="create_inbox_note",
+        arguments={"title": "modern reject check", "content": "legacy body"},
+    )
+    # Confirmed by direct inspection: the 2026-07-28 era maps a JSON-RPC-level
+    # error to HTTP 400 (unlike the legacy era's 200-with-an-error-body
+    # convention used elsewhere in this file) — a pre-existing transport
+    # difference between eras, not something this middleware changes.
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["data"] == {"code": "VALIDATION_ERROR"}
+    assert not list(inbox_root.glob("modern reject check*.md"))
+
+
+def test_create_inbox_note_rejection_sorts_keys_and_does_not_log_values(
+    mcp_client: TestClient,
+    mcp_headers: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    inbox_root = get_settings().inbox_root
+    caplog.set_level(logging.INFO, logger="obsidian_gateway.mcp")
+
+    response = _legacy_call_tool(
+        mcp_client,
+        mcp_headers,
+        request_id=1,
+        name="create_inbox_note",
+        arguments={
+            "title": "sorted reject check",
+            "frontmatter": {"secret": "frontmatter-value"},
+            "content": "content-value",
+            "export": {"tldr": ["y"]},
+        },
+    )
+
+    body = response.json()
+    assert body["error"]["data"] == {"code": "VALIDATION_ERROR"}
+    assert body["error"]["message"] == (
+        "Unexpected fields for create_inbox_note: content, frontmatter."
+    )
+    assert "content-value" not in caplog.text
+    assert "frontmatter-value" not in caplog.text
+    assert not list(inbox_root.glob("sorted reject check*.md"))
+
+
+def test_create_inbox_note_rejection_is_recorded_in_the_mcp_access_log(
+    mcp_client: TestClient,
+    mcp_headers: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A middleware veto never runs the tool body, so _McpCall never runs
+    # either — this pins that the write attempt still leaves exactly one
+    # mcp_call audit-log line, via the shared _log_mcp_call helper.
+    caplog.set_level(logging.INFO, logger="obsidian_gateway.mcp")
+
+    _legacy_call_tool(
+        mcp_client,
+        mcp_headers,
+        request_id=1,
+        name="create_inbox_note",
+        arguments={"title": "audit log check", "content": "x"},
+    )
+
+    mcp_call_records = [
+        r
+        for r in caplog.records
+        if r.name == "obsidian_gateway.mcp" and getattr(r, "tool", None) == "create_inbox_note"
+    ]
+    assert len(mcp_call_records) == 1
+    assert mcp_call_records[0].status == "error"
+    assert mcp_call_records[0].code == "VALIDATION_ERROR"
 
 
 def test_argument_type_mismatch_is_a_tool_error(

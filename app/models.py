@@ -149,6 +149,12 @@ _MAX_TAG_ITEMS = 20
 
 Line = Annotated[str, Field(max_length=_MAX_LINE_CHARS)]
 Label = Annotated[str, Field(min_length=1, max_length=_MAX_LABEL_CHARS)]
+# No min_length, unlike Label: an empty/whitespace-only tag is normalised
+# away by chat_export._normalise_tags, the same "pydantic allows it, the
+# formatter drops it" convention every other simple list (Line) already
+# follows. Sharing Label here (min_length=1) would reject "" before the
+# formatter ever saw it, contradicting that convention for tags specifically.
+Tag = Annotated[str, Field(max_length=_MAX_LABEL_CHARS)]
 
 
 class TimelineEntry(BaseModel):
@@ -426,7 +432,7 @@ class ChatExport(BaseModel):
             "'design', 'debugging', 'review'. Omit it rather than guessing."
         ),
     )
-    tags: list[Label] = Field(
+    tags: list[Tag] = Field(
         default_factory=list,
         max_length=_MAX_TAG_ITEMS,
         description=(

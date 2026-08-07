@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Mapping
 from functools import partial
 from types import TracebackType
-from typing import Annotated
+from typing import Annotated, Any
 
 import anyio
+from mcp.server.context import ServerMiddleware
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
@@ -89,6 +91,90 @@ _WRITE_ANNOTATIONS = ToolAnnotations(
     open_world_hint=False,
 )
 
+
+def _log_mcp_call(
+    tool_name: str,
+    *,
+    status: str,
+    duration_ms: float,
+    code: str | None = None,
+    result_count: int | None = None,
+) -> None:
+    """The single ``mcp_call`` audit-log shape, shared by ``_McpCall`` (a
+    tool body ran) and ``_StrictCreateInboxNoteArgumentsMiddleware`` (a tool
+    body never ran because the raw arguments were rejected first) — a write
+    attempt must leave exactly one of these lines either way, or it silently
+    disappears from the audit trail.
+    """
+    extra: dict[str, object] = {
+        "transport": "mcp",
+        "method": "tools/call",
+        "tool": tool_name,
+        "status": status,
+        "duration_ms": duration_ms,
+    }
+    if result_count is not None:
+        extra["result_count"] = result_count
+    if code is not None:
+        extra["code"] = code
+    mcp_access_logger.info("mcp_call", extra=extra)
+
+
+# create_inbox_note is the only tool this guards (issue #12 / PR #16 review):
+# the SDK's dynamically-generated top-level argument model does not set
+# extra="forbid" (only ChatExport itself does — see func_metadata.ArgModelBase
+# in the installed SDK), so an unrecognised key such as a legacy `content` or
+# `frontmatter` is otherwise silently dropped rather than rejected. For a
+# write tool that is user-visible data loss, not a compatibility nicety: the
+# caller believes it saved `content` and it never reaches the note.
+_CREATE_INBOX_NOTE_ALLOWED_ARGUMENTS = frozenset({"title", "export"})
+
+
+class _StrictCreateInboxNoteArgumentsMiddleware(ServerMiddleware[Any]):
+    """Fail closed on unexpected top-level arguments for ``create_inbox_note``.
+
+    ``ServerMiddleware`` runs before argument-schema validation, over the
+    raw, unvalidated JSON-RPC params — exactly what is needed to see a key
+    the per-tool model would otherwise strip silently. This only protects
+    requests that actually go through the JSON-RPC dispatch (the mounted
+    ``/mcp`` transport, i.e. real clients and tests/test_mcp_protocol.py);
+    tests/test_mcp_tools.py's direct ``mcp.call_tool(...)`` convenience calls
+    bypass this middleware entirely, which is fine — that path is an internal
+    Python API, not a wire boundary an untrusted client can reach.
+    """
+
+    async def __call__(self, ctx: Any, call_next: Any) -> Any:
+        start = time.monotonic()
+        if ctx.method != "tools/call":
+            return await call_next(ctx)
+
+        params = ctx.params
+        if not isinstance(params, Mapping) or params.get("name") != "create_inbox_note":
+            return await call_next(ctx)
+
+        arguments = params.get("arguments")
+        if not isinstance(arguments, Mapping):
+            # Malformed shape — let the SDK's own argument validation reject it.
+            return await call_next(ctx)
+
+        unexpected = tuple(sorted(set(arguments) - _CREATE_INBOX_NOTE_ALLOWED_ARGUMENTS))
+        if not unexpected:
+            return await call_next(ctx)
+
+        names = ", ".join(unexpected)
+        _log_mcp_call(
+            "create_inbox_note",
+            status="error",
+            duration_ms=round((time.monotonic() - start) * 1000, 1),
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+        raise MCPError(
+            code=INVALID_PARAMS,
+            message=f"Unexpected fields for create_inbox_note: {names}.",
+            data={"code": ErrorCode.VALIDATION_ERROR.value},
+        )
+
+
 # Must precede the MCPServer construction below, not follow it: that
 # constructor calls the SDK's own configure_logging(), which calls
 # logging.basicConfig(level=..., format="%(message)s") — and basicConfig is
@@ -103,7 +189,10 @@ _WRITE_ANNOTATIONS = ToolAnnotations(
 configure_logging()
 
 mcp = MCPServer(
-    name="Obsidian Vault Gateway", version=PACKAGE_VERSION, instructions=SERVER_INSTRUCTIONS
+    name="Obsidian Vault Gateway",
+    version=PACKAGE_VERSION,
+    instructions=SERVER_INSTRUCTIONS,
+    middleware=[_StrictCreateInboxNoteArgumentsMiddleware()],
 )
 
 
@@ -142,21 +231,12 @@ class _McpCall:
         duration_ms = round((time.monotonic() - self._start) * 1000, 1)
 
         if exc is None:
-            extra: dict[str, object] = {
-                "transport": "mcp",
-                # A tool body only ever runs from a tools/call, so this is a
-                # constant rather than something read off the request — but
-                # MCP_IMPLEMENTATION_PLAN section 16 lists it among the fields
-                # to record, and it keeps the rendered log's method column
-                # populated for MCP the way it is for REST.
-                "method": "tools/call",
-                "tool": self.tool_name,
-                "status": "success",
-                "duration_ms": duration_ms,
-            }
-            if self.result_count is not None:
-                extra["result_count"] = self.result_count
-            mcp_access_logger.info("mcp_call", extra=extra)
+            _log_mcp_call(
+                self.tool_name,
+                status="success",
+                duration_ms=duration_ms,
+                result_count=self.result_count,
+            )
             return False
 
         # Computed before the mcp_call log call below (not shadowed by the
@@ -170,17 +250,7 @@ class _McpCall:
             error_code = exc.code.value
         else:
             error_code = ErrorCode.INTERNAL_ERROR.value
-        mcp_access_logger.info(
-            "mcp_call",
-            extra={
-                "transport": "mcp",
-                "method": "tools/call",
-                "tool": self.tool_name,
-                "status": "error",
-                "duration_ms": duration_ms,
-                "code": error_code,
-            },
-        )
+        _log_mcp_call(self.tool_name, status="error", duration_ms=duration_ms, code=error_code)
 
         if isinstance(exc, GatewayError):
             log_extra = {

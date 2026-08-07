@@ -174,6 +174,71 @@ write tool, one approval row, and one formatter.
     structured export is the first case where "the stored title" and "the
     file-name stem" visibly diverge.
 
+The three decisions below were added responding to code review on the pull
+request implementing this ADR, before merge — the review found real gaps in
+decisions 7 and 10 above and in the trade-off decision 1 assumed about a
+client sending `content`.
+
+12. **Every rendering path escapes a value that would otherwise open a new
+    Markdown block, not only `tldr`'s bare paragraph.** A bullet or numbered
+    prefix ("- "/"N. ") does not stop a client value from opening a *nested*
+    block inside that list item — CommonMark list items may contain
+    arbitrary block content, so `decisions: ["# forged"]` rendered a real
+    `<h1>` inside the `<li>`, and `tldr: ["<script>"]` opened an unclosed
+    HTML block that swallowed every following heading as raw content
+    (verified against `markdown-it-py`, not a project dependency, during
+    review). `_escape_block_start` (renamed from `_escape_paragraph`) now
+    runs as the last step before every bullet, numbered item,
+    `timeline`/`definitions` combined line, and `topics.points` item gets
+    its prefix. The hazard set also grew to cover a leading `<` (every
+    CommonMark HTML block type starts with one) and a leading `[` (a link
+    reference definition, `[foo]: url`, silently deletes the list item's
+    visible text and can rewire any other `[foo]` reference in the same
+    note; `[ ]`/`[x]` is a GFM/Obsidian task-list checkbox). A digit+
+    punctuation prefix (`"1. nested"`) is escaped by inserting the backslash
+    before the punctuation (`"1\. nested"`), not before the value — a
+    backslash before a digit is not a CommonMark escape sequence at all and
+    would render literally. Heading text (`### {heading}`, the H1) is still
+    never escaped: it is inline content of an already-open heading and
+    cannot itself open a new block regardless of its leading character.
+
+13. **`create_inbox_note` fails closed on an unexpected top-level MCP
+    argument**, via `_StrictCreateInboxNoteArgumentsMiddleware`
+    (`mcp.server.context.ServerMiddleware`, registered on
+    `MCPServer(..., middleware=[...])`). The SDK's dynamically-generated
+    per-tool argument model has no supported way to set `extra="forbid"`
+    (verified: `ArgModelBase.model_config` only sets
+    `arbitrary_types_allowed=True`, and neither `@mcp.tool()`, `add_tool()`,
+    nor `Tool.from_function()` expose a strict-mode option), so a stray
+    `content`/`frontmatter` alongside a valid `export` was silently dropped
+    rather than rejected — user-visible data loss on a write tool, not a
+    compatibility nicety, since the caller believes it saved `content` and
+    it never reaches the note. `ServerMiddleware` runs before argument
+    validation over the *raw* JSON-RPC params, which is what makes seeing
+    the unrecognised key possible at all. This only protects requests that
+    go through the real dispatch (the mounted `/mcp` transport); the
+    `mcp.call_tool(...)` convenience method `tests/test_mcp_tools.py` uses
+    for direct, transport-free tool tests bypasses `ServerRunner` and its
+    middleware chain entirely, which is fine — that path is an internal
+    Python API a remote client can never reach, not a wire boundary. The
+    middleware logs the same `mcp_call` audit line `_McpCall` would have
+    (via a `_log_mcp_call` helper both now share), so a rejected write
+    attempt still leaves an audit trail even though the tool body — and
+    therefore `_McpCall` — never runs.
+
+14. **`tags` uses a dedicated `Tag` type (`Annotated[str, Field(max_length=200)]`),
+    not the `Label` type `TopicSection.heading`/`TermDefinition.term` use.**
+    `Label` sets `min_length=1`; sharing it for `tags` meant
+    `ChatExport(tags=[""])` was rejected by pydantic before
+    `chat_export._normalise_tags` — which drops empty/whitespace-only tags —
+    ever ran, silently contradicting the "pydantic allows it, the formatter
+    drops it" convention every other simple list (`Line`, no `min_length`)
+    already follows for exactly this reason. `Tag` restores that
+    consistency. Because `ChatExport.tags` is also reachable from REST's
+    `InboxNoteCreateRequest.export`, this is a real (if minor) OpenAPI
+    change: `ChatExport.tags.items.minLength` (previously `1`) is gone from
+    the generated schema.
+
 ## Consequences
 
 ### Positive
@@ -191,10 +256,10 @@ write tool, one approval row, and one formatter.
 ### Negative
 
 - Any MCP client holding a cached tool schema that still sends `content`
-  will have that argument silently ignored (the SDK's dynamically generated
-  top-level argument model does not set `extra="forbid"` — only `ChatExport`
-  itself does), and a client that sends no `export` at all gets a schema
-  rejection (`ToolError`, "Field required"). Accepted: MCP clients re-read
+  alongside `export` gets that call rejected outright — not silently
+  ignored — by `_StrictCreateInboxNoteArgumentsMiddleware` (decision 14
+  below); a client that sends no `export` at all gets a schema rejection
+  (`ToolError`, "Field required"). Accepted: MCP clients re-read
   `tools/list` each session, and this tool has never had a stable contract
   outside this repository.
 - The argument schema grows to roughly thirty `ChatExport` fields plus three
@@ -269,6 +334,29 @@ write tool, one approval row, and one formatter.
    documented in the model's docstring (which FastAPI surfaces as the
    schema's `description`) and pinned by a test
    (`tests/test_openapi.py::test_inbox_note_create_request_documents_the_content_export_exclusion`).
+
+For decision 13's fail-closed argument check, three SDK-level alternatives
+were considered and rejected before settling on `ServerMiddleware`:
+
+9. **A `**kwargs` catch-all parameter on the tool function.** Rejected — the
+   SDK's parameter walk (`func_metadata`) has no special case for
+   `inspect.Parameter.VAR_KEYWORD`; it would just add a field named
+   `kwargs` to the dynamic model, not a pydantic `extra` catch-all, so
+   client-supplied extra JSON keys still never reach it.
+10. **Mutating the registered tool's `arg_model.model_config` after
+    construction** to add `extra="forbid"`. Rejected — pydantic v2 compiles
+    a model's core validation schema at class-creation time; whether a
+    post-hoc `model_config` mutation (with or without `model_rebuild()`)
+    reliably changes validation behaviour for a `create_model()`-built class
+    is pydantic-internals-dependent and not something to rely on.
+11. **Wrapping `title`/`export` into one parameter of a caller-defined model**
+    (e.g. `payload: CreateInboxNoteInput`, itself `extra="forbid"`).
+    Rejected — the SDK builds one top-level schema field per Python
+    parameter regardless of that parameter's own type (confirmed: this is
+    exactly how `export: ChatExport` already works, as a named field
+    pointing at a `$defs` entry, not inlined), so this would change the
+    tool's top-level keys to `{"payload"}` instead of preserving
+    `{"title", "export"}`.
 
 ## References
 

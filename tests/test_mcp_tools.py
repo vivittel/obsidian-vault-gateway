@@ -1,8 +1,18 @@
 """app.mcp_server — MCP_IMPLEMENTATION_PLAN sections 9-14 (unmounted server, 7 tools).
 
-Exercises tools through ``mcp.call_tool(...)`` — the same tool-dispatch
-machinery a real ``tools/call`` request drives — without any transport;
-mounting ``/mcp`` itself is a later slice (S6, tests/test_mcp_protocol.py).
+Exercises tools through ``mcp.call_tool(...)`` — the same per-tool argument
+validation and tool-body dispatch a real ``tools/call`` request drives —
+without any transport; mounting ``/mcp`` itself is a later slice (S6,
+tests/test_mcp_protocol.py).
+
+One exception: ``mcp.call_tool(...)`` is the SDK's own convenience method,
+and it calls straight into the tool manager, bypassing ``ServerRunner``'s
+request dispatch and its ``ServerMiddleware`` chain entirely (verified
+against the installed SDK's source). ``_StrictCreateInboxNoteArgumentsMiddleware``
+(app/mcp_server.py) therefore never runs for calls made through this module —
+its fail-closed behaviour on stray top-level arguments is tested at the wire
+level in tests/test_mcp_protocol.py instead, where a real JSON-RPC request
+actually goes through that dispatch.
 """
 
 from __future__ import annotations
@@ -420,31 +430,14 @@ async def test_create_inbox_note_title_at_max_length_is_accepted(env: None) -> N
     assert len(result.structured_content["title"]) <= 100
 
 
-async def test_create_inbox_note_ignores_stray_content_and_frontmatter_arguments(
-    env: None, inbox_root: Path
-) -> None:
-    # The SDK's dynamically-generated top-level argument model
-    # (mcp.server.mcpserver.utilities.func_metadata.ArgModelBase) does not set
-    # extra="forbid" — only ChatExport itself does. A `content`/`frontmatter`
-    # key alongside a valid `export` is therefore silently dropped by pydantic,
-    # not rejected: verified directly against the installed SDK's source
-    # (ArgModelBase.model_config == ConfigDict(arbitrary_types_allowed=True),
-    # no `extra` set, so pydantic's own default of "ignore" applies). The
-    # written note must come only from `export` — the stray fields must never
-    # reach the body.
-    result = await mcp.call_tool(
-        "create_inbox_note",
-        {
-            "title": "Stray legacy args",
-            "content": "should not appear anywhere",
-            "frontmatter": {"nested": {"a": 1}},
-            "export": {"tldr": ["real content"]},
-        },
-    )
-    assert result.is_error is False
-    written = (inbox_root / "Stray legacy args.md").read_text(encoding="utf-8")
-    assert "should not appear anywhere" not in written
-    assert "real content" in written
+# Stray top-level `content`/`frontmatter` alongside `export` used to be
+# silently ignored by the SDK's dynamically-generated argument model — see
+# _StrictCreateInboxNoteArgumentsMiddleware in app/mcp_server.py (issue #12 /
+# PR #16 review). That middleware only runs for requests that go through the
+# real JSON-RPC dispatch (the mounted `/mcp` transport), which this module's
+# direct `mcp.call_tool(...)` convenience calls bypass entirely — see this
+# module's docstring. The fail-closed behaviour itself is therefore tested at
+# the wire level in tests/test_mcp_protocol.py, not here.
 
 
 async def test_create_inbox_note_rejects_unknown_export_field(env: None) -> None:
