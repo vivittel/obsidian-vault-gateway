@@ -241,6 +241,28 @@ def test_create_note_with_structured_export(
     assert "- d1" in written
 
 
+def test_create_note_with_related_notes(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={
+            "title": "Related notes REST test",
+            "export": {
+                "tldr": ["ok"],
+                "related_notes": ["Knowledge/PC/GPU/RTX 5070.md", "Knowledge/missing.md"],
+            },
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["related_notes_linked"] == 1
+    assert body["related_notes_skipped"] == 1
+    written = (inbox_root / "Related notes REST test.md").read_text(encoding="utf-8")
+    assert "## 関連ノート\n\n- [[Knowledge/PC/GPU/RTX 5070]]" in written
+
+
 def test_create_note_structured_export_defaults_to_summary(
     client: TestClient, auth_headers: dict[str, str], inbox_root: Path
 ) -> None:
