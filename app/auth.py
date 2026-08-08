@@ -44,7 +44,16 @@ async def require_token(settings: SettingsDep, credentials: CredentialsDep) -> N
     """Reject the request unless it carries the configured bearer token.
 
     A no-op when ``settings.auth_enabled`` is false (``AUTH_ENABLED=false``):
-    the Authorization header, if any, is not even inspected in that case.
+    this function's own body returns immediately without validating
+    ``credentials``. The ``bearer_scheme`` security dependency that produces
+    ``credentials`` still runs first regardless — FastAPI resolves every
+    parameter before calling the endpoint/dependency body — so the
+    Authorization header is parsed either way; only the comparison against
+    ``settings.api_token`` is skipped. This differs from ``app/mcp_auth.py``'s
+    ``McpBearerAuthMiddleware``, which really does skip reading the header
+    entirely when disabled, since it is a plain ASGI callable with no
+    FastAPI dependency injection in front of it (docs/adr/0004-*.md's
+    Negative consequences).
     """
     if not settings.auth_enabled:
         return

@@ -158,3 +158,32 @@ def test_oversized_request_is_logged_once(
     assert len(access_records) == 1
     assert access_records[0].status_code == 413
     assert access_records[0].route == "/api/v1/inbox/notes"
+
+
+def test_unhandled_exception_is_still_logged_as_status_500(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before this fix, an exception app/main.py's bare-Exception handler
+    converts to a 500 never reached AccessLogMiddleware at all: Starlette
+    installs that handler on the outermost ServerErrorMiddleware, entirely
+    outside every piece of user middleware (see app/middleware.py's
+    AccessLogMiddleware docstring), so the request left no access log line
+    whatsoever — the one case (an unhandled 500) most worth one.
+    """
+    from app import application as application_module
+
+    def failing_summarise(*_args: object, **_kwargs: object):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(application_module, "summarise_vault", failing_summarise)
+
+    response = client.get("/api/v1/vault/summary", headers=auth_headers)
+    assert response.status_code == 500
+
+    access_records = [r for r in caplog.records if r.name == "obsidian_gateway.access"]
+    assert len(access_records) == 1
+    assert access_records[0].status_code == 500
+    assert access_records[0].route == "/api/v1/vault/summary"

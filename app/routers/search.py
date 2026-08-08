@@ -11,7 +11,9 @@ from fastapi import APIRouter, Depends, Query, Request
 from app import runtime
 from app.application import ApplicationDep
 from app.auth import require_token
+from app.exceptions import ErrorCode
 from app.models import SearchResponse
+from app.openapi_responses import error_responses
 
 router = APIRouter(tags=["search"], dependencies=[Depends(require_token)])
 
@@ -21,6 +23,13 @@ router = APIRouter(tags=["search"], dependencies=[Depends(require_token)])
     response_model=SearchResponse,
     operation_id="searchNotes",
     summary="Search the vault by file name, title, tags, headings and body",
+    responses=error_responses(
+        {
+            400: (ErrorCode.INVALID_PATH, ErrorCode.INVALID_CURSOR, ErrorCode.VALIDATION_ERROR),
+            401: (ErrorCode.UNAUTHORIZED,),
+            500: (ErrorCode.INTERNAL_ERROR,),
+        }
+    ),
 )
 async def search(
     request: Request,

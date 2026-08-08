@@ -45,8 +45,13 @@ WORKDIR /
 
 EXPOSE 8000
 
+# Checks the response body, not just the status code: GatewayApplication.health()
+# (app/application.py) always answers HTTP 200, even when a mount is missing or
+# has the wrong permissions — that case sets the JSON body's "status" to
+# "degraded" instead. A check that only looked at the HTTP status would report
+# a container with a broken vault or inbox mount as healthy.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=2).status == 200 else 1)"]
+    CMD ["python", "-c", "import json, urllib.request, sys; r = urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=2); sys.exit(0 if r.status == 200 and json.load(r)['status'] == 'ok' else 1)"]
 
 # --no-access-log: uvicorn's built-in access log prints the raw query string,
 # which would leak search terms that app/middleware.py deliberately keeps out

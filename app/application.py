@@ -170,6 +170,7 @@ class GatewayApplication:
                 for hit in page.hits
             ],
             next_cursor=next_cursor,
+            skipped_count=page.skipped_count,
         )
 
     def read_note(self, *, path: str) -> NoteResponse:

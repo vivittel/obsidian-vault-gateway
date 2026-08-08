@@ -332,8 +332,21 @@ RESTのエラーエンベロープへ書き換えられてしまう（§15の懸
 `streamable_http_path="/"`として、実際の接続URLが`/mcp/mcp`にならないように
 した。ただしStarletteの`Mount`は`{path}/{path:path}`という正規表現でしか
 マッチしないため、末尾スラッシュ無しの`/mcp`単体はどの`Mount`にもマッチしない
-（実装時に発見）。対策として`/mcp`単体を`/mcp/`へ307リダイレクトする明示的な
-`Route`を追加した。
+（実装時に発見）。
+
+最初の対策は`/mcp`単体を`/mcp/`へ307リダイレクトする明示的な`Route`だったが、
+これは後にセキュリティ上の欠陥として撤去した（docs/adr/0008-*.md）:
+リダイレクト用の`Route`は`McpBearerAuthMiddleware`が包んでいるMCPトランスポート
+の**外側**に置かれていたため、`/mcp`単体へのリクエストは認証チェックを一切
+経由せずに307応答だけを受け取っていた。さらにこのリダイレクトは`GET`/`POST`/
+`DELETE`にしか対応しておらず、他のメソッド（`OPTIONS`等）は`Mount("/", app=
+rest_app)`に落ちてREST側の404エンベロープを返していた。
+
+現在の対策（`app/main.py`の`_NormalizeBareMcpPath`）は、リクエストが
+ルーティングされる前に`scope["path"]`を`/mcp`から`/mcp/`へASGIスコープ上で
+直接書き換える、というものに変更した。HTTPリダイレクトを一切経由しないため、
+`/mcp`と`/mcp/`はメソッドを問わず常に同じ`Mount`（＝常に`McpBearerAuthMiddleware`
+を経由する）へ到達し、未認証の窓は存在しない。
 
 ### lifespan
 

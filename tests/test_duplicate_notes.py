@@ -323,6 +323,40 @@ def test_ordering_is_deterministic_by_score_then_mtime_then_path(
     assert paths == sorted(paths)
 
 
+def test_candidates_are_ordered_by_confidence_before_raw_score(
+    inbox: Path, inbox_vault: Path
+) -> None:
+    """A bug this pins: `score` alone is not monotonic in confidence — a
+    keyword-only "low" candidate with enough matches can out-score a
+    "medium" one (a project match plus fewer keywords). `candidates`'
+    documented contract ("most confident first") requires confidence to be
+    the primary sort key, so a small `limit` never keeps the less-confident,
+    merely-higher-scoring candidate over the more-confident one.
+    """
+    ten_keywords = [f"k{i}" for i in range(1, 11)]
+
+    # medium: project match + exactly 2 matched keywords -> score 100 + 2*20 = 140
+    _write_note(
+        inbox, "Medium.md", title="Something Else A", project="Alpha", tags=ten_keywords[:2]
+    )
+    # low: keywords only (no project), 8/10 matched (threshold is 5) -> score 8*20 = 160
+    _write_note(inbox, "Low.md", title="Something Else B", tags=ten_keywords[:8])
+
+    result = _find(
+        inbox_vault, title="Search Title", project="Alpha", keywords=ten_keywords, limit=10
+    )
+    assert [c.confidence for c in result.candidates] == ["medium", "low"]
+
+    # The higher-scoring "low" candidate must not push the "medium" one out
+    # when limit=1 slices the (pre-computed) full set.
+    truncated = _find(
+        inbox_vault, title="Search Title", project="Alpha", keywords=ten_keywords, limit=1
+    )
+    assert len(truncated.candidates) == 1
+    assert truncated.candidates[0].confidence == "medium"
+    assert truncated.candidate_count == 2
+
+
 # --- Scope: inbox-only, shallow, frontmatter-only --------------------------------
 
 

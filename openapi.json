@@ -539,17 +539,55 @@
         "title": "DuplicateCandidatesResponse",
         "type": "object"
       },
-      "HTTPValidationError": {
+      "ErrorCode": {
+        "description": "The error code vocabulary (IMPLEMENTATION_PLAN section 13).\n\nTwo codes need a note:\n\n* ``RATE_LIMITED`` is part of the published contract but is never raised in\n  Phase 1 — no rate limiting is implemented yet.\n* ``VALIDATION_ERROR`` is an addition to section 13's list (which the plan\n  calls \"主なエラーコード\", i.e. non-exhaustive). Request validation failures\n  that are not about a path or a title — a non-integer ``limit``, an unknown\n  body field — need a code of their own rather than being forced into\n  ``INVALID_PATH``.",
+        "enum": [
+          "UNAUTHORIZED",
+          "INVALID_PATH",
+          "PATH_OUTSIDE_VAULT",
+          "NOTE_NOT_FOUND",
+          "INVALID_FILE_TYPE",
+          "FILE_TOO_LARGE",
+          "INVALID_TITLE",
+          "NOTE_ALREADY_EXISTS",
+          "VALIDATION_ERROR",
+          "RATE_LIMITED",
+          "INVALID_CURSOR",
+          "NOTE_MODIFIED",
+          "INBOX_LOCK_TIMEOUT",
+          "INTERNAL_ERROR"
+        ],
+        "title": "ErrorCode",
+        "type": "string"
+      },
+      "ErrorDetail": {
         "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
           }
         },
-        "title": "HTTPValidationError",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetail",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "description": "The single error shape used by every failing response (section 13).",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse",
         "type": "object"
       },
       "HealthResponse": {
@@ -774,6 +812,13 @@
             },
             "title": "Results",
             "type": "array"
+          },
+          "skipped_count": {
+            "default": 0,
+            "description": "Notes that matched the requested scope but could not be read while scanning the Vault for this search, and were excluded from `results` as a result — never the difference between `results` and the total number of matches, which is what `next_cursor` accounts for. 0 on an ordinary search.",
+            "minimum": 0.0,
+            "title": "Skipped Count",
+            "type": "integer"
           }
         },
         "required": [
@@ -911,46 +956,6 @@
           "heading"
         ],
         "title": "TopicSection",
-        "type": "object"
-      },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loc",
-          "msg",
-          "type"
-        ],
-        "title": "ValidationError",
         "type": "object"
       },
       "VaultNameCount": {
@@ -1120,7 +1125,7 @@
     }
   },
   "info": {
-    "description": "Read-mostly gateway over an Obsidian vault: full-vault search, note reads, and note creation restricted to 00_Inbox/ChatGPT. MCP (mounted at /mcp) is the primary interface; this REST API is kept for health checks, curl-based diagnostics, and regression tests.",
+    "description": "Read-mostly gateway over an Obsidian vault: full-vault search, note reads, vault tree/summary browsing, inbox duplicate-candidate detection, and note creation and append restricted to 00_Inbox/ChatGPT. MCP (mounted at /mcp) is the primary interface; this REST API is kept for health checks, curl-based diagnostics, and regression tests. Every failing response uses the single `{\"error\": {\"code\": ..., \"message\": ...}}` envelope described on each operation below — never FastAPI's default `{\"detail\": ...}` shape.",
     "title": "Obsidian Vault Gateway",
     "version": "0.1.0"
   },
@@ -1139,6 +1144,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: INTERNAL_ERROR."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Every failing response — including any status code not listed individually above — uses this same envelope; only `error.code` and `error.message` vary."
           }
         },
         "summary": "Report whether the vault mounts are usable",
@@ -1223,15 +1248,55 @@
             },
             "description": "Successful Response"
           },
-          "422": {
+          "400": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "`error.code` is one of: INVALID_FILE_TYPE, VALIDATION_ERROR."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: UNAUTHORIZED."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: NOTE_NOT_FOUND."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: INTERNAL_ERROR."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Every failing response — including any status code not listed individually above — uses this same envelope; only `error.code` and `error.message` vary."
           }
         },
         "security": [
@@ -1269,15 +1334,65 @@
             },
             "description": "Successful Response"
           },
-          "422": {
+          "400": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "`error.code` is one of: INVALID_TITLE, VALIDATION_ERROR."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: UNAUTHORIZED."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: NOTE_ALREADY_EXISTS."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: FILE_TOO_LARGE."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: INTERNAL_ERROR."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Every failing response — including any status code not listed individually above — uses this same envelope; only `error.code` and `error.message` vary."
           }
         },
         "security": [
@@ -1315,15 +1430,95 @@
             },
             "description": "Successful Response"
           },
-          "422": {
+          "400": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "`error.code` is one of: INVALID_PATH, INVALID_FILE_TYPE, VALIDATION_ERROR."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: UNAUTHORIZED."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: PATH_OUTSIDE_VAULT."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: NOTE_NOT_FOUND."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: NOTE_MODIFIED."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: FILE_TOO_LARGE."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: INTERNAL_ERROR."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: INBOX_LOCK_TIMEOUT."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Every failing response — including any status code not listed individually above — uses this same envelope; only `error.code` and `error.message` vary."
           }
         },
         "security": [
@@ -1364,15 +1559,65 @@
             },
             "description": "Successful Response"
           },
-          "422": {
+          "400": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "`error.code` is one of: INVALID_PATH, INVALID_FILE_TYPE, VALIDATION_ERROR."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: UNAUTHORIZED."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: PATH_OUTSIDE_VAULT."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: NOTE_NOT_FOUND."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: INTERNAL_ERROR."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Every failing response — including any status code not listed individually above — uses this same envelope; only `error.code` and `error.message` vary."
           }
         },
         "security": [
@@ -1488,15 +1733,45 @@
             },
             "description": "Successful Response"
           },
-          "422": {
+          "400": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "`error.code` is one of: INVALID_PATH, INVALID_CURSOR, VALIDATION_ERROR."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: UNAUTHORIZED."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: INTERNAL_ERROR."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Every failing response — including any status code not listed individually above — uses this same envelope; only `error.code` and `error.message` vary."
           }
         },
         "security": [
@@ -1540,15 +1815,45 @@
             },
             "description": "Successful Response"
           },
-          "422": {
+          "400": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "`error.code` is one of: VALIDATION_ERROR."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: UNAUTHORIZED."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: INTERNAL_ERROR."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Every failing response — including any status code not listed individually above — uses this same envelope; only `error.code` and `error.message` vary."
           }
         },
         "security": [
@@ -1628,15 +1933,65 @@
             },
             "description": "Successful Response"
           },
-          "422": {
+          "400": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "`error.code` is one of: INVALID_PATH, INVALID_FILE_TYPE, INVALID_CURSOR, VALIDATION_ERROR."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: UNAUTHORIZED."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: PATH_OUTSIDE_VAULT."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: NOTE_NOT_FOUND."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`error.code` is one of: INTERNAL_ERROR."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Every failing response — including any status code not listed individually above — uses this same envelope; only `error.code` and `error.message` vary."
           }
         },
         "security": [

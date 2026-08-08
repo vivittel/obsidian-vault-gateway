@@ -6,8 +6,11 @@
 #   - HTTPS required, HTTP auto-redirected (Caddy's default behaviour)
 #   - only /mcp (primary) and /api/v1/* (diagnostics) are served — nothing
 #     else on this host name
-#   - request body size is capped at exactly MAX_REQUEST_BYTES (2 MiB, U3),
-#     matching the app's own limit rather than a rounder but different value
+#   - request body size is capped at MAX_REQUEST_BYTES's default (2 MiB,
+#     U3), matching the app's own limit rather than a rounder but different
+#     value — the `max_size 2MiB` below is hardcoded, not read from the
+#     container's environment, so update it too if MAX_REQUEST_BYTES is ever
+#     overridden away from its default
 #   - access is logged
 #   - kept on its own host name, separate from any CouchDB/LiveSync endpoint
 #

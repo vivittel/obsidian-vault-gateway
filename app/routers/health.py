@@ -5,7 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.application import ApplicationDep
+from app.exceptions import ErrorCode
 from app.models import HealthResponse
+from app.openapi_responses import error_responses
 
 router = APIRouter(tags=["health"])
 
@@ -15,6 +17,7 @@ router = APIRouter(tags=["health"])
     response_model=HealthResponse,
     operation_id="getHealth",
     summary="Report whether the vault mounts are usable",
+    responses=error_responses({500: (ErrorCode.INTERNAL_ERROR,)}),
 )
 def get_health(application: ApplicationDep) -> HealthResponse:
     return application.health()

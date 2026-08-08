@@ -8,24 +8,32 @@ MCP server configuration on the same Codex host, without exposing the
 Gateway to the public internet. A secondary REST API is kept for health
 checks, curl-based diagnostics, and regression tests.
 
-This is **Phase 2** of `docs/IMPLEMENTATION_PLAN.md` — implemented, covered by
-the automated test suite, and verified on the OMV host together with LiveSync,
-Obsidian on a PC, and Obsidian on an iPhone. Only the container memory limit
-and Docker log-rotation settings added afterwards remain to be checked against
-the latest deployed image (see the checklist below). See
-`docs/adr/0001-switch-primary-interface-to-mcp.md` for why MCP replaced the
-original ChatGPT Actions plan, `docs/adr/0002-use-mcp-python-sdk-v2.md` for
-why this runs on the MCP Python SDK's v2 line,
-`docs/adr/0003-allow-os-replace-for-inbox-append.md` for why note append is
-the one place `os.replace()` is used,
+**Phase 2** of `docs/IMPLEMENTATION_PLAN.md` is complete — implemented,
+covered by the automated test suite, and verified on the OMV host together
+with LiveSync, Obsidian on a PC, and Obsidian on an iPhone — and several
+Phase 3 items (`docs/IMPLEMENTATION_PLAN.md` section 18) have shipped ahead
+of the rest: the shared vault-scan concurrency limit, MCP tool-usage
+logging, and scoped duplicate-note detection (`find_duplicate_candidates`).
+Only the container memory limit and Docker log-rotation settings added
+afterwards remain to be checked against the latest deployed image (see the
+checklist below). See `docs/adr/0001-switch-primary-interface-to-mcp.md` for
+why MCP replaced the original ChatGPT Actions plan,
+`docs/adr/0002-use-mcp-python-sdk-v2.md` for why this runs on the MCP Python
+SDK's v2 line, `docs/adr/0003-allow-os-replace-for-inbox-append.md` for why
+note append is the one place `os.replace()` is used,
 `docs/adr/0004-allow-disabling-bearer-authentication.md` for when and how
 bearer authentication may be disabled,
 `docs/adr/0005-single-structured-entry-point-for-chat-exports.md` for why
 `create_inbox_note` renders structured chat exports instead of exposing a
-second write tool, and `docs/MCP_IMPLEMENTATION_PLAN.md` for the MCP design
-in full. Phase 1 and Phase 1.5 (the REST-only and MCP-introduction
-predecessors) are documented as completed history in `docs/PHASE1_PLAN.md`
-and `docs/IMPLEMENTATION_PLAN.md`.
+second write tool, `docs/adr/0006-verified-related-note-wikilinks.md` for how
+`export.related_notes` is re-verified against the Vault before it is
+rendered, `docs/adr/0007-scoped-duplicate-note-detection.md` for why
+duplicate detection is its own read-only tool rather than a check embedded in
+`create_inbox_note`, `docs/adr/0008-normalize-bare-mcp-path.md` for why the
+bare `/mcp` path is normalized in-scope rather than redirected, and
+`docs/MCP_IMPLEMENTATION_PLAN.md` for the MCP design in full. Phase 1 and
+Phase 1.5 (the REST-only and MCP-introduction predecessors) are documented as
+completed history in `docs/PHASE1_PLAN.md` and `docs/IMPLEMENTATION_PLAN.md`.
 
 ## Security invariants
 
@@ -85,17 +93,26 @@ that does not support session termination (asserted in
 
 `search_notes` before `read_note` when the exact path is unknown — search
 results' `path` can be passed directly to `read_note`, `get_vault_tree`'s
-`path`, or `append_inbox_note`'s `path`. `get_vault_tree` lists one folder's
-direct children at a time (folders before notes); `get_vault_summary` gives
-vault-wide counts, sizes, and top tags without exposing any note body or
-title. Both support cursor-based pagination — pass a non-null `next_cursor`
-back as `cursor` with the same other arguments to fetch the next page; a
-cursor is only valid for the exact arguments it was minted with, and
-becomes invalid if `API_TOKEN` is rotated. `create_inbox_note` always writes
-a new file under `00_Inbox/ChatGPT`; `append_inbox_note` appends to an
-existing file already directly inside it. Neither can overwrite, delete,
-move, or rename notes, and `create_inbox_note` does not accept a path from
-the caller.
+`folder`, or `append_inbox_note`'s `path`. `get_vault_tree` lists one
+folder's direct children at a time (folders before notes) and supports
+cursor-based pagination — pass a non-null `next_cursor` back as `cursor`
+with the same `folder` to fetch the next page; a cursor is only valid for
+the exact arguments it was minted with, and becomes invalid if `API_TOKEN`
+is rotated. `get_vault_summary` gives vault-wide counts, sizes, and top
+tags without exposing any note body or title, and does not paginate — it
+has no `cursor`, only `top_tags_limit` (1-200, default 20) to bound how
+many tags come back. `create_inbox_note` always writes a new file under
+`00_Inbox/ChatGPT`; `append_inbox_note` appends to an existing file already
+directly inside it. Neither can overwrite, delete, move, or rename notes,
+and `create_inbox_note` does not accept a path from the caller.
+`create_inbox_note` needs no lock: `os.link()` itself atomically detects a
+name collision (`FileExistsError`), so two concurrent creates for the same
+title just retry onto the next free sequence number rather than racing.
+`append_inbox_note` does serialise on one inbox-wide lock (two appends
+could otherwise race on the same file); a request that cannot get it
+within a few seconds fails with `INBOX_LOCK_TIMEOUT` (`503`) rather than
+blocking indefinitely — this is the one error code safe to retry as-is,
+with no change to the request.
 
 **`create_inbox_note` takes a structured summary, not raw Markdown** (issue
 #12 / `docs/adr/0005-*.md`). The client reads the conversation, picks an
@@ -152,14 +169,15 @@ untouched.
 gate** (issue #14 / `docs/adr/0007-*.md`). `find_duplicate_candidates` scans
 only the direct children of `00_Inbox/ChatGPT` — never the rest of the Vault
 — and reads only frontmatter, never a note's body. It compares a proposed
-`title` (exact and normalized), `project`, and `keywords` against each
+`title` (exact and normalized), `project`, and `keywords` (at most 10) —
+matched against a candidate's `title`/`tags`, never its body — against each
 existing note's frontmatter `title`/`project`/`tags`, and returns up to
 `limit` candidates (default 5, max 10) plus a `recommendation`:
 
 | `recommendation` | Meaning | Client action |
 |---|---|---|
 | `create` | No credible duplicate (a `low`-confidence candidate may still be listed) | Call `create_inbox_note` without asking |
-| `confirm` | One strong (`high`-confidence) candidate | Ask the user to choose new / append / cancel before writing anything |
+| `confirm` | Exactly one `high`-confidence candidate and nothing else at `high`/`medium` | Ask the user to choose new / append / cancel before writing anything |
 | `choose` | Several or ambiguous candidates | Show the candidates and require an explicit pick before writing anything |
 
 `recommendation` is decided from every matching candidate, before `limit`
@@ -251,7 +269,7 @@ npx -y @modelcontextprotocol/inspector
 ```
 
 Connect to `https://obsidian-api.example.com/mcp` (Streamable HTTP),
-set the Bearer token, and confirm all seven tools are listed and callable.
+set the Bearer token, and confirm all eight tools are listed and callable.
 
 ### Configuration
 
@@ -266,6 +284,17 @@ Gateway is actually reached by, e.g. `obsidian-api.example.com`. See
 
 Kept for `docker healthcheck`, curl-based diagnostics, regression tests, and
 any non-MCP client.
+
+`GET /api/v1/health` always answers HTTP 200 — even when a mount is missing or
+has the wrong permissions, `status` in the body is `"degraded"` instead (see
+the response schema). The Dockerfile's `HEALTHCHECK` treats that the same as
+an unreachable server: it parses the body and only exits 0 when `status` is
+`"ok"`, so a container with a broken vault or inbox mount shows as `unhealthy`
+(`docker ps`, Portainer, OMV's Compose plugin) rather than healthy. This does
+**not** restart the container by itself — `restart: unless-stopped`
+(`compose.yaml`) only restarts on process exit, not on an `unhealthy` status —
+so treat `unhealthy` as something to go look at, not something that
+self-heals.
 
 | Method | Path | operationId | Auth |
 |---|---|---|---|
@@ -290,7 +319,13 @@ them regardless of `AUTH_ENABLED` — the published API contract is
 intentionally independent of any one deployment's runtime setting.
 
 Full schema: `openapi.json` (regenerate with `scripts/export_openapi.py`
-after changing any router/model), or `GET /docs` on a running instance.
+after changing any router/model), or `GET /docs`/`GET /redoc`/
+`GET /openapi.json` on a running instance — FastAPI serves all three with no
+Bearer requirement, same as `/api/v1/health`. The example Caddy site block
+(`docs/caddy/obsidian-api.Caddyfile`) only proxies `/mcp` and `/api/v1/*` and
+404s everything else, so these three stay unreachable in that deployment;
+if a deployment proxies more of the app than that example does, they are
+reachable without a token.
 
 `GET /api/v1/notes` takes the note path as a **query parameter**
 (`?path=Knowledge/Examples/Device.md`), not as part of the URL path — see
@@ -326,6 +361,13 @@ a note does not currently advance its `updated` field.
 the next page. A cursor is bound to those parameters (and to the current
 `API_TOKEN`) and is rejected with `INVALID_CURSOR` if either changes.
 
+Both take a `folder`, but a nonexistent one is not an error for either the
+same way: `/vault/tree` resolves and lists an actual directory, so a
+nonexistent `folder` is a **404** `NOTE_NOT_FOUND`; `/search`'s `folder`
+only checks syntax and filters by path prefix, so a nonexistent one is not
+a lookup failure at all — it simply matches nothing, returning `200` with
+an empty `results`.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill it in:
@@ -337,6 +379,15 @@ openssl rand -hex 32   # use the output as API_TOKEN
 
 See `.env.example` for every variable. Required for a real deployment:
 `API_TOKEN`, `MCP_ALLOWED_HOSTS`, `VAULT_HOST_PATH` / `INBOX_HOST_PATH`.
+
+`.env` is read by **Docker Compose** to fill in `compose.yaml`'s
+`${VARIABLE}` references — the application itself (`app/config.py`'s
+`Settings`) never reads that file; it only reads whatever environment
+variables the process was actually started with. `docker compose up` gets
+both for free from the same `.env`. Running `uvicorn` directly instead
+("Running locally" below) needs those variables passed on the command line
+or exported into the shell — `cp .env.example .env` alone does nothing for
+that path.
 
 `AUTH_ENABLED` (default `true`) gates bearer-token enforcement on both REST
 and MCP; see "Security invariants" above for when `false` is appropriate.
@@ -364,13 +415,13 @@ plugin all show it.
 | Field | Meaning |
 |---|---|
 | `$1` | Timestamp, ISO 8601 in the container's `TZ`. `T`, not a space, so it stays one field |
-| `$2` | Level (`DEBUG`/`INFO`/`WARN`/`ERROR`) |
+| `$2` | Level (`DEBUG`/`INFO`/`WARN`/`ERROR`/`CRIT`) |
 | `$3` | Source: `rest` or `mcp` for the access logs, otherwise `uvicorn` / `mcp-sdk` / `app` |
 | `$4` | Method: HTTP verb, or `tools/call` |
 | `$5` | Target: full REST route, MCP tool name, or the event when there is neither |
 | `$6` | Status: HTTP status, or `success` / `error` / `unauthorized` |
 | `$7` | Duration |
-| rest | `key=value` for whatever optional fields the event has |
+| rest of line | `key=value` for whatever optional fields the event has |
 
 Every column is exactly one whitespace-separated field, so `awk` works
 directly. Only the tail can contain spaces, and the two fields there that can
@@ -427,8 +478,9 @@ curl -fsS -X POST http://127.0.0.1:8000/mcp/ \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
-(`/mcp/` with the trailing slash avoids a redirect round trip; `/mcp` also
-works.)
+(`/mcp` without the trailing slash works identically — the ASGI layer
+rewrites it in place before routing, not via an HTTP redirect, so there is
+no extra round trip and no unauthenticated window either way.)
 
 ## Testing
 
@@ -446,7 +498,7 @@ are generated at test time, not committed.
 MCP tests (`tests/test_mcp_*.py`) mostly share one session-scoped `mcp_client`
 fixture rather than one per test: the SDK's session manager can only be
 started once per process, matching how a real server runs. `test_mcp_tools.py`
-covers the seven tools directly, unmounted; `test_mcp_lifespan.py` and two
+covers the eight tools directly, unmounted; `test_mcp_lifespan.py` and two
 tests in `test_mcp_protocol.py` that need their own event loop build an
 independent, throwaway MCP server instead.
 
@@ -495,8 +547,9 @@ result set is unusually large, could use more. If the container is OOM
 killed, do not simply raise the limit — first check the log for which
 request was in flight, how large the vault/notes involved are, and how many
 requests were running concurrently (`VAULT_SCAN_CONCURRENCY` in
-`app/main.py` bounds full-vault scans to 2 at a time); raise the limit only
-once that points at a real, expected memory need rather than a leak.
+`app/runtime.py` bounds full-vault scans to 2 at a time, shared by both
+REST and MCP); raise the limit only once that points at a real, expected
+memory need rather than a leak.
 
 > **Not verified in this repository's automated tests.** The development
 > environment this code was written in has no Docker installed, so nothing
@@ -662,7 +715,7 @@ note, and additionally confirm:
 
 Then delete the test note as noted above.
 
-Client checks: MCP Inspector connects and lists all seven tools; ChatGPT
+Client checks: MCP Inspector connects and lists all eight tools; ChatGPT
 desktop connects and a read tool runs without a prompt; Codex CLI connects
 (`codex mcp list`) and both write tools (`create_inbox_note`,
 `append_inbox_note`) prompt for approval before running.
@@ -727,11 +780,13 @@ override) once a fixed image is published.
 
 Example site block: `docs/caddy/obsidian-api.Caddyfile`. Requirements it
 covers: HTTPS-only, only `/mcp` (primary) and `/api/v1/*` (diagnostics)
-served on this host name, a request-size cap matching `MAX_REQUEST_BYTES`
-exactly, and access logging. Bearer token checking stays inside the
-application. `MCP_ALLOWED_HOSTS` on the container must include this host
-name, or the MCP transport's own DNS-rebinding protection rejects every
-request Caddy forwards.
+served on this host name, a request-size cap matching `MAX_REQUEST_BYTES`'s
+default (2 MiB) — a hardcoded `request_body { max_size 2MiB }`, not read
+from the container's environment, so update it too if `MAX_REQUEST_BYTES`
+is ever overridden away from its default — and access logging. Bearer token
+checking stays inside the application. `MCP_ALLOWED_HOSTS` on the container
+must include this host name, or the MCP transport's own DNS-rebinding
+protection rejects every request Caddy forwards.
 
 ## Known gaps (tracked for later phases)
 
@@ -743,8 +798,11 @@ request Caddy forwards.
   performance work (`docs/IMPLEMENTATION_PLAN.md` section 18's
   "大規模Vault向け改善", e.g. a SQLite FTS5 index) is explicitly out of
   Phase 2's scope.
-- Rate limiting, concurrency limits, metrics, MCP compatibility testing
-  across SDK updates — Phase 3.
+- Rate limiting, metrics, monitoring, 401-spike detection, a documented SDK
+  upgrade procedure, and MCP compatibility testing across SDK updates —
+  Phase 3, still open. (The vault-scan concurrency limit, MCP tool-usage
+  logging, and `find_duplicate_candidates` — also Phase 3 — have already
+  shipped; see `docs/IMPLEMENTATION_PLAN.md` section 18.)
 - Vault audit (orphan notes, broken links, stale Inbox notes) — Phase 4.
 - MCP resources, prompts, OAuth, a public/tunnelled deployment — out of scope
   for the foreseeable future; see ADR-0001's "Review conditions".

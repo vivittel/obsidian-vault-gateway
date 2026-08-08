@@ -18,7 +18,9 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from app.application import ApplicationDep
 from app.auth import require_token
+from app.exceptions import ErrorCode
 from app.models import NoteResponse
+from app.openapi_responses import error_responses
 
 router = APIRouter(tags=["notes"], dependencies=[Depends(require_token)])
 
@@ -28,6 +30,15 @@ router = APIRouter(tags=["notes"], dependencies=[Depends(require_token)])
     response_model=NoteResponse,
     operation_id="readNote",
     summary="Read a note by its vault-relative path",
+    responses=error_responses(
+        {
+            400: (ErrorCode.INVALID_PATH, ErrorCode.INVALID_FILE_TYPE, ErrorCode.VALIDATION_ERROR),
+            401: (ErrorCode.UNAUTHORIZED,),
+            403: (ErrorCode.PATH_OUTSIDE_VAULT,),
+            404: (ErrorCode.NOTE_NOT_FOUND,),
+            500: (ErrorCode.INTERNAL_ERROR,),
+        }
+    ),
 )
 def read_note(
     request: Request,

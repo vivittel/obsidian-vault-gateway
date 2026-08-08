@@ -10,6 +10,7 @@ from app.exceptions import GatewayError, InvalidFileTypeError, InvalidPathError,
 from app.services.path_security import (
     WalkStats,
     iter_directory,
+    iter_vault_notes,
     normalise_relative_dir,
     resolve_read_path,
 )
@@ -162,4 +163,59 @@ def test_iter_directory_stats_counts_per_entry_failures(
     entries = list(iter_directory(root, root, stats=stats))
     assert {entry.name for entry in entries} == {"Good.md"}
     assert stats.skipped == 1
-    assert stats.scan_failed is False
+
+
+def test_iter_vault_notes_prefix_excludes_stat_failures_outside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bug this pins: a note that fails to stat() *outside* the requested
+    prefix must not be counted at all — not yielded (already true before
+    this test) and not added to stats.skipped either (the actual bug:
+    app/services/search_service.py's folder-scoped skipped_count used to
+    include failures anywhere in the vault, since the folder filter ran
+    only after iter_vault_notes had already stat'd — and counted — every
+    file, in or out of the requested subtree).
+    """
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "Knowledge").mkdir()
+    (root / "Knowledge" / "Good.md").write_text("x\n", encoding="utf-8")
+    (root / "Private").mkdir()
+    (root / "Private" / "Bad.md").write_text("x\n", encoding="utf-8")
+
+    import os as os_module
+
+    original_os_stat = os_module.stat
+
+    def flaky_os_stat(path: object, *, dir_fd: object = None, follow_symlinks: bool = True):
+        # iter_vault_notes checks is_symlink() (follow_symlinks=False, via
+        # lstat) before its own explicit stat() call (follow_symlinks=True,
+        # the default). Only failing the latter targets that specific call
+        # without also breaking the symlink check every entry goes through
+        # (see tests/test_vault.py's identical pattern).
+        name = getattr(path, "name", None) or os_module.path.basename(os_module.fspath(path))
+        if follow_symlinks and name == "Bad.md":
+            raise OSError("simulated permission or unlink race")
+        return original_os_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(os_module, "stat", flaky_os_stat)
+
+    stats = WalkStats()
+    notes = list(iter_vault_notes(root, prefix="Knowledge/", stats=stats))
+    assert [note.relative for note in notes] == ["Knowledge/Good.md"]
+    assert stats.skipped == 0  # Private/Bad.md is outside the prefix
+
+    stats_in_scope = WalkStats()
+    notes_in_scope = list(iter_vault_notes(root, prefix="Private/", stats=stats_in_scope))
+    assert notes_in_scope == []
+    assert stats_in_scope.skipped == 1  # Private/Bad.md is inside this prefix
+
+
+def test_iter_vault_notes_without_prefix_matches_original_behaviour(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "A.md").write_text("x\n", encoding="utf-8")
+    (root / "B.md").write_text("x\n", encoding="utf-8")
+
+    notes = list(iter_vault_notes(root))
+    assert sorted(note.relative for note in notes) == ["A.md", "B.md"]

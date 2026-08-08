@@ -658,12 +658,11 @@ ADR-0001〜0003と同じ形式でADR-0004を新規作成した（D2）。
 
 ### 未解決事項
 
-- **`app/auth.py`の`require_token`docstring（46-47行目）の
-  「the Authorization header, if any, is not even inspected in that case」
-  はREST側について不正確。** 実際にはFastAPIの`HTTPBearer`security
+- ~~`app/auth.py`の`require_token`docstringの不正確な記述~~ — 別PR
+  （Tier 1+2監査修正PR）で修正済み。実際にはFastAPIの`HTTPBearer`security
   dependencyがヘッダーを解析してから`require_token`本体が呼ばれるため、
-  「検査しない」のは比較・検証の部分のみ。今回はdocs-only PRのため
-  コードは変更せず、docstring修正は別PR（コード変更を伴うPR）で対応する
+  「検査しない」のは比較・検証の部分のみである旨をdocstringに書き直し、
+  `docs/adr/0004-*.md`のNegative欄も追随して更新した
 - `docs/PHASE2_PLAN.md`§11の実機検証手順（15ステップ）自体はそのまま残した
   （将来の再検証時に参照する手順として有効なため）。手順内の個別ステップに
   チェックマーク等は付けていない
@@ -1054,3 +1053,53 @@ PR #17へのコードレビューで指摘（マージブロッカー1件・ド�
 再検証: `.venv/bin/ruff check .` → All checks passed、`.venv/bin/pytest -q` →
 711 passed（PR #17時点708件 + 本修正で3件追加）、
 `.venv/bin/python scripts/export_openapi.py --check` → up to date。
+
+# 重複ノート検出（issue #14、PR #18）
+
+このセクションは、他の全ての監査項目を修正する本PRの一環として遡及的に追加した
+記録である。issue #14 / PR #18（commit `447be25`）はこのセッションの開始前に
+既にマージ済みで、実装過程そのものはこのセッションでは観測していない。他の
+PRセクションのような「計画レビューで発見した誤り」の記録は残っていないため、
+ここには最終的な変更内容と検証結果のみを記録する。
+
+## 変更内容
+
+`find_duplicate_candidates`という新規read-only MCPツール（およびREST版
+`GET /api/v1/inbox/duplicate-candidates`）を追加。`00_Inbox/ChatGPT`の直下
+だけをスキャンし、frontmatterのみを読み、exact/normalized title・project・
+keywordの各信号で候補をスコアリングする。Gatewayは`create_inbox_note`/
+`append_inbox_note`をこの結果でゲートしない — 類似度はadvisoryであり、
+new/append/cancelの判断フローはクライアント側のワークフロー契約として
+文書化されている。詳細な設計判断は`docs/adr/0007-*.md`を参照。
+
+主な変更ファイル: `app/services/duplicate_notes.py`（新規）、
+`app/application.py`・`app/mcp_server.py`・`app/routers/inbox.py`・
+`app/models.py`（配線）、`app/services/{chat_export,markdown_parser,
+path_security}.py`（補助関数の追加・共有）。テスト:
+`tests/test_duplicate_notes.py`（新規）ほか`test_application.py`・
+`test_inbox.py`・`test_mcp_protocol.py`・`test_mcp_tools.py`・
+`test_path_security.py`・`test_openapi.py`に追加。
+
+マージ後のレビューで1点修正: `create_inbox_note`自身のツール説明文に
+「`find_duplicate_candidates`が失敗した場合でも進めてよい」という既存の
+`SERVER_INSTRUCTIONS`/ADR-0007の記載を反映していなかったため、
+説明文自体にも明記した。
+
+## 実装しないもの（対象外）
+
+- 完全一致コンテンツのフィンガープリンティング — ADR-0007決定15。issue #14の
+  初期スコープでもoptionalとして明記されており、次イテレーションへ延期
+- `score`のレスポンス露出 — ADR-0007決定10。内部の重み付け調整をAPI契約化
+  してしまうため
+
+## 検証結果（このPRで再確認）
+
+`.venv/bin/pytest -q` → 771 passed（マージ済みコミット時点の値）。
+`.venv/bin/ruff check .` → All checks passed。
+`.venv/bin/python scripts/export_openapi.py --check` → up to date。
+
+なお、このセッション自身の監査で、`find_duplicate_candidates`の候補並び順が
+`score`単独に依存し「most confident first」という自身の契約に反する場合が
+あることが判明した（`limit`が小さいとconfidence `medium`の候補が
+confidence `low`の候補より先に切り捨てられ得る）。この修正は本PR自身の
+別セクションで扱う（confidenceを第一ソートキーへ変更、テスト追加）。

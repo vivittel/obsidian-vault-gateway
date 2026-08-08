@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from typing import TYPE_CHECKING
 
 from starlette.datastructures import Headers
@@ -36,7 +37,7 @@ from app.config import API_PREFIX, get_settings
 from app.exceptions import FileTooLargeError, error_envelope
 
 if TYPE_CHECKING:
-    from starlette.types import Receive, Scope, Send
+    from starlette.types import Message, Receive, Scope, Send
 
 access_logger = logging.getLogger("obsidian_gateway.access")
 
@@ -47,6 +48,13 @@ access_logger = logging.getLogger("obsidian_gateway.access")
 # floor.
 _HEALTH_ROUTE = f"{API_PREFIX}/health"
 
+# Every REST write goes through POST; PUT/PATCH are included for whatever a
+# future endpoint adds. GET/HEAD/DELETE never carry a body on this API, so
+# skipping the buffering-and-replay path below for them is not just an
+# optimisation — it keeps every read-only route's `receive` untouched, exactly
+# as before this class started reading bodies at all.
+_BODY_BEARING_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
 
 def _is_rest_http_request(scope: Scope) -> bool:
     return scope["type"] == "http" and scope["path"].startswith(API_PREFIX)
@@ -55,11 +63,23 @@ def _is_rest_http_request(scope: Scope) -> bool:
 class RequestSizeLimitMiddleware:
     """Reject an oversized body before it reaches request parsing.
 
-    Trusts the client-supplied ``Content-Length``; a request that lies about its
-    size and streams more than declared is not something Phase 1 defends
-    against (there is no streaming endpoint to exploit that way), but Caddy's
-    own request size limit is the second line of defence in production
-    (docs/PHASE1_PLAN.md section 4.7 / IMPLEMENTATION_PLAN section 11).
+    Two checks, in order:
+
+    1. The client-supplied ``Content-Length``, when present and already over
+       the limit — rejected without reading a single body chunk.
+    2. The body's actual cumulative size as it streams in, buffered here (see
+       :meth:`_read_and_replay`) and checked message by message. (1) alone
+       trusts a header a client can simply omit — a chunked-transfer body
+       (no ``Content-Length`` at all) sailed through unchecked until this
+       check existed. Caddy's own request size limit is still the second
+       line of defence in production (docs/PHASE1_PLAN.md section 4.7 /
+       IMPLEMENTATION_PLAN section 11), but the application must not depend
+       on it alone.
+
+    Mirrors the MCP SDK's own ``RequestBodyLimitMiddleware``
+    (``mcp.server.streamable_http_manager``), which the ``/mcp`` transport
+    already relies on for exactly this — the two transports now enforce
+    their request-body cap the same way.
 
     Returns the error response directly rather than raising ``FileTooLargeError``:
     an exception raised from ASGI middleware never reaches the
@@ -85,16 +105,74 @@ class RequestSizeLimitMiddleware:
             except ValueError:
                 declared_size = None
             if declared_size is not None and declared_size > max_bytes:
-                response = JSONResponse(
-                    status_code=FileTooLargeError.status_code,
-                    content=error_envelope(
-                        FileTooLargeError.code, FileTooLargeError.default_message
-                    ),
-                )
-                await response(scope, receive, send)
+                await self._reject(scope, receive, send)
                 return
 
-        await self.app(scope, receive, send)
+        if scope["method"] not in _BODY_BEARING_METHODS:
+            await self.app(scope, receive, send)
+            return
+
+        replay_receive = await self._read_and_replay(receive, max_bytes)
+        if replay_receive is None:
+            await self._reject(scope, receive, send)
+            return
+
+        await self.app(scope, replay_receive, send)
+
+    @staticmethod
+    async def _reject(scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse(
+            status_code=FileTooLargeError.status_code,
+            content=error_envelope(FileTooLargeError.code, FileTooLargeError.default_message),
+        )
+        await response(scope, receive, send)
+
+    @staticmethod
+    async def _read_and_replay(receive: Receive, max_bytes: int) -> Receive | None:
+        """Read the whole body, bounded by ``max_bytes``, and hand back a
+        ``receive`` that replays it unchanged — or ``None`` if it exceeded
+        the bound partway through.
+
+        The body is fully buffered before the downstream app ever sees it:
+        the point is to know the *complete* size is within budget before
+        request parsing starts, not to stream-validate chunk by chunk. The
+        buffer itself can never exceed ``max_bytes`` (checked after every
+        chunk, before extending it), so this adds no unbounded memory use.
+        """
+        received = bytearray()
+        received_request = False
+        body_complete = False
+        trailing_message: Message | None = None
+
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                trailing_message = message
+                break
+
+            received_request = True
+            body = message.get("body", b"")
+            if len(received) + len(body) > max_bytes:
+                return None
+            received.extend(body)
+            if not message.get("more_body", False):
+                body_complete = True
+                break
+
+        cached: deque[Message] = deque()
+        if received_request:
+            cached.append(
+                {"type": "http.request", "body": bytes(received), "more_body": not body_complete}
+            )
+        if trailing_message is not None:
+            cached.append(trailing_message)
+
+        async def replay() -> Message:
+            if cached:
+                return cached.popleft()
+            return await receive()
+
+        return replay
 
 
 class AccessLogMiddleware:
@@ -130,33 +208,69 @@ class AccessLogMiddleware:
                 status_code = message["status"]
             await send(message)
 
-        await self.app(scope, receive, send_wrapper)
+        unhandled_exception = False
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception:
+            # Deliberately `Exception`, not `BaseException`: an exception
+            # that is not a GatewayError/StarletteHTTPException/
+            # RequestValidationError (i.e. anything app/main.py's
+            # handle_unexpected_error converts) is never seen by this
+            # middleware as a response: Starlette's own
+            # Starlette.build_middleware_stack() pulls the `Exception`/`500`
+            # handler key out to the *outermost* ServerErrorMiddleware,
+            # outside every piece of user middleware including this one
+            # (verified against the installed version:
+            # starlette/applications.py's build_middleware_stack — "key in
+            # (500, Exception)" is routed to `error_handler`, never into the
+            # inner ExceptionMiddleware's own `handlers` dict). Without this
+            # except/finally, that exception would propagate straight
+            # through `await self.app(...)` above and leave the request
+            # entirely unlogged — the one case (an unhandled 500) most worth
+            # an access log line. Every registered GatewayError/
+            # HTTPException/validation handler still runs inside the inner
+            # ExceptionMiddleware, further down this same stack, and always
+            # sends `http.response.start` before returning control here — so
+            # `status_code` is only ever still 0 below for one of two
+            # reasons: this branch (a real crash), or the connection closing
+            # before any handler ever responded (no crash at all). Only the
+            # first should render as a fabricated 500. `ServerErrorMiddleware`
+            # itself only ever converts `Exception` (verified: `except
+            # Exception as exc` in starlette/middleware/errors.py), never a
+            # bare `BaseException` such as `asyncio.CancelledError` — a
+            # cancelled request (client disconnect, server shutdown) is not
+            # a crash and must not be recorded as a fabricated 500 either,
+            # so this deliberately lets it propagate through the `finally`
+            # below unmarked, with `status_code` staying whatever it already
+            # was (0 if the response never started).
+            unhandled_exception = True
+            raise
+        finally:
+            duration_ms = round((time.monotonic() - start) * 1000, 1)
+            route_path = self._route_path(scope, request)
 
-        duration_ms = round((time.monotonic() - start) * 1000, 1)
-        route_path = self._route_path(scope, request)
+            extra = {
+                # IMPLEMENTATION_PLAN section 14 lists transport among the
+                # things to record; only the MCP side was setting it before.
+                "transport": "rest",
+                "method": request.method,
+                "route": route_path,
+                "status_code": 500 if unhandled_exception and status_code == 0 else status_code,
+                "duration_ms": duration_ms,
+            }
+            if request.state.accessed_note:
+                extra["note_path"] = request.state.accessed_note
+            if request.state.created_note:
+                extra["note_path"] = request.state.created_note
+            if request.state.appended_note:
+                extra["note_path"] = request.state.appended_note
+            if request.state.result_count is not None:
+                extra["result_count"] = request.state.result_count
+            if request.method == "GET" and "q" in request.query_params:
+                extra["query_length"] = len(request.query_params["q"])
 
-        extra = {
-            # IMPLEMENTATION_PLAN section 14 lists transport among the things
-            # to record; only the MCP side was setting it before.
-            "transport": "rest",
-            "method": request.method,
-            "route": route_path,
-            "status_code": status_code,
-            "duration_ms": duration_ms,
-        }
-        if request.state.accessed_note:
-            extra["note_path"] = request.state.accessed_note
-        if request.state.created_note:
-            extra["note_path"] = request.state.created_note
-        if request.state.appended_note:
-            extra["note_path"] = request.state.appended_note
-        if request.state.result_count is not None:
-            extra["result_count"] = request.state.result_count
-        if request.method == "GET" and "q" in request.query_params:
-            extra["query_length"] = len(request.query_params["q"])
-
-        level = logging.DEBUG if route_path == _HEALTH_ROUTE else logging.INFO
-        access_logger.log(level, "request", extra=extra)
+            level = logging.DEBUG if route_path == _HEALTH_ROUTE else logging.INFO
+            access_logger.log(level, "request", extra=extra)
 
     @staticmethod
     def _route_path(scope: Scope, request: Request) -> str:

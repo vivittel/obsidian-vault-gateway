@@ -386,6 +386,39 @@ def test_create_note_over_size_limit_returns_413(
         get_settings.cache_clear()
 
 
+def test_create_note_over_size_limit_returns_413_even_with_no_content_length(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch, inbox_root
+) -> None:
+    """The same oversized body as the test above, but sent chunked (no
+    ``Content-Length`` header at all) — RequestSizeLimitMiddleware's
+    declared-size fast path cannot see this one at all, so this pins the
+    cumulative-body check that closes it. Regression for the bug where a
+    chunked request bypassed MAX_REQUEST_BYTES entirely and wrote an
+    over-cap note to the inbox.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setenv("MAX_REQUEST_BYTES", "1024")
+    get_settings.cache_clear()
+    try:
+
+        def body_chunks():
+            yield b'{"title":"big","content":"'
+            yield b"x" * 1000
+            yield b'"}'
+
+        response = client.post(
+            "/api/v1/inbox/notes",
+            headers={**auth_headers, "Content-Type": "application/json"},
+            content=body_chunks(),
+        )
+        assert response.status_code == 413
+        assert response.json()["error"]["code"] == "FILE_TOO_LARGE"
+        assert [p.name for p in inbox_root.iterdir() if p.name != ".gitkeep"] == []
+    finally:
+        get_settings.cache_clear()
+
+
 # --- POST /api/v1/inbox/notes/append ---------------------------------------
 
 REJECTED_APPEND_PATHS = [

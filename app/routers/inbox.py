@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, Query, Request, Response, status
 from app import runtime
 from app.application import ApplicationDep
 from app.auth import require_token
+from app.exceptions import ErrorCode
 from app.models import (
     MAX_DUPLICATE_CANDIDATES,
     AppendedNoteResponse,
@@ -31,6 +32,7 @@ from app.models import (
     InboxNoteAppendRequest,
     InboxNoteCreateRequest,
 )
+from app.openapi_responses import error_responses
 
 router = APIRouter(tags=["inbox"], dependencies=[Depends(require_token)])
 
@@ -40,6 +42,14 @@ router = APIRouter(tags=["inbox"], dependencies=[Depends(require_token)])
     response_model=DuplicateCandidatesResponse,
     operation_id="findDuplicateCandidates",
     summary="Find 00_Inbox/ChatGPT notes that may duplicate a proposed title",
+    responses=error_responses(
+        {
+            400: (ErrorCode.INVALID_FILE_TYPE, ErrorCode.VALIDATION_ERROR),
+            401: (ErrorCode.UNAUTHORIZED,),
+            404: (ErrorCode.NOTE_NOT_FOUND,),
+            500: (ErrorCode.INTERNAL_ERROR,),
+        }
+    ),
 )
 async def find_duplicate_candidates(
     request: Request,
@@ -82,6 +92,15 @@ async def find_duplicate_candidates(
     status_code=status.HTTP_201_CREATED,
     operation_id="createInboxNote",
     summary="Create a Markdown note in 00_Inbox/ChatGPT",
+    responses=error_responses(
+        {
+            400: (ErrorCode.INVALID_TITLE, ErrorCode.VALIDATION_ERROR),
+            401: (ErrorCode.UNAUTHORIZED,),
+            409: (ErrorCode.NOTE_ALREADY_EXISTS,),
+            413: (ErrorCode.FILE_TOO_LARGE,),
+            500: (ErrorCode.INTERNAL_ERROR,),
+        }
+    ),
 )
 def create_note(
     request: Request,
@@ -107,6 +126,18 @@ def create_note(
     response_model=AppendedNoteResponse,
     operation_id="appendInboxNote",
     summary="Append Markdown to an existing note in 00_Inbox/ChatGPT",
+    responses=error_responses(
+        {
+            400: (ErrorCode.INVALID_PATH, ErrorCode.INVALID_FILE_TYPE, ErrorCode.VALIDATION_ERROR),
+            401: (ErrorCode.UNAUTHORIZED,),
+            403: (ErrorCode.PATH_OUTSIDE_VAULT,),
+            404: (ErrorCode.NOTE_NOT_FOUND,),
+            409: (ErrorCode.NOTE_MODIFIED,),
+            413: (ErrorCode.FILE_TOO_LARGE,),
+            503: (ErrorCode.INBOX_LOCK_TIMEOUT,),
+            500: (ErrorCode.INTERNAL_ERROR,),
+        }
+    ),
 )
 def append_note(
     request: Request,

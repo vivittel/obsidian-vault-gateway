@@ -258,8 +258,8 @@ client sending `content`.
 
 - Any MCP client holding a cached tool schema that still sends `content`
   alongside `export` gets that call rejected outright — not silently
-  ignored — by `_StrictCreateInboxNoteArgumentsMiddleware` (decision 14
-  below); a client that sends no `export` at all gets a schema rejection
+  ignored — by `_StrictCreateInboxNoteArgumentsMiddleware` (decision 13
+  above); a client that sends no `export` at all gets a schema rejection
   (`ToolError`, "Field required"). Accepted: MCP clients re-read
   `tools/list` each session, and this tool has never had a stable contract
   outside this repository.
