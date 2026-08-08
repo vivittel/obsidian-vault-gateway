@@ -477,7 +477,10 @@ async def find_duplicate_candidates(
         "(issue #14). Only call this tool directly when its recommendation "
         "was 'create', or after the user has explicitly chosen 'new' in "
         "response to a 'confirm'/'choose' recommendation — never call it to "
-        "resolve 'confirm'/'choose' yourself."
+        "resolve 'confirm'/'choose' yourself. If find_duplicate_candidates "
+        "itself fails and the user has not asked for strict duplicate "
+        "checking, proceed with this tool as normal rather than blocking "
+        "the export on it."
     ),
     annotations=_WRITE_ANNOTATIONS,
 )

@@ -251,6 +251,19 @@ async def test_tool_descriptions_document_the_client_workflow_contract() -> None
     assert "cancel" in SERVER_INSTRUCTIONS
 
 
+async def test_create_inbox_note_description_documents_the_scan_failure_fallback() -> None:
+    # PR #18 review (P2): create_inbox_note's own description must restate
+    # SERVER_INSTRUCTIONS' failure fallback, not just the happy-path
+    # confirm/choose/create flow — a client reading only this tool's
+    # description must not conclude a recommendation is always required
+    # before writing.
+    tools = {t.name: t for t in await mcp.list_tools()}
+    create_description = tools["create_inbox_note"].description
+    assert "find_duplicate_candidates" in create_description
+    assert "fails" in create_description
+    assert "strict" in create_description
+
+
 async def test_find_duplicate_candidates_returned_path_is_accepted_by_append_inbox_note(
     env: None, inbox_root: Path
 ) -> None:
