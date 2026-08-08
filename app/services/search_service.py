@@ -21,7 +21,7 @@ from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from app.services import markdown_parser
-from app.services.path_security import iter_vault_notes, normalise_relative_dir
+from app.services.path_security import WalkStats, iter_vault_notes, normalise_relative_dir
 
 DEFAULT_LIMIT = 20
 EXCERPT_RADIUS = 100
@@ -49,6 +49,7 @@ class SearchHit(NamedTuple):
 class SearchPage(NamedTuple):
     hits: list[SearchHit]
     has_more: bool
+    skipped_count: int
 
 
 def fold(text: str) -> str:
@@ -130,21 +131,35 @@ def search_notes(
     — a strict total order, since ``relative`` is unique — before ``[offset:offset
     + limit]`` is sliced off. ``has_more`` tells the caller whether a further page
     exists so it can decide whether to mint a ``next_cursor``.
+
+    A note that cannot be opened after :func:`iter_vault_notes` already
+    stat'd it (e.g. a permission or unlink race — real under LiveSync) is
+    skipped rather than failing the whole search, matching
+    :func:`~app.services.vault_service.summarise_vault`'s tolerance for a
+    vault that changes out from under a scan. ``skipped_count`` reports how
+    many were excluded this way, so a caller can tell "no matches" apart
+    from "some notes could not be read".
     """
-    folded_query = fold(query.strip()) if query and query.strip() else ""
+    stripped_query = query.strip() if query and query.strip() else ""
+    folded_query = fold(stripped_query) if stripped_query else ""
     required_tags = parse_tag_filter(tags)
     prefix = f"{normalise_relative_dir(folder).as_posix()}/" if folder else ""
 
+    walk_stats = WalkStats()
     hits: list[SearchHit] = []
-    for note in iter_vault_notes(read_root):
+    for note in iter_vault_notes(read_root, stats=walk_stats):
         if prefix and not note.relative.startswith(prefix):
             continue
 
-        text, _ = markdown_parser.read_note_text(
-            note.path,
-            size_bytes=note.stat_result.st_size,
-            max_bytes=max_note_bytes,
-        )
+        try:
+            text, _ = markdown_parser.read_note_text(
+                note.path,
+                size_bytes=note.stat_result.st_size,
+                max_bytes=max_note_bytes,
+            )
+        except OSError:
+            walk_stats.skipped += 1
+            continue
         stem = note.relative.rsplit("/", 1)[-1].removesuffix(".md")
         parsed = markdown_parser.parse_note(text, fallback_title=stem)
 
@@ -177,7 +192,7 @@ def search_notes(
             SearchHit(
                 relative=note.relative,
                 title=parsed.title,
-                excerpt=_build_excerpt(parsed.body, folded_body, query or "", folded_query),
+                excerpt=_build_excerpt(parsed.body, folded_body, stripped_query, folded_query),
                 tags=parsed.tags,
                 modified_at=datetime.fromtimestamp(note.stat_result.st_mtime, tz=timezone),
                 score=score,
@@ -187,4 +202,4 @@ def search_notes(
     hits.sort(key=lambda hit: (-hit.score, -hit.modified_at.timestamp(), hit.relative))
     window = hits[offset : offset + limit]
     has_more = len(hits) > offset + len(window)
-    return SearchPage(hits=window, has_more=has_more)
+    return SearchPage(hits=window, has_more=has_more, skipped_count=walk_stats.skipped)

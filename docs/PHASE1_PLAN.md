@@ -95,7 +95,10 @@ tasks/todo.md
 `VAULT_READ_ROOT` / `VAULT_INBOX_ROOT` 自体は起動時に一度 `resolve()` してキャッシュし、
 symlink 検査の対象外とする（マウントポイントが symlink の構成を許容するため）。
 
-書き込みは `resolve_inbox_write_path()` で `is_relative_to(INBOX_ROOT.resolve())` を必ず確認。
+書き込み（Inbox作成）はここで想定していた「caller指定パスをINBOX_ROOT配下か検証する」
+形にはならなかった。実装ではcallerはパスを一切渡さず、常にサニタイズ済みtitleから
+サーバ側でファイル名を導出するため、検証すべき「caller指定の書き込みパス」自体が
+存在しない（§5 項目12、§4.3）。
 
 ### 4.2 ファイル名サニタイズ（§8）— `services/filenames.py`
 
@@ -134,7 +137,8 @@ Windows 予約名（CON/PRN/AUX/NUL/COM1-9/LPT1-9、大小無視）なら `INVAL
 - 対象フィールド: ファイル名 / YAML `title` / YAML `tags` / 本文 / 見出し
 - 並び順: タイトル・ファイル名一致 > 見出し一致 > タグ一致 > 本文一致、
   同点は `modified_at` 降順
-- `excerpt`: 本文の最初のヒット周辺 ±200 文字（空白畳み込み、frontmatter は含めない）
+- `excerpt`: 本文の最初のヒット周辺 ±100 文字（空白畳み込み、frontmatter は含めない）。
+  ヒットが無い場合は本文冒頭 200 文字を返す
 - `limit`: 既定 20、`MAX_SEARCH_RESULTS`(50) でクランプ
 - `modified_at`: `st_mtime` を `ZoneInfo(TZ)` 付き ISO8601 で返す（例と同じ `+09:00`）
 
@@ -196,11 +200,14 @@ Windows 予約名（CON/PRN/AUX/NUL/COM1-9/LPT1-9、大小無視）なら `INVAL
 ### 4.9 依存関係
 
 実行時: `fastapi` / `uvicorn[standard]` / `pydantic` / `pydantic-settings` /
-`python-frontmatter` / `PyYAML`。開発時: `pytest` / `httpx` / `ruff`。
+`PyYAML`。開発時: `pytest` / `httpx` / `ruff`。
 すべて `==` で固定し、`requirements.lock`（`pip freeze`）もコミットする。
 
 §4 の「Markdown解析用ライブラリ」は Phase 1 では**採用しない**。必要なのは見出し抽出
 （正規表現で足りる）と本文のそのまま返却だけで、パーサを入れても未使用の重量になる。
+
+`python-frontmatter` も採用しない — 当初この節はランタイム依存として明記していたが、
+実装時に発見した挙動（§5 項目11）により不採用とした。
 
 ## 5. 計画書からの逸脱・前提
 
@@ -224,6 +231,10 @@ Windows 予約名（CON/PRN/AUX/NUL/COM1-9/LPT1-9、大小無視）なら `INVAL
     代わりに `services/markdown_parser.py` で開始・終了デリミタを自前の正規表現で検出し、
     YAML 本体だけを `yaml.safe_load()`（既存の PyYAML 依存）に渡し、本文は元テキストから
     そのままスライスして返す。依存関係からは `python-frontmatter` を除いた
+12. **`resolve_inbox_write_path()` は実装しなかった（§4.1）。** ノート作成は caller から
+    パスを一切受け取らず、常にサニタイズ済み title からサーバ側でファイル名を導出する
+    （`filenames.sanitise_title` → `os.link()` の `FileExistsError` リトライ、§4.3）ため、
+    「caller 指定の書き込みパスを検証する」という前提自体が実装と一致しなかった
 
 ## 6. ローカル検証
 

@@ -30,7 +30,7 @@ def test_search_still_requires_auth_and_returns_same_shape(
 
     response = client.get("/api/v1/search", params={"q": "RTX 5070"}, headers=auth_headers)
     assert response.status_code == 200
-    assert set(response.json().keys()) == {"results", "next_cursor"}
+    assert set(response.json().keys()) == {"results", "next_cursor", "skipped_count"}
 
 
 def test_read_note_still_works_the_same(client: TestClient, auth_headers: dict[str, str]) -> None:

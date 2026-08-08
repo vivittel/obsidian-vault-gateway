@@ -1,7 +1,7 @@
 # Obsidian Vault Gateway 実装計画
 
 > Status: Active  
-> Revision: 2026-07-31  
+> Revision: 2026-08-08  
 > Repository: `vivittel/obsidian-vault-gateway`  
 > Primary interface: MCP  
 > Secondary interface: REST API  
@@ -22,6 +22,9 @@ OMV上で稼働するDockerコンテナとして、Obsidian VaultをChatGPTデ�
 この要件に合わせ、MCPを主インターフェースとする。既存のREST APIは削除せず、ヘルスチェック、curlによる診断、回帰試験、非MCPクライアント向けの互換インターフェースとして維持する。
 
 ## 2. 現在の状態
+
+Phase 1・Phase 1.5・Phase 2は完了している（詳細な内訳は§18）。Phase 3は
+一部が前倒しで実装済みで、残りは未着手。Phase 4は未着手。
 
 ### Phase 1: 完了
 
@@ -46,11 +49,20 @@ OMV上で稼働するDockerコンテナとして、Obsidian VaultをChatGPTデ�
 
 詳細は[`docs/PHASE1_PLAN.md`](PHASE1_PLAN.md)を参照する。
 
-### 次の作業
+### Phase 1.5・Phase 2: 完了
 
-旧Phase 2へ進む前に、Phase 1.5としてMCPトランスポートを追加する。
+MCPトランスポート（`/mcp`、Streamable HTTP）、`get_vault_tree`/
+`get_vault_summary`/`append_inbox_note`、カーソルページング、構造化チャット
+エクスポート（issue #12）、検証済み関連ノートwikilink（issue #13）を含む。
+詳細は[`docs/MCP_IMPLEMENTATION_PLAN.md`](MCP_IMPLEMENTATION_PLAN.md)・
+[`docs/PHASE2_PLAN.md`](PHASE2_PLAN.md)、および§18を参照する。
 
-詳細は[`docs/MCP_IMPLEMENTATION_PLAN.md`](MCP_IMPLEMENTATION_PLAN.md)を参照する。
+### Phase 3: 一部実装済み
+
+同時実行制限（`app/runtime.py`）、MCPツール利用ログ、および
+`find_duplicate_candidates`（issue #14、`docs/adr/0007-*.md`）は実装済み。
+レート制限、メトリクス、監視、401急増検知、SDK更新手順、MCP互換性試験は
+未着手。詳細は§18を参照する。
 
 ## 3. 対象構成
 
@@ -262,9 +274,11 @@ Application layer
 ├── health
 ├── search_notes
 ├── read_note
-├── create_inbox_note
 ├── get_vault_tree
 ├── get_vault_summary
+├── find_duplicate_candidates
+├── create_inbox_note
+├── create_chat_export_note
 └── append_inbox_note
         │
         ▼
@@ -276,7 +290,10 @@ Services
 ├── inbox_service
 ├── vault_service
 ├── cursor_service
-└── filenames
+├── filenames
+├── chat_export
+├── related_notes
+└── duplicate_notes
         │
         ▼
 Filesystem
@@ -302,7 +319,11 @@ app/
 ├── models.py
 ├── exceptions.py
 ├── middleware.py
+├── mcp_auth.py
 ├── mcp_server.py
+├── openapi_responses.py
+├── logging_config.py
+├── runtime.py
 │
 ├── routers/
 │   ├── health.py
@@ -319,20 +340,40 @@ app/
     ├── vault_service.py
     ├── cursor_service.py
     ├── inbox_service.py
-    └── filenames.py
+    ├── filenames.py
+    ├── chat_export.py
+    ├── related_notes.py
+    └── duplicate_notes.py
 
 tests/
 ├── fixtures/vault/
+├── conftest.py
 ├── test_auth.py
 ├── test_path_security.py
 ├── test_search.py
+├── test_search_service.py
 ├── test_notes.py
 ├── test_inbox.py
 ├── test_vault.py
+├── test_vault_scan_concurrency.py
 ├── test_cursor_service.py
+├── test_filenames.py
+├── test_markdown_parser.py
+├── test_application.py
+├── test_middleware.py
+├── test_logging.py
+├── test_log_format.py
+├── test_health.py
+├── test_error_envelope.py
+├── test_chat_export.py
+├── test_related_notes.py
+├── test_duplicate_notes.py
 ├── test_mcp_auth.py
+├── test_mcp_sdk.py
+├── test_mcp_lifespan.py
 ├── test_mcp_tools.py
 ├── test_mcp_protocol.py
+├── test_openapi.py
 └── test_rest_regression.py
 
 scripts/
@@ -346,7 +387,12 @@ docs/
 ├── adr/
 │   ├── 0001-switch-primary-interface-to-mcp.md
 │   ├── 0002-use-mcp-python-sdk-v2.md
-│   └── 0003-allow-os-replace-for-inbox-append.md
+│   ├── 0003-allow-os-replace-for-inbox-append.md
+│   ├── 0004-allow-disabling-bearer-authentication.md
+│   ├── 0005-single-structured-entry-point-for-chat-exports.md
+│   ├── 0006-verified-related-note-wikilinks.md
+│   ├── 0007-scoped-duplicate-note-detection.md
+│   └── 0008-normalize-bare-mcp-path.md
 └── caddy/
     └── obsidian-api.Caddyfile
 ```
@@ -407,8 +453,9 @@ find_stale_inbox_notes
 
 MCPツールのread/writeメタデータを正確に設定し、Codex側で`default_tools_approval_mode = "writes"`を使用できるようにする。
 
-`create_inbox_note`はPhase 2以降、構造化入力（`title` + `export`）のみを受け付ける
-（issue #12、`docs/adr/0005-single-structured-entry-point-for-chat-exports.md`）。
+`create_inbox_note`はPhase 2が完了した後（issue #12、
+`docs/adr/0005-single-structured-entry-point-for-chat-exports.md`）に
+構造化入力（`title` + `export`）専用へ拡張された。
 REST `POST /api/v1/inbox/notes`は既存の`content`/`frontmatter`を後方互換として
 維持したうえで同じ`export`フィールドを追加しており、MCPとRESTでツール数・承認方針の
 表は変わらない。
@@ -900,14 +947,25 @@ Status: Completed
 
 ### Phase 3: 運用強化
 
-- レート制限
-- 同時実行制限
-- タイムアウト
+Status: 一部実装済み（前倒し対応。§2参照）
+
+実装済み:
+
+- 同時実行制限・バックプレッシャー（`app/runtime.py`の`vault_scan_limiter`。
+  REST/MCP双方の全Vault走査を同じ上限で共有する）
+- Inbox追記のロックタイムアウト（`InboxLockTimeoutError`、503）
+- ツール利用ログ（`app/mcp_server.py`の`_log_mcp_call`。呼び出しごとに
+  tool/status/duration/result_countを記録）
+- `find_duplicate_candidates`（issue #14、`docs/adr/0007-*.md`。§9参照）
+
+未着手:
+
+- レート制限（`ErrorCode.RATE_LIMITED`は定義済みだが、これを送出する
+  `GatewayError`サブクラスは存在しない）
+- 一般的なリクエストタイムアウト（Inbox追記ロック以外）
 - メトリクス
 - 監視
 - 401急増検知
-- ツール利用ログ
-- バックプレッシャー
 - SDK更新手順
 - MCP互換性試験
 

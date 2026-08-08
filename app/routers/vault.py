@@ -11,7 +11,9 @@ from fastapi import APIRouter, Depends, Query, Request
 from app import runtime
 from app.application import ApplicationDep
 from app.auth import require_token
+from app.exceptions import ErrorCode
 from app.models import VaultSummaryResponse, VaultTreeResponse
+from app.openapi_responses import error_responses
 
 router = APIRouter(tags=["vault"], dependencies=[Depends(require_token)])
 
@@ -21,6 +23,20 @@ router = APIRouter(tags=["vault"], dependencies=[Depends(require_token)])
     response_model=VaultTreeResponse,
     operation_id="getVaultTree",
     summary="List the direct children of a vault folder",
+    responses=error_responses(
+        {
+            400: (
+                ErrorCode.INVALID_PATH,
+                ErrorCode.INVALID_FILE_TYPE,
+                ErrorCode.INVALID_CURSOR,
+                ErrorCode.VALIDATION_ERROR,
+            ),
+            401: (ErrorCode.UNAUTHORIZED,),
+            403: (ErrorCode.PATH_OUTSIDE_VAULT,),
+            404: (ErrorCode.NOTE_NOT_FOUND,),
+            500: (ErrorCode.INTERNAL_ERROR,),
+        }
+    ),
 )
 def get_vault_tree(
     request: Request,
@@ -51,6 +67,13 @@ def get_vault_tree(
     response_model=VaultSummaryResponse,
     operation_id="getVaultSummary",
     summary="Summarise vault-wide note counts, sizes, and tags",
+    responses=error_responses(
+        {
+            400: (ErrorCode.VALIDATION_ERROR,),
+            401: (ErrorCode.UNAUTHORIZED,),
+            500: (ErrorCode.INTERNAL_ERROR,),
+        }
+    ),
 )
 async def get_vault_summary(
     application: ApplicationDep,

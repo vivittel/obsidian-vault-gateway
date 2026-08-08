@@ -65,6 +65,17 @@ class SearchResponse(BaseModel):
             "further page."
         ),
     )
+    skipped_count: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Notes that matched the requested scope but could not be read while "
+            "scanning the Vault for this search, and were excluded from `results` "
+            "as a result — never the difference between `results` and the total "
+            "number of matches, which is what `next_cursor` accounts for. 0 on an "
+            "ordinary search."
+        ),
+    )
 
 
 class VaultTreeEntry(BaseModel):

@@ -125,7 +125,7 @@ read-only tool makes it true by construction.
    | `high` | `exact_title`, or `normalized_title` **and** `project_match` |
    | `medium` | `normalized_title` alone, or `project_match` **and** ≥2 matched keywords |
    | `low` | keywords alone, meeting decision 7's threshold |
-   | *(dropped)* | `project_match` alone, or keywords below threshold with no other signal |
+   | *(dropped)* | `project_match` with fewer than 2 matched keywords (0 or 1 — "alone" is the 0 case), or keywords below threshold with no other signal |
 
    | `recommendation` | Condition (over the *full*, pre-`limit` candidate set) |
    |---|---|

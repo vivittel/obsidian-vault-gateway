@@ -155,6 +155,91 @@ async def test_health_request_is_logged_at_debug_not_info(
     assert records[0].route == "/api/v1/health"
 
 
+async def test_unhandled_exception_is_still_logged_as_status_500(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A bug this pins: an exception that reaches this middleware un-responded
+    to (bare Exception/500 handlers run on Starlette's outermost
+    ServerErrorMiddleware, entirely outside this one — see the comment in
+    app/middleware.py) used to propagate straight through ``await
+    self.app(...)`` and leave the request with zero access-log lines. The
+    500 case is the one most worth logging.
+    """
+    caplog.set_level(logging.INFO, logger="obsidian_gateway.access")
+
+    class _CrashingApp:
+        async def __call__(self, scope: dict, receive, send) -> None:  # noqa: ARG002
+            raise RuntimeError("boom")
+
+    middleware = AccessLogMiddleware(_CrashingApp())
+    scope = _http_scope("/api/v1/vault/summary")
+
+    async def send(message: dict) -> None:
+        pass
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await middleware(scope, _dummy_receive, send)
+
+    access_records = [r for r in caplog.records if r.name == "obsidian_gateway.access"]
+    assert len(access_records) == 1
+    assert access_records[0].status_code == 500
+    assert access_records[0].route == "/api/v1/vault/summary"
+
+
+async def test_a_response_that_already_started_is_not_overwritten_by_a_later_crash(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If a handler crashes *after* already sending http.response.start (an
+    in-progress response, not the pre-response case above), the log must
+    keep the real status it saw rather than fabricating a 500 over it.
+    """
+    caplog.set_level(logging.INFO, logger="obsidian_gateway.access")
+
+    class _CrashesAfterRespondingApp:
+        async def __call__(self, scope: dict, receive, send) -> None:  # noqa: ARG002
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            raise RuntimeError("boom after responding")
+
+    middleware = AccessLogMiddleware(_CrashesAfterRespondingApp())
+    scope = _http_scope("/api/v1/search")
+
+    async def send(message: dict) -> None:
+        pass
+
+    with pytest.raises(RuntimeError, match="boom after responding"):
+        await middleware(scope, _dummy_receive, send)
+
+    access_records = [r for r in caplog.records if r.name == "obsidian_gateway.access"]
+    assert len(access_records) == 1
+    assert access_records[0].status_code == 200
+
+
+async def test_a_quiet_disconnect_with_no_response_and_no_exception_logs_status_zero(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Distinct from the crash case above: a handler that returns normally
+    without ever responding (e.g. the connection dropped) is not a crash and
+    must not be misreported as a 500.
+    """
+    caplog.set_level(logging.INFO, logger="obsidian_gateway.access")
+
+    class _NeverRespondsApp:
+        async def __call__(self, scope: dict, receive, send) -> None:  # noqa: ARG002
+            return
+
+    middleware = AccessLogMiddleware(_NeverRespondsApp())
+    scope = _http_scope("/api/v1/search")
+
+    async def send(message: dict) -> None:
+        pass
+
+    await middleware(scope, _dummy_receive, send)
+
+    access_records = [r for r in caplog.records if r.name == "obsidian_gateway.access"]
+    assert len(access_records) == 1
+    assert access_records[0].status_code == 0
+
+
 async def test_scope_state_set_downstream_is_visible_to_access_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -211,5 +296,128 @@ async def test_request_size_limit_still_rejects_oversized_body_under_api_v1(
 
         assert inner.called_with is None  # never reached the inner app
         assert sent_events[0]["status"] == 413
+    finally:
+        get_settings.cache_clear()
+
+
+def _chunked_receive(chunks: list[bytes]):
+    """A ``receive`` that streams ``chunks`` as successive
+    ``http.request`` messages (no ``Content-Length``, mirroring a real
+    ``Transfer-Encoding: chunked`` request), then a disconnect.
+    """
+    remaining = list(chunks)
+
+    async def receive() -> dict:
+        if remaining:
+            body = remaining.pop(0)
+            return {"type": "http.request", "body": body, "more_body": bool(remaining)}
+        return {"type": "http.disconnect"}
+
+    return receive
+
+
+async def test_request_size_limit_rejects_a_chunked_body_with_no_content_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body with no Content-Length header (chunked transfer) must still be
+    capped — the declared-size fast path in the parent test only catches a
+    client that reports its own size honestly.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setenv("API_TOKEN", "x" * 16)
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "localhost")
+    monkeypatch.setenv("MAX_REQUEST_BYTES", "1024")
+    get_settings.cache_clear()
+    try:
+        inner = _RecordingApp()
+        middleware = RequestSizeLimitMiddleware(inner)
+        scope = _http_scope("/api/v1/inbox/notes", method="POST")
+        receive = _chunked_receive([b"x" * 600, b"x" * 600])  # 1200 > 1024
+        sent_events = []
+
+        async def send(message: dict) -> None:
+            sent_events.append(message)
+
+        await middleware(scope, receive, send)
+
+        assert inner.called_with is None  # never reached the inner app
+        assert sent_events[0]["status"] == 413
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_request_size_limit_replays_a_chunked_body_within_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chunked body under the limit must reach the inner app byte-for-byte,
+    reassembled from however many chunks it originally arrived in.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setenv("API_TOKEN", "x" * 16)
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "localhost")
+    monkeypatch.setenv("MAX_REQUEST_BYTES", "1024")
+    get_settings.cache_clear()
+    try:
+        inner = _RecordingApp()
+
+        class _BodyReadingApp:
+            def __init__(self) -> None:
+                self.body: bytes = b""
+
+            async def __call__(self, scope: dict, receive, send) -> None:  # noqa: ARG002
+                chunks = []
+                while True:
+                    message = await receive()
+                    chunks.append(message.get("body", b""))
+                    if not message.get("more_body", False):
+                        break
+                self.body = b"".join(chunks)
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+                await send({"type": "http.response.body", "body": b""})
+
+        inner = _BodyReadingApp()
+        middleware = RequestSizeLimitMiddleware(inner)
+        scope = _http_scope("/api/v1/inbox/notes", method="POST")
+        receive = _chunked_receive([b"abc", b"def", b"ghi"])
+        sent_events = []
+
+        async def send(message: dict) -> None:
+            sent_events.append(message)
+
+        await middleware(scope, receive, send)
+
+        assert inner.body == b"abcdefghi"
+        assert sent_events[0]["status"] == 200
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_request_size_limit_leaves_get_requests_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET never carries a body on this API — the buffering/replay path must
+    not engage for it, so ``receive`` reaches the inner app unwrapped.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setenv("API_TOKEN", "x" * 16)
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "localhost")
+    monkeypatch.setenv("MAX_REQUEST_BYTES", "1024")
+    get_settings.cache_clear()
+    try:
+        inner = _RecordingApp()
+        middleware = RequestSizeLimitMiddleware(inner)
+        scope = _http_scope("/api/v1/search", method="GET")
+
+        async def send(message: dict) -> None:
+            pass
+
+        await middleware(scope, _dummy_receive, send)
+
+        called_scope, called_receive, _called_send = inner.called_with
+        assert called_scope is scope
+        assert called_receive is _dummy_receive  # not wrapped
     finally:
         get_settings.cache_clear()

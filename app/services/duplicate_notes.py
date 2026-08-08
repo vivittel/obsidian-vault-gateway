@@ -57,6 +57,15 @@ _MIN_KEYWORD_MATCHES_ALONE = 2
 # ("-2", "-3", ...) — never anything chat_export writes into a title itself.
 _SEQUENCE_SUFFIX_RE = re.compile(r"-\d+$")
 
+# The primary sort key for `candidates` (DuplicateCandidatesResponse.candidates'
+# own docstring: "most confident first"). Needed because `score` alone is not
+# monotonic in confidence — a keyword-only "low" candidate with many matched
+# keywords can out-score a "medium" one with fewer, higher-value signals (a
+# project match plus two keywords: 100 + 2*20 = 140 vs. keywords alone at, say,
+# 8 matches: 8*20 = 160) — exactly the case that let `limit` truncate away the
+# more-confident candidate while keeping a less-confident one ranked above it.
+_CONFIDENCE_RANK = {"high": 0, "medium": 1, "low": 2}
+
 
 def exact_title_key(title: str) -> str:
     """The same canonicalisation a structured export's own title goes
@@ -359,7 +368,14 @@ def find_duplicate_candidates(
         )
     skipped_count += stats.skipped
 
-    scored.sort(key=lambda candidate: (-candidate.score, -candidate.mtime, candidate.relative))
+    scored.sort(
+        key=lambda candidate: (
+            _CONFIDENCE_RANK[candidate.confidence],
+            -candidate.score,
+            -candidate.mtime,
+            candidate.relative,
+        )
+    )
 
     high_count = sum(1 for candidate in scored if candidate.confidence == "high")
     medium_count = sum(1 for candidate in scored if candidate.confidence == "medium")

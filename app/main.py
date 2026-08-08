@@ -57,9 +57,14 @@ rest_app = FastAPI(
     title="Obsidian Vault Gateway",
     description=(
         "Read-mostly gateway over an Obsidian vault: full-vault search, note "
-        "reads, and note creation restricted to 00_Inbox/ChatGPT. MCP "
-        "(mounted at /mcp) is the primary interface; this REST API is kept "
-        "for health checks, curl-based diagnostics, and regression tests."
+        "reads, vault tree/summary browsing, inbox duplicate-candidate "
+        "detection, and note creation and append restricted to "
+        "00_Inbox/ChatGPT. MCP (mounted at /mcp) is the primary interface; "
+        "this REST API is kept for health checks, curl-based diagnostics, "
+        "and regression tests. Every failing response uses the single "
+        "`{\"error\": {\"code\": ..., \"message\": ...}}` envelope described "
+        "on each operation below — never FastAPI's default `{\"detail\": "
+        "...}` shape."
     ),
     version=PACKAGE_VERSION,
 )

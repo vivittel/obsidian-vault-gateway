@@ -114,11 +114,11 @@ call or by a single cross-transport parity test.
   same: REST's `HTTPBearer` security dependency still parses the
   Authorization header before `require_token` decides not to validate it,
   while MCP's middleware never reads the header at all when disabled.
-  Both result in no enforcement, but `app/auth.py`'s own docstring
-  currently describes REST's case as "the Authorization header, if any, is
-  not even inspected" — which overstates it. Tracked as a follow-up
-  documentation fix in a future code change, not corrected here since this
-  is a docs-only change.
+  Both result in no enforcement. `app/auth.py`'s docstring previously
+  described REST's case as "the Authorization header, if any, is not even
+  inspected," which overstated it; fixed in a later documentation-only
+  change to describe the actual FastAPI dependency-resolution order
+  instead.
 
 ### Neutral
 
