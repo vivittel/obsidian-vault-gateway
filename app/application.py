@@ -12,6 +12,7 @@ in the adapter that calls in here.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated
 
@@ -20,10 +21,14 @@ from fastapi import Depends
 from app.config import Settings, SettingsDep
 from app.exceptions import ValidationError
 from app.models import (
+    MAX_DUPLICATE_CANDIDATES,
+    MAX_DUPLICATE_KEYWORDS,
     MAX_RELATED_NOTES,
     AppendedNoteResponse,
     ChatExport,
     CreatedNoteResponse,
+    DuplicateCandidate,
+    DuplicateCandidatesResponse,
     FrontmatterValue,
     HealthResponse,
     NoteResponse,
@@ -36,6 +41,7 @@ from app.models import (
 )
 from app.services import cursor_service, note_service
 from app.services.chat_export import render_chat_export
+from app.services.duplicate_notes import find_duplicate_candidates as _find_duplicate_candidates
 from app.services.inbox_service import append_inbox_note, create_inbox_note
 from app.services.related_notes import resolve_related_notes
 from app.services.search_service import search_notes
@@ -49,6 +55,9 @@ MAX_TREE_LIMIT = 500
 
 MIN_TAGS_LIMIT = 1
 MAX_TAGS_LIMIT = 200
+
+MIN_DUPLICATE_LIMIT = 1
+DEFAULT_DUPLICATE_LIMIT = 5
 
 SEARCH_OPERATION = "search"
 TREE_OPERATION = "tree"
@@ -255,6 +264,65 @@ class GatewayApplication:
             ],
             last_modified_at=stats.last_modified_at,
             skipped_count=stats.skipped_count,
+        )
+
+    def find_duplicate_candidates(
+        self,
+        *,
+        title: str,
+        project: str | None = None,
+        keywords: Sequence[str] | None = None,
+        limit: int = DEFAULT_DUPLICATE_LIMIT,
+    ) -> DuplicateCandidatesResponse:
+        """Scan ``00_Inbox/ChatGPT`` for notes that may already cover ``title``
+        (issue #14; docs/adr/0007-*.md).
+
+        Read-only: never touches ``create_inbox_note``/``append_inbox_note``,
+        and this response's ``recommendation`` is advisory only — the Gateway
+        does not gate either write tool on it. ``limit``/``keywords`` are
+        validated here — not just at whichever transport's own parameter
+        validation runs first — matching :meth:`search_notes`'s U7 pattern.
+        """
+        if not MIN_DUPLICATE_LIMIT <= limit <= MAX_DUPLICATE_CANDIDATES:
+            raise ValidationError(
+                log_detail=(
+                    f"limit out of range [{MIN_DUPLICATE_LIMIT}, "
+                    f"{MAX_DUPLICATE_CANDIDATES}]: {limit}"
+                )
+            )
+        if keywords is not None and len(keywords) > MAX_DUPLICATE_KEYWORDS:
+            raise ValidationError(
+                log_detail=f"more than {MAX_DUPLICATE_KEYWORDS} keywords: {len(keywords)}"
+            )
+
+        result = _find_duplicate_candidates(
+            read_root=self.settings.read_root,
+            inbox_relative_path=self.settings.vault_inbox_relative_path,
+            title=title,
+            project=project,
+            keywords=keywords,
+            limit=limit,
+            timezone=self.settings.timezone,
+        )
+        return DuplicateCandidatesResponse(
+            candidates=[
+                DuplicateCandidate(
+                    path=candidate.relative,
+                    title=candidate.title,
+                    project=candidate.project,
+                    tags=list(candidate.tags),
+                    confidence=candidate.confidence,
+                    matched_signals=list(candidate.matched_signals),
+                    matched_keywords=list(candidate.matched_keywords),
+                    modified_at=candidate.modified_at,
+                )
+                for candidate in result.candidates
+            ],
+            candidate_count=result.candidate_count,
+            truncated=result.candidate_count > len(result.candidates),
+            recommendation=result.recommendation,
+            scanned_count=result.scanned_count,
+            skipped_count=result.skipped_count,
         )
 
     def create_inbox_note(

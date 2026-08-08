@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from app.exceptions import GatewayError, InvalidFileTypeError, InvalidPathError, NoteNotFoundError
-from app.services.path_security import normalise_relative_dir, resolve_read_path
+from app.services.path_security import (
+    WalkStats,
+    iter_directory,
+    normalise_relative_dir,
+    resolve_read_path,
+)
 
 REJECTED_PATHS = [
     "../secret.md",
@@ -87,3 +92,74 @@ def test_normalise_relative_dir_rejects_absolute_paths(raw: str) -> None:
 
 def test_normalise_relative_dir_strips_only_a_trailing_slash() -> None:
     assert normalise_relative_dir("Knowledge/PC/") == normalise_relative_dir("Knowledge/PC")
+
+
+# --- iter_directory's optional `stats` (issue #14: scan failure vs. no-match) --
+
+
+def test_iter_directory_without_stats_matches_original_behaviour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Existing callers (get_vault_tree) omit `stats` entirely — a directory
+    # scan failure must still just end the iterator, exactly as before this
+    # parameter existed.
+    root = tmp_path / "vault"
+    root.mkdir()
+
+    def _raise(*_args: object, **_kwargs: object):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("app.services.path_security.os.scandir", _raise)
+    assert list(iter_directory(root, root)) == []
+
+
+def test_iter_directory_stats_records_directory_scan_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+
+    def _raise(*_args: object, **_kwargs: object):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("app.services.path_security.os.scandir", _raise)
+    stats = WalkStats()
+    assert list(iter_directory(root, root, stats=stats)) == []
+    assert stats.scan_failed is True
+    assert stats.skipped == 0
+
+
+def test_iter_directory_stats_stays_false_on_a_normal_scan(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "Note.md").write_text("x\n", encoding="utf-8")
+
+    stats = WalkStats()
+    entries = list(iter_directory(root, root, stats=stats))
+    assert {entry.name for entry in entries} == {"Note.md"}
+    assert stats.scan_failed is False
+    assert stats.skipped == 0
+
+
+def test_iter_directory_stats_counts_per_entry_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "Good.md").write_text("x\n", encoding="utf-8")
+    (root / "Bad.md").write_text("x\n", encoding="utf-8")
+
+    original_is_dir = Path.is_dir
+
+    def flaky_is_dir(self: Path, *args: object, **kwargs: object) -> bool:
+        if self.name == "Bad.md":
+            raise OSError("simulated stat failure")
+        return original_is_dir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_dir", flaky_is_dir)
+
+    stats = WalkStats()
+    entries = list(iter_directory(root, root, stats=stats))
+    assert {entry.name for entry in entries} == {"Good.md"}
+    assert stats.skipped == 1
+    assert stats.scan_failed is False

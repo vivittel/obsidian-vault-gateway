@@ -79,6 +79,7 @@ that does not support session termination (asserted in
 | `read_note` | read | auto |
 | `get_vault_tree` | read | auto |
 | `get_vault_summary` | read | auto |
+| `find_duplicate_candidates` | read | auto |
 | `create_inbox_note` | write | **prompt** |
 | `append_inbox_note` | write | **prompt** |
 
@@ -147,6 +148,32 @@ behaves. This canonical format governs only links the Gateway itself
 renders; pre-existing hand-authored wikilinks elsewhere in the Vault are
 untouched.
 
+**Duplicate detection before creating a note is scoped and advisory, not a
+gate** (issue #14 / `docs/adr/0007-*.md`). `find_duplicate_candidates` scans
+only the direct children of `00_Inbox/ChatGPT` — never the rest of the Vault
+— and reads only frontmatter, never a note's body. It compares a proposed
+`title` (exact and normalized), `project`, and `keywords` against each
+existing note's frontmatter `title`/`project`/`tags`, and returns up to
+`limit` candidates (default 5, max 10) plus a `recommendation`:
+
+| `recommendation` | Meaning | Client action |
+|---|---|---|
+| `create` | No credible duplicate (a `low`-confidence candidate may still be listed) | Call `create_inbox_note` without asking |
+| `confirm` | One strong (`high`-confidence) candidate | Ask the user to choose new / append / cancel before writing anything |
+| `choose` | Several or ambiguous candidates | Show the candidates and require an explicit pick before writing anything |
+
+`recommendation` is decided from every matching candidate, before `limit`
+ever truncates the list — the response's `candidate_count` and `truncated`
+report the full picture even when `candidates` itself is shorter. The
+Gateway itself never blocks `create_inbox_note`/`append_inbox_note` on this
+result — similarity is advisory, not write authorization — so this is a
+client-workflow contract, documented on the write tools themselves and in
+the MCP server's instructions: on `confirm`/`choose`, neither write tool is
+called until the user has explicitly picked new/append/cancel; on `create`,
+proceed without asking; if the tool itself fails, proceed with
+`create_inbox_note` as normal unless the user asked for strict duplicate
+checking.
+
 **Write approval is not left to `ToolAnnotations` alone.** Both
 `create_inbox_note` and `append_inbox_note` are annotated
 `readOnlyHint: false`, which is a signal a client's own policy can choose to
@@ -167,8 +194,9 @@ Settings → MCP servers → Add server
 
 Restart the app after saving. Confirm the connection in the composer with
 `/mcp`. Read tools (`get_health`, `search_notes`, `read_note`,
-`get_vault_tree`, `get_vault_summary`) run without confirmation;
-`create_inbox_note` and `append_inbox_note` prompt before writing.
+`get_vault_tree`, `get_vault_summary`, `find_duplicate_candidates`) run
+without confirmation; `create_inbox_note` and `append_inbox_note` prompt
+before writing.
 
 ### Codex CLI / Codex IDE extension
 
@@ -246,8 +274,14 @@ any non-MCP client.
 | GET | `/api/v1/notes` | `readNote` | Bearer |
 | GET | `/api/v1/vault/tree` | `getVaultTree` | Bearer |
 | GET | `/api/v1/vault/summary` | `getVaultSummary` | Bearer |
+| GET | `/api/v1/inbox/duplicate-candidates` | `findDuplicateCandidates` | Bearer |
 | POST | `/api/v1/inbox/notes` | `createInboxNote` | Bearer |
 | POST | `/api/v1/inbox/notes/append` | `appendInboxNote` | Bearer |
+
+`GET /api/v1/inbox/duplicate-candidates` takes `keywords` as a
+comma-separated query parameter, the same shape `/search`'s `tags` already
+uses — the MCP tool takes the same field as a JSON array instead, since
+JSON-RPC has a native array type and a REST query string does not.
 
 "Bearer" above reflects the default (`AUTH_ENABLED=true`); with
 `AUTH_ENABLED=false` these endpoints accept requests with no Authorization
@@ -516,7 +550,7 @@ curl -fsS -X POST -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: applic
      -d '{"path":"00_Inbox/ChatGPT/Gateway smoke test.md","content":"\nAppended by the OMV checklist.\n"}' \
      "$BASE/api/v1/inbox/notes/append"
 
-# MCP: no Bearer → 401; tools/list → 7 tools
+# MCP: no Bearer → 401; tools/list → 8 tools
 curl -i -X POST "$BASE/mcp/" -H 'Content-Type: application/json' \
      -H 'Accept: application/json, text/event-stream' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
@@ -529,6 +563,15 @@ curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
 curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_inbox_note","arguments":{"title":"MCP structured export check","export":{"tldr":["OMV checklist smoke test."]}}}}'
+
+# MCP find_duplicate_candidates: run this with the same title as the note
+# just created above ("MCP structured export check") and confirm it comes
+# back with exactly one candidate, confidence "high", and
+# recommendation "confirm" — then with an unrelated title and confirm
+# candidates is empty with recommendation "create".
+curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
+     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_duplicate_candidates","arguments":{"title":"MCP structured export check"}}}'
 
 # MCP create_inbox_note with related_notes: substitute $REAL_NOTE_PATH with a
 # real vault-relative .md path from a prior search_notes result. The response

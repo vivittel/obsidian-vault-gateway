@@ -20,6 +20,7 @@ EXPECTED_OPERATIONS = {
     ("GET", "/api/v1/notes"): "readNote",
     ("GET", "/api/v1/vault/tree"): "getVaultTree",
     ("GET", "/api/v1/vault/summary"): "getVaultSummary",
+    ("GET", "/api/v1/inbox/duplicate-candidates"): "findDuplicateCandidates",
     ("POST", "/api/v1/inbox/notes"): "createInboxNote",
     ("POST", "/api/v1/inbox/notes/append"): "appendInboxNote",
 }

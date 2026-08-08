@@ -249,6 +249,22 @@ def normalise_tags(value: Any) -> list[str]:
     return tags
 
 
+def parse_frontmatter_metadata(frontmatter_block: str) -> dict[str, Any]:
+    """Parse a frontmatter block (as returned by :func:`read_frontmatter_text`)
+    into its raw metadata mapping, or ``{}`` if it has none or fails to parse.
+
+    A narrow pairing with :func:`read_frontmatter_text`, for callers that
+    want frontmatter fields without ever reading a note's body — the same
+    reason :func:`parse_frontmatter_tags` exists, generalised to any field
+    (:func:`~app.services.duplicate_notes.find_duplicate_candidates` wants
+    ``title``/``project`` alongside ``tags``). Reuses :func:`_split_frontmatter`
+    rather than re-implementing delimiter/YAML handling, so every caller of
+    this function degrades identically on malformed YAML.
+    """
+    metadata, _ = _split_frontmatter(frontmatter_block)
+    return metadata
+
+
 def parse_frontmatter_tags(frontmatter_block: str) -> list[str]:
     """Parse a frontmatter block (as returned by :func:`read_frontmatter_text`)
     and return its normalised tags, or ``[]`` if it has none.
@@ -256,12 +272,9 @@ def parse_frontmatter_tags(frontmatter_block: str) -> list[str]:
     A narrow pairing with :func:`read_frontmatter_text` for
     :func:`~app.services.vault_service.summarise_vault`, which wants
     exactly this — not the title, body, or headings :func:`parse_note`
-    also computes. Reuses :func:`_split_frontmatter` rather than
-    re-implementing delimiter/YAML handling, so both this and the full
-    parse path degrade identically on malformed YAML.
+    also computes.
     """
-    metadata, _ = _split_frontmatter(frontmatter_block)
-    return normalise_tags(metadata.get("tags"))
+    return normalise_tags(parse_frontmatter_metadata(frontmatter_block).get("tags"))
 
 
 class _ConversionBudget:

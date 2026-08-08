@@ -47,6 +47,10 @@ def test_vault_scanning_endpoints_are_offloaded_through_the_dedicated_limiter() 
     # run_sync), not the isolation — see this module's docstring.
     assert inspect.iscoroutinefunction(search.search)
     assert inspect.iscoroutinefunction(vault.get_vault_summary)
+    # find_duplicate_candidates (issue #14) scans the inbox directory the
+    # same way — no note-count cap of its own, so it shares this limiter
+    # rather than the default thread pool.
+    assert inspect.iscoroutinefunction(inbox.find_duplicate_candidates)
 
 
 def test_mcp_scanning_tools_are_offloaded_through_the_dedicated_limiter() -> None:
@@ -56,7 +60,7 @@ def test_mcp_scanning_tools_are_offloaded_through_the_dedicated_limiter() -> Non
     # (mcp/server/mcpserver/tools/base.py), so this asserts the same fact
     # inspect.iscoroutinefunction would, through the manager's public
     # get_tool() accessor rather than reaching for the raw function.
-    for name in ("search_notes", "get_vault_summary"):
+    for name in ("search_notes", "get_vault_summary", "find_duplicate_candidates"):
         assert mcp._tool_manager.get_tool(name).is_async
 
 

@@ -579,3 +579,93 @@ class AppendedNoteResponse(BaseModel):
     appended_bytes: int = Field(
         description="Bytes added to the file, including any inserted separator/terminator."
     )
+
+
+# --- Duplicate-note detection (issue #14, docs/adr/0007-*.md) ------------------
+
+# Mirrors MAX_RELATED_NOTES's own limit; both bound a client-supplied list that
+# app/services/duplicate_notes.py re-derives/re-verifies rather than trusting.
+MAX_DUPLICATE_CANDIDATES = 10
+MAX_DUPLICATE_KEYWORDS = 10
+
+DuplicateConfidence = Literal["high", "medium", "low"]
+
+# Deliberately excludes "fingerprint" — exact-content fingerprinting is out of
+# scope for this first implementation (ADR-0007's "Alternatives considered").
+DuplicateMatchSignal = Literal["exact_title", "normalized_title", "project", "keywords"]
+
+# The decision-flow outcome, not a permission: the Gateway never infers write
+# approval from similarity (AGENTS.md, issue #14's safety constraints). A
+# client still decides for itself whether and how to prompt the user.
+DuplicateRecommendation = Literal["create", "confirm", "choose"]
+
+
+class DuplicateCandidate(BaseModel):
+    """One existing inbox note that may already cover the same conversation.
+
+    No absolute path, note body, or excerpt — only what is needed to decide
+    between creating a new note and appending to this one. ``score`` is
+    intentionally not exposed: it is an internal sort key
+    (docs/adr/0007-*.md), not a stable contract a client should depend on.
+    """
+
+    path: str = Field(
+        description=(
+            "Full vault-relative path, directly inside 00_Inbox/ChatGPT. Already "
+            "validated as a syntactically acceptable append_inbox_note target."
+        )
+    )
+    title: str = Field(description="Frontmatter `title`, else the file name without .md.")
+    project: str | None = Field(
+        default=None, description="This candidate's frontmatter `project`, if it has one."
+    )
+    tags: list[str] = Field(description="Frontmatter tags, in file order.")
+    confidence: DuplicateConfidence = Field(
+        description="How strong a duplicate signal this candidate is, most to least: "
+        "high, medium, low."
+    )
+    matched_signals: list[DuplicateMatchSignal] = Field(
+        description=(
+            "Which signals matched. Title signals are mutually exclusive: a candidate "
+            "with `exact_title` never also carries `normalized_title` for the same match."
+        )
+    )
+    matched_keywords: list[str] = Field(
+        description="Which of the input keywords matched this candidate, in input order."
+    )
+    modified_at: datetime = Field(description="File mtime in the configured timezone.")
+
+
+class DuplicateCandidatesResponse(BaseModel):
+    candidates: list[DuplicateCandidate] = Field(
+        description="Up to `limit` candidates, most confident first."
+    )
+    candidate_count: int = Field(
+        ge=0,
+        description=(
+            "Total number of candidates found before `limit` was applied. "
+            "`recommendation` is decided from this full set, not from `candidates`."
+        ),
+    )
+    truncated: bool = Field(
+        description="True when `candidate_count` exceeds the number of `candidates` returned."
+    )
+    recommendation: DuplicateRecommendation = Field(
+        description=(
+            "'create': no high/medium candidate — proceed without asking. 'confirm': "
+            "exactly one high candidate and nothing else at high/medium — ask the user "
+            "to choose new/append/cancel. 'choose': more than one high/medium candidate, "
+            "or only medium ones — show the candidate list and require an explicit pick. "
+            "This is advisory, not write authorization: the Gateway never blocks or "
+            "gates create_inbox_note/append_inbox_note on this value."
+        )
+    )
+    scanned_count: int = Field(ge=0, description="Notes directly inside the inbox that were read.")
+    skipped_count: int = Field(
+        ge=0,
+        description=(
+            "Notes directly inside the inbox that were excluded: unreadable "
+            "frontmatter, or a file name that would not be accepted as an "
+            "append_inbox_note target."
+        ),
+    )

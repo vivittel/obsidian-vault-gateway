@@ -98,6 +98,72 @@ def test_read_note_returns_note_response(application: GatewayApplication) -> Non
     assert response.title == "RTX 5070"
 
 
+def test_find_duplicate_candidates_rejects_limit_below_one(
+    application: GatewayApplication,
+) -> None:
+    with pytest.raises(ValidationError):
+        application.find_duplicate_candidates(title="x", limit=0)
+
+
+def test_find_duplicate_candidates_rejects_limit_above_max(
+    application: GatewayApplication,
+) -> None:
+    with pytest.raises(ValidationError):
+        application.find_duplicate_candidates(title="x", limit=11)
+
+
+def test_find_duplicate_candidates_rejects_too_many_keywords(
+    application: GatewayApplication,
+) -> None:
+    with pytest.raises(ValidationError):
+        application.find_duplicate_candidates(title="x", keywords=[str(i) for i in range(11)])
+
+
+def test_find_duplicate_candidates_reports_truncated_before_slicing(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    (inbox_root / "First.md").write_text("---\ntitle: Shared Title\n---\n", encoding="utf-8")
+    (inbox_root / "Second.md").write_text("---\ntitle: Shared Title\n---\n", encoding="utf-8")
+    response = application.find_duplicate_candidates(title="Shared Title", limit=1)
+    assert len(response.candidates) == 1
+    assert response.candidate_count == 2
+    assert response.truncated is True
+    assert response.recommendation == "choose"
+
+
+def test_find_duplicate_candidates_no_match_is_not_truncated(
+    application: GatewayApplication,
+) -> None:
+    response = application.find_duplicate_candidates(title="Nothing in the empty inbox matches")
+    assert response.candidates == []
+    assert response.candidate_count == 0
+    assert response.truncated is False
+    assert response.recommendation == "create"
+
+
+def test_find_duplicate_candidates_response_has_no_score_field(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    (inbox_root / "Existing.md").write_text("---\ntitle: Shared Title\n---\n", encoding="utf-8")
+    response = application.find_duplicate_candidates(title="Shared Title")
+    assert "score" not in type(response.candidates[0]).model_fields
+
+
+def test_find_duplicate_candidates_does_not_gate_create_inbox_note(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    # The Gateway never infers write approval from similarity (issue #14):
+    # a "confirm"/"choose" recommendation must not stop create_inbox_note
+    # from succeeding — that gating is a client-workflow contract
+    # (app/mcp_server.py), not something this layer enforces.
+    (inbox_root / "Existing.md").write_text("---\ntitle: Shared Title\n---\n", encoding="utf-8")
+    duplicates = application.find_duplicate_candidates(title="Shared Title")
+    assert duplicates.recommendation in ("confirm", "choose")
+
+    created = application.create_inbox_note(title="Shared Title", content="x\n")
+    assert isinstance(created, CreatedNoteResponse)
+
+
 def test_create_inbox_note_returns_created_note_response(
     application: GatewayApplication,
 ) -> None:
