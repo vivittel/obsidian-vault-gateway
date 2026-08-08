@@ -965,3 +965,103 @@ def test_append_lock_timeout_is_logged_with_a_reason(
     assert response.status_code == 503
     records = [r for r in caplog.records if r.name == "obsidian_gateway"]
     assert any(getattr(r, "code", None) == "INBOX_LOCK_TIMEOUT" for r in records)
+
+
+# --- GET /api/v1/inbox/duplicate-candidates (issue #14) -----------------------
+
+
+def test_find_duplicate_candidates_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/v1/inbox/duplicate-candidates", params={"title": "x"})
+    assert response.status_code == 401
+
+
+def test_find_duplicate_candidates_returns_expected_shape(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "Existing.md").write_text("---\ntitle: Shared Title\n---\n", encoding="utf-8")
+    response = client.get(
+        "/api/v1/inbox/duplicate-candidates",
+        params={"title": "Shared Title"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body.keys()) == {
+        "candidates",
+        "candidate_count",
+        "truncated",
+        "recommendation",
+        "scanned_count",
+        "skipped_count",
+    }
+    assert body["recommendation"] == "confirm"
+    assert body["candidates"][0]["path"] == "00_Inbox/ChatGPT/Existing.md"
+    assert "score" not in body["candidates"][0]
+
+
+def test_find_duplicate_candidates_no_match_recommends_create(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    response = client.get(
+        "/api/v1/inbox/duplicate-candidates",
+        params={"title": "Nothing in the empty inbox matches"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["candidates"] == []
+    assert body["recommendation"] == "create"
+
+
+def test_find_duplicate_candidates_splits_comma_separated_keywords(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    (inbox_root / "Existing.md").write_text(
+        "---\ntitle: Unrelated\ntags: [alpha, beta]\n---\n", encoding="utf-8"
+    )
+    response = client.get(
+        "/api/v1/inbox/duplicate-candidates",
+        params={"title": "Different", "keywords": "alpha,beta,gamma"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body["candidates"][0]["matched_keywords"]) == {"alpha", "beta"}
+
+
+def test_find_duplicate_candidates_rejects_limit_out_of_range(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    # FastAPI's own Query(ge=1, le=10) validation, converted to this app's
+    # uniform error envelope by app/main.py's RequestValidationError handler.
+    response = client.get(
+        "/api/v1/inbox/duplicate-candidates",
+        params={"title": "x", "limit": 0},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+
+    response = client.get(
+        "/api/v1/inbox/duplicate-candidates",
+        params={"title": "x", "limit": 11},
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+
+
+def test_find_duplicate_candidates_matches_application_layer(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    from app.application import GatewayApplication
+    from app.config import get_settings
+
+    (inbox_root / "Existing.md").write_text("---\ntitle: Shared Title\n---\n", encoding="utf-8")
+    response = client.get(
+        "/api/v1/inbox/duplicate-candidates",
+        params={"title": "Shared Title"},
+        headers=auth_headers,
+    )
+    expected = GatewayApplication(get_settings()).find_duplicate_candidates(
+        title="Shared Title"
+    )
+    assert response.json() == expected.model_dump(mode="json")

@@ -1,4 +1,4 @@
-"""app.mcp_server — MCP_IMPLEMENTATION_PLAN sections 9-14 (unmounted server, 7 tools).
+"""app.mcp_server — MCP_IMPLEMENTATION_PLAN sections 9-14 (unmounted server, 8 tools).
 
 Exercises tools through ``mcp.call_tool(...)`` — the same per-tool argument
 validation and tool-body dispatch a real ``tools/call`` request drives —
@@ -46,7 +46,7 @@ def application(env: None) -> GatewayApplication:
 # --- tools/list: presence, annotations, schemas ------------------------------
 
 
-async def test_tools_list_has_exactly_seven_tools() -> None:
+async def test_tools_list_has_exactly_eight_tools() -> None:
     tools = await mcp.list_tools()
     assert {t.name for t in tools} == {
         "get_health",
@@ -54,6 +54,7 @@ async def test_tools_list_has_exactly_seven_tools() -> None:
         "read_note",
         "get_vault_tree",
         "get_vault_summary",
+        "find_duplicate_candidates",
         "create_inbox_note",
         "append_inbox_note",
     }
@@ -67,12 +68,22 @@ async def test_read_only_tools_have_read_only_annotations() -> None:
         "read_note",
         "get_vault_tree",
         "get_vault_summary",
+        "find_duplicate_candidates",
     ):
         annotations = tools[name].annotations
         assert annotations.read_only_hint is True
         assert annotations.destructive_hint is False
         assert annotations.idempotent_hint is True
         assert annotations.open_world_hint is False
+
+
+async def test_find_duplicate_candidates_input_schema_has_expected_fields() -> None:
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["find_duplicate_candidates"].input_schema
+    assert set(schema["properties"]) == {"title", "project", "keywords", "limit"}
+    assert schema["properties"]["limit"]["default"] == 5
+    assert schema["properties"]["limit"]["minimum"] == 1
+    assert schema["properties"]["limit"]["maximum"] == 10
 
 
 async def test_create_inbox_note_has_write_annotations() -> None:
@@ -197,6 +208,76 @@ async def test_read_note_matches_application_layer(application: GatewayApplicati
     result = await mcp.call_tool("read_note", {"path": "Knowledge/PC/GPU/RTX 5070.md"})
     expected = application.read_note(path="Knowledge/PC/GPU/RTX 5070.md").model_dump(mode="json")
     assert result.structured_content == expected
+
+
+async def test_find_duplicate_candidates_matches_application_layer(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    (inbox_root / "Existing.md").write_text("---\ntitle: Shared Title\n---\n", encoding="utf-8")
+    result = await mcp.call_tool("find_duplicate_candidates", {"title": "Shared Title"})
+    expected = application.find_duplicate_candidates(title="Shared Title").model_dump(mode="json")
+    assert result.structured_content == expected
+
+
+# --- issue #14: approval boundary and client-workflow contract ---------------
+
+
+async def test_find_duplicate_candidates_confirm_does_not_block_create_inbox_note(
+    env: None, inbox_root: Path
+) -> None:
+    # The Gateway never gates create_inbox_note on a duplicate finding —
+    # that gating is a client-workflow contract (checked below via the tool
+    # descriptions/instructions), not something enforced at this layer.
+    (inbox_root / "Existing.md").write_text("---\ntitle: Shared Title\n---\n", encoding="utf-8")
+    duplicates = await mcp.call_tool("find_duplicate_candidates", {"title": "Shared Title"})
+    assert duplicates.structured_content["recommendation"] in ("confirm", "choose")
+
+    created = await mcp.call_tool(
+        "create_inbox_note", {"title": "Shared Title", "export": {"tldr": ["x"]}}
+    )
+    assert created.is_error is False
+
+
+async def test_tool_descriptions_document_the_client_workflow_contract() -> None:
+    tools = {t.name: t for t in await mcp.list_tools()}
+    create_description = tools["create_inbox_note"].description
+    append_description = tools["append_inbox_note"].description
+    assert "find_duplicate_candidates" in create_description
+    assert "find_duplicate_candidates" in append_description
+    for phrase in ("confirm", "choose"):
+        assert phrase in create_description
+        assert phrase in append_description
+    assert "find_duplicate_candidates" in SERVER_INSTRUCTIONS
+    assert "cancel" in SERVER_INSTRUCTIONS
+
+
+async def test_create_inbox_note_description_documents_the_scan_failure_fallback() -> None:
+    # PR #18 review (P2): create_inbox_note's own description must restate
+    # SERVER_INSTRUCTIONS' failure fallback, not just the happy-path
+    # confirm/choose/create flow — a client reading only this tool's
+    # description must not conclude a recommendation is always required
+    # before writing.
+    tools = {t.name: t for t in await mcp.list_tools()}
+    create_description = tools["create_inbox_note"].description
+    assert "find_duplicate_candidates" in create_description
+    assert "fails" in create_description
+    assert "strict" in create_description
+
+
+async def test_find_duplicate_candidates_returned_path_is_accepted_by_append_inbox_note(
+    env: None, inbox_root: Path
+) -> None:
+    (inbox_root / "Existing.md").write_text("original\n", encoding="utf-8")
+    (inbox_root / "Existing.md").write_text(
+        "---\ntitle: Shared Title\n---\n\noriginal\n", encoding="utf-8"
+    )
+    duplicates = await mcp.call_tool("find_duplicate_candidates", {"title": "Shared Title"})
+    candidate_path = duplicates.structured_content["candidates"][0]["path"]
+
+    appended = await mcp.call_tool(
+        "append_inbox_note", {"path": candidate_path, "content": "more\n"}
+    )
+    assert appended.is_error is False
 
 
 async def test_create_inbox_note_matches_application_layer_shape(env: None) -> None:

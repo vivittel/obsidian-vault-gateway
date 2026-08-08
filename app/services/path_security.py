@@ -197,18 +197,32 @@ class VaultEntry(NamedTuple):
     stat_result: os.stat_result | None
 
 
-def iter_directory(directory: Path, read_root: Path) -> Iterator[VaultEntry]:
+def iter_directory(
+    directory: Path, read_root: Path, *, stats: WalkStats | None = None
+) -> Iterator[VaultEntry]:
     """List the direct, non-hidden, non-symlink children of ``directory``.
 
     One level only — unlike :func:`iter_vault_notes`, this does not recurse.
     Non-Markdown files are excluded entirely; sub-folders are listed even when
     they contain no notes. Per-entry ``OSError`` (e.g. a race with a delete on
-    the host) is skipped rather than raised, matching :func:`iter_vault_notes`.
+    the host) is skipped rather than raised, matching :func:`iter_vault_notes`;
+    when ``stats`` is given, it increments ``stats.skipped`` instead of
+    silently discarding the count.
+
+    ``stats`` also distinguishes "the directory itself could not be scanned"
+    from "the directory has no matching children": the former sets
+    ``stats.scan_failed`` and yields nothing, rather than the two looking
+    identical to a caller that only sees an empty iterator. Existing callers
+    that omit ``stats`` (:func:`~app.application.GatewayApplication.
+    get_vault_tree`) see no behavioural change — a scan failure still just
+    ends the iterator, matching this function's original contract.
     """
     try:
         with os.scandir(directory) as entries:
             names = sorted(entry.name for entry in entries)
     except OSError:
+        if stats is not None:
+            stats.scan_failed = True
         return
 
     for name in names:
@@ -226,8 +240,12 @@ def iter_directory(directory: Path, read_root: Path) -> Iterator[VaultEntry]:
                 continue
             stat_result = None if is_dir else path.stat()
         except OSError:
+            if stats is not None:
+                stats.skipped += 1
             continue
         if stat_result is not None and not stat.S_ISREG(stat_result.st_mode):
+            if stats is not None:
+                stats.skipped += 1
             continue
         yield VaultEntry(
             name=name,
@@ -283,13 +301,23 @@ def resolve_inbox_append_path(
 
 @dataclasses.dataclass
 class WalkStats:
-    """Counts entries :func:`iter_vault_notes` skipped rather than yielded.
+    """Counts entries :func:`iter_vault_notes`/:func:`iter_directory` skipped
+    rather than yielded.
 
     Optional and additive: existing callers that omit ``stats`` see no change
-    in behaviour, only this counter is new.
+    in behaviour, only these counters are new.
+
+    ``scan_failed`` is set only by :func:`iter_directory`, when the
+    directory itself could not be scanned at all (``os.scandir()`` raised).
+    :func:`iter_vault_notes` already swallows a per-directory ``os.walk()``
+    error internally and has no equivalent "the whole walk failed" case, so
+    it never touches this field. Callers that need to distinguish "found no
+    duplicates" from "could not scan the inbox" (issue #14) check this flag
+    before treating an empty result as a real no-match.
     """
 
     skipped: int = 0
+    scan_failed: bool = False
 
 
 def iter_vault_notes(read_root: Path, *, stats: WalkStats | None = None) -> Iterator[VaultNote]:

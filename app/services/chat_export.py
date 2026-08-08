@@ -28,7 +28,7 @@ explicit ``verified_related_notes`` argument, which app/application.py fills
 in by calling app.services.related_notes.resolve_related_notes against the
 Vault *before* calling here. Two rendering rules follow from that split:
 related-note paths are the one client-supplied string this module does not
-run through ``_one_line`` (rewriting a path can make it name a different
+run through ``one_line`` (rewriting a path can make it name a different
 file), and the rendered wikilink bullets are the one list this module does
 not run through ``_escape_block_start`` (escaping would corrupt the `[[...]]`
 syntax). Both are safe only because the caller has already restricted the
@@ -275,7 +275,7 @@ def render_chat_export(
     return RenderedExport(frontmatter=frontmatter, content=content)
 
 
-def _one_line(value: str) -> str:
+def one_line(value: str) -> str:
     """Normalise ``value`` to a single Markdown-safe line.
 
     Every line-breaking character becomes a space (step 2), which is what
@@ -283,6 +283,12 @@ def _one_line(value: str) -> str:
     non-ASCII whitespace (e.g. U+3000) is preserved by step 4 — it only
     collapses ASCII runs — but leading/trailing Unicode whitespace is still
     removed by the final ``strip()``, which is Unicode-aware by default.
+
+    Public (unlike most of this module's helpers): this is also the note's
+    own title canonicalisation, so
+    :func:`~app.services.duplicate_notes.exact_title_key` (issue #14) reuses
+    it directly rather than re-implementing an equivalent normalisation that
+    could drift from what actually gets written to a note's frontmatter/H1.
     """
     value = unicodedata.normalize("NFC", value)
     value = _LINE_BREAK_RE.sub(" ", value)
@@ -293,7 +299,7 @@ def _one_line(value: str) -> str:
 
 def _normalise_lines(values: list[str]) -> list[str]:
     """Normalise a plain string list, dropping items that become empty."""
-    return [line for value in values if (line := _one_line(value))]
+    return [line for value in values if (line := one_line(value))]
 
 
 def _normalise_timeline(
@@ -301,13 +307,13 @@ def _normalise_timeline(
 ) -> list[tuple[str | None, str]]:
     result: list[tuple[str | None, str]] = []
     for index, entry in enumerate(entries):
-        event = _one_line(entry.event)
+        event = one_line(entry.event)
         if not event:
             raise ValidationError(
                 f"{field_name}[{index}].event must not be empty.",
                 log_detail=f"chat export: {field_name}[{index}].event empty after normalisation",
             )
-        when = _one_line(entry.when) if entry.when is not None else ""
+        when = one_line(entry.when) if entry.when is not None else ""
         result.append((when or None, event))
     return result
 
@@ -315,7 +321,7 @@ def _normalise_timeline(
 def _normalise_topics(topics: list[TopicSection], field_name: str) -> list[tuple[str, list[str]]]:
     result: list[tuple[str, list[str]]] = []
     for index, topic in enumerate(topics):
-        heading = _one_line(topic.heading)
+        heading = one_line(topic.heading)
         if not heading:
             raise ValidationError(
                 f"{field_name}[{index}].heading must not be empty.",
@@ -330,13 +336,13 @@ def _normalise_definitions(
 ) -> list[tuple[str, str]]:
     result: list[tuple[str, str]] = []
     for index, definition in enumerate(definitions):
-        term = _one_line(definition.term)
+        term = one_line(definition.term)
         if not term:
             raise ValidationError(
                 f"{field_name}[{index}].term must not be empty.",
                 log_detail=f"chat export: {field_name}[{index}].term empty after normalisation",
             )
-        description = _one_line(definition.description)
+        description = one_line(definition.description)
         if not description:
             raise ValidationError(
                 f"{field_name}[{index}].description must not be empty.",
@@ -360,7 +366,7 @@ def _normalise_tags(tags: list[str]) -> list[str]:
     normalised: list[str] = []
     seen: set[str] = set()
     for tag in tags:
-        candidate = _one_line(tag).lstrip("#")
+        candidate = one_line(tag).lstrip("#")
         candidate = _WHITESPACE_RUN_RE.sub("-", candidate).strip("-")
         if not candidate or candidate in seen:
             continue
@@ -377,9 +383,9 @@ def _normalise_export(export: ChatExport) -> _Normalised:
             log_detail="chat export: tldr empty after normalisation",
         )
 
-    project = _one_line(export.project) if export.project is not None else ""
+    project = one_line(export.project) if export.project is not None else ""
     conversation_type = (
-        _one_line(export.conversation_type) if export.conversation_type is not None else ""
+        one_line(export.conversation_type) if export.conversation_type is not None else ""
     )
 
     return _Normalised(
@@ -550,7 +556,7 @@ def _render_related_notes_section(verified_related_notes: Sequence[str]) -> str:
 def _build_content(
     normalised: _Normalised, *, title: str, verified_related_notes: Sequence[str]
 ) -> str:
-    display_title = _one_line(title)
+    display_title = one_line(title)
     blocks = [f"# {display_title}"]
     blocks.append(_render_section("tldr", normalised))
     blocks.append(_render_section("decisions", normalised))
@@ -568,7 +574,7 @@ def _build_frontmatter(
 ) -> dict[str, FrontmatterValue]:
     created = now.isoformat(timespec="seconds")
     frontmatter: dict[str, FrontmatterValue] = {
-        "title": _one_line(title),
+        "title": one_line(title),
         "created": created,
         "updated": created,
         "source": _SOURCE,

@@ -219,10 +219,18 @@ GET  /api/v1/vault/summary
 POST /api/v1/inbox/notes/append
 ```
 
+Phase 3で追加（実装済み、issue #14）:
+
+```text
+GET  /api/v1/inbox/duplicate-candidates
+```
+
 `POST /api/v1/inbox/notes/append`は対象ノートの`path`をURLではなくJSON body
 で受け取る。`GET /api/v1/notes`が`path`をquery paramにしている理由
 （`%2F`の扱いがプロキシによって異なるため。§6.3、`docs/PHASE1_PLAN.md` 4.5節）
-と同じ判断による。
+と同じ判断による。`GET /api/v1/inbox/duplicate-candidates`の`keywords`は
+`/search`の`tags`と同じカンマ区切りのquery paramであり、MCP側（JSON配列）との
+入力形式の非対称は`docs/adr/0007-*.md`で意図的な決定として記録されている。
 
 ### 検索
 
@@ -362,6 +370,17 @@ get_vault_summary
 append_inbox_note
 ```
 
+### Phase 3
+
+```text
+find_duplicate_candidates
+```
+
+`find_duplicate_candidates`（issue #14、`docs/adr/0007-*.md`）は
+`00_Inbox/ChatGPT`直下限定・read-onlyの重複検出ツールであり、Phase 4の
+`find_duplicate_titles`（Vault全体の監査ツール）とは別物である。前者は
+構造化エクスポート前の判断支援、後者はVault監査であり、互いに依存しない。
+
 ### Phase 4
 
 ```text
@@ -381,6 +400,7 @@ find_stale_inbox_notes
 | `read_note` | read | No | auto |
 | `get_vault_tree` | read | No | auto |
 | `get_vault_summary` | read | No | auto |
+| `find_duplicate_candidates` | read | No | auto |
 | `create_inbox_note` | write | Yes | prompt/writes |
 | `append_inbox_note` | write | Yes | prompt/writes |
 | `audit_vault` | read | No | auto |
@@ -540,6 +560,32 @@ pydanticスキーマで拒否される（他の全リストフィールドと同
 詳細な決定はすべて`docs/adr/0006-verified-related-note-wikilinks.md`に記録。
 レスポンスの`related_notes_linked`/`related_notes_skipped`が実際にリンクされた
 件数を示す。
+
+### 重複ノート検出（issue #14）
+
+構造化エクスポート前の重複検出は、`create_inbox_note`への組み込みではなく
+独立したread-onlyのMCPツール`find_duplicate_candidates`
+（REST: `GET /api/v1/inbox/duplicate-candidates`）として実装した。これにより
+「Gatewayは類似度から書き込み承認を推論しない」という制約が構造的に成立する
+——`create_inbox_note`/`append_inbox_note`はこのツールの出力を一切参照しない。
+新規`app/services/duplicate_notes.py`が`00_Inbox/ChatGPT`直下のみを走査し、
+`markdown_parser.read_frontmatter_text`（本文非読込）でfrontmatterの
+`title`/`project`/`tags`だけを取得する。
+
+初期スコープの照合信号は`exact_title`/`normalized_title`/`project`/`keywords`
+の4種（完全内容フィンガープリントは今回のスコープ外、issue #14参照）。
+信頼度（`high`/`medium`/`low`）から`recommendation`
+（`create`/`confirm`/`choose`）への決定的なマッピング、`project`未設定同士を
+一致としない規則、`limit`適用前の全候補から`recommendation`を決定する規則など、
+詳細な決定はすべて`docs/adr/0007-scoped-duplicate-note-detection.md`に記録。
+
+新規/追記/中止の選択が必要な場面（`recommendation`が`confirm`/`choose`）では、
+ユーザーが明示的に選ぶまで`create_inbox_note`・`append_inbox_note`のどちらも
+呼ばないことをクライアント側のワークフロー契約として`SERVER_INSTRUCTIONS`と
+各ツールのdescriptionに文書化した（Gateway自体は書き込みをゲートしない）。
+
+Phase 4計画の`find_duplicate_titles`（Vault全体の監査ツール）とは別物であり、
+互いに依存しない。
 
 ## 13. エラー仕様
 
@@ -748,6 +794,26 @@ handle @obsidian_api {
   ことの区別
 - `linked + skipped == candidates`の不変条件
 - `00_Inbox/ChatGPT`内ノートへのリンク許可
+
+### 重複ノート検出（`tests/test_duplicate_notes.py`ほか、issue #14）
+
+- `exact_title`/`normalized_title`の分離と排他性（同一候補が両方の
+  signalを持たないこと）
+- `project`未設定同士を一致としないこと、`project`一致単独では
+  報告しないこと
+- keyword単独一致の下限（`project`併用時との閾値の違い）
+- 信頼度から`recommendation`への決定的マッピング
+  （`low`単独では`create`のまま、`confirm`/`choose`の境界）
+- `limit`適用前の全候補から`recommendation`/`candidate_count`を
+  決定すること（`truncated`の導出）
+- ディレクトリ走査失敗（`InternalError`）と無一致の区別
+- 候補パスが`append_inbox_note`のパス構文検証を必ず通過すること
+- `00_Inbox/ChatGPT`直下限定の走査（サブディレクトリ・symlink・hidden・
+  非Markdown除外、本文を読まないことの証明）
+- 壊れたfrontmatter・`title`欠落時のdegradation
+- レスポンスに絶対パス・本文・内部score値が含まれないこと
+- `create_inbox_note`/`append_inbox_note`がこのツールの出力に
+  依存せず成功すること（承認境界）
 
 ### MCP transport
 

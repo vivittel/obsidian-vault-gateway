@@ -17,9 +17,9 @@ from app.services.chat_export import (
     _ALL_MODE_FIELDS_IN_ORDER,
     _FIELD_OWNER_MODES,
     _MODE_SECTIONS,
-    _one_line,
     format_wikilink,
     is_renderable_wikilink_target,
+    one_line,
     render_chat_export,
 )
 
@@ -631,13 +631,13 @@ def test_steps_item_starting_with_ordered_marker_escapes_the_punctuation_not_the
 
 
 def test_control_characters_are_stripped() -> None:
-    assert _one_line("a\x01b\x02c") == "abc"
+    assert one_line("a\x01b\x02c") == "abc"
 
 
 def test_internal_ideographic_space_is_preserved_but_edges_are_stripped() -> None:
-    assert _one_line("A　B") == "A　B"
-    assert _one_line("　A　") == "A"
-    assert _one_line("　") == ""
+    assert one_line("A　B") == "A　B"
+    assert one_line("　A　") == "A"
+    assert one_line("　") == ""
 
 
 def test_every_rendered_line_has_no_trailing_whitespace() -> None:
