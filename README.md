@@ -104,11 +104,15 @@ has no `cursor`, only `top_tags_limit` (1-200, default 20) to bound how
 many tags come back. `create_inbox_note` always writes a new file under
 `00_Inbox/ChatGPT`; `append_inbox_note` appends to an existing file already
 directly inside it. Neither can overwrite, delete, move, or rename notes,
-and `create_inbox_note` does not accept a path from the caller. Both write
-tools serialise on one inbox-wide lock; a request that cannot get it within
-a few seconds fails with `INBOX_LOCK_TIMEOUT` (`503`) rather than blocking
-indefinitely — this is the one error code safe to retry as-is, with no
-change to the request.
+and `create_inbox_note` does not accept a path from the caller.
+`create_inbox_note` needs no lock: `os.link()` itself atomically detects a
+name collision (`FileExistsError`), so two concurrent creates for the same
+title just retry onto the next free sequence number rather than racing.
+`append_inbox_note` does serialise on one inbox-wide lock (two appends
+could otherwise race on the same file); a request that cannot get it
+within a few seconds fails with `INBOX_LOCK_TIMEOUT` (`503`) rather than
+blocking indefinitely — this is the one error code safe to retry as-is,
+with no change to the request.
 
 **`create_inbox_note` takes a structured summary, not raw Markdown** (issue
 #12 / `docs/adr/0005-*.md`). The client reads the conversation, picks an

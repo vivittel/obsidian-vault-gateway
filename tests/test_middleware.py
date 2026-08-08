@@ -9,6 +9,7 @@ through the real REST app.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -184,6 +185,36 @@ async def test_unhandled_exception_is_still_logged_as_status_500(
     assert len(access_records) == 1
     assert access_records[0].status_code == 500
     assert access_records[0].route == "/api/v1/vault/summary"
+
+
+async def test_cancelled_request_is_not_misreported_as_a_fabricated_500(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A bug this pins: the crash-detection ``except`` clause was originally
+    ``BaseException``, which also catches ``asyncio.CancelledError`` — a
+    client disconnect or server shutdown, not a crash, and not something
+    ``ServerErrorMiddleware`` itself ever converts to a 500 (it only catches
+    ``Exception``). Recording it as status 500 would fabricate an error that
+    never actually happened on the wire.
+    """
+    caplog.set_level(logging.INFO, logger="obsidian_gateway.access")
+
+    class _CancelledApp:
+        async def __call__(self, scope: dict, receive, send) -> None:  # noqa: ARG002
+            raise asyncio.CancelledError
+
+    middleware = AccessLogMiddleware(_CancelledApp())
+    scope = _http_scope("/api/v1/search")
+
+    async def send(message: dict) -> None:
+        pass
+
+    with pytest.raises(asyncio.CancelledError):
+        await middleware(scope, _dummy_receive, send)
+
+    access_records = [r for r in caplog.records if r.name == "obsidian_gateway.access"]
+    assert len(access_records) == 1
+    assert access_records[0].status_code == 0
 
 
 async def test_a_response_that_already_started_is_not_overwritten_by_a_later_crash(

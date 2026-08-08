@@ -138,7 +138,10 @@ def search_notes(
     :func:`~app.services.vault_service.summarise_vault`'s tolerance for a
     vault that changes out from under a scan. ``skipped_count`` reports how
     many were excluded this way, so a caller can tell "no matches" apart
-    from "some notes could not be read".
+    from "some notes could not be read" — scoped to ``folder`` exactly like
+    the results themselves (``iter_vault_notes``'s own ``prefix`` argument),
+    never counting a failure elsewhere in the vault that this request's
+    ``folder`` would not have matched anyway.
     """
     stripped_query = query.strip() if query and query.strip() else ""
     folded_query = fold(stripped_query) if stripped_query else ""
@@ -147,10 +150,7 @@ def search_notes(
 
     walk_stats = WalkStats()
     hits: list[SearchHit] = []
-    for note in iter_vault_notes(read_root, stats=walk_stats):
-        if prefix and not note.relative.startswith(prefix):
-            continue
-
+    for note in iter_vault_notes(read_root, prefix=prefix, stats=walk_stats):
         try:
             text, _ = markdown_parser.read_note_text(
                 note.path,

@@ -320,7 +320,9 @@ class WalkStats:
     scan_failed: bool = False
 
 
-def iter_vault_notes(read_root: Path, *, stats: WalkStats | None = None) -> Iterator[VaultNote]:
+def iter_vault_notes(
+    read_root: Path, *, prefix: str = "", stats: WalkStats | None = None
+) -> Iterator[VaultNote]:
     """Walk every readable Markdown note in the vault.
 
     Applies the same exclusions as the read path: hidden directories (which
@@ -329,6 +331,17 @@ def iter_vault_notes(read_root: Path, *, stats: WalkStats | None = None) -> Iter
     given vault always produces the same ordering. When ``stats`` is given, a
     file skipped because it could not be ``stat()``-ed or was not a regular
     file increments ``stats.skipped``.
+
+    ``prefix``, if given, restricts both yielded notes and ``stats.skipped``
+    counting to relative paths starting with it — a note outside ``prefix``
+    that fails to ``stat()`` is not counted at all, never mind yielded. This
+    still walks the whole vault rather than seeking straight to a
+    subdirectory (a caller wanting that should stat/walk from the resolved
+    subdirectory itself instead); what this buys is correctness for a
+    caller like :func:`~app.services.search_service.search_notes` that
+    reports ``skipped_count`` for its own ``folder``-scoped request — before
+    this parameter existed, that count silently included failures anywhere
+    in the vault, not just inside the requested folder.
     """
     for dirpath, dirnames, filenames in os.walk(read_root, followlinks=False):
         directory = Path(dirpath)
@@ -342,6 +355,9 @@ def iter_vault_notes(read_root: Path, *, stats: WalkStats | None = None) -> Iter
             if name.startswith(".") or not name.endswith(MARKDOWN_SUFFIX):
                 continue
             path = directory / name
+            relative = path.relative_to(read_root).as_posix()
+            if prefix and not relative.startswith(prefix):
+                continue
             if path.is_symlink():
                 continue
             try:
@@ -354,8 +370,4 @@ def iter_vault_notes(read_root: Path, *, stats: WalkStats | None = None) -> Iter
                 if stats is not None:
                     stats.skipped += 1
                 continue
-            yield VaultNote(
-                path=path,
-                relative=path.relative_to(read_root).as_posix(),
-                stat_result=stat_result,
-            )
+            yield VaultNote(path=path, relative=relative, stat_result=stat_result)

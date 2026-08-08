@@ -211,8 +211,9 @@ class AccessLogMiddleware:
         unhandled_exception = False
         try:
             await self.app(scope, receive, send_wrapper)
-        except BaseException:
-            # An exception that is not a GatewayError/StarletteHTTPException/
+        except Exception:
+            # Deliberately `Exception`, not `BaseException`: an exception
+            # that is not a GatewayError/StarletteHTTPException/
             # RequestValidationError (i.e. anything app/main.py's
             # handle_unexpected_error converts) is never seen by this
             # middleware as a response: Starlette's own
@@ -233,7 +234,15 @@ class AccessLogMiddleware:
             # `status_code` is only ever still 0 below for one of two
             # reasons: this branch (a real crash), or the connection closing
             # before any handler ever responded (no crash at all). Only the
-            # first should render as a fabricated 500.
+            # first should render as a fabricated 500. `ServerErrorMiddleware`
+            # itself only ever converts `Exception` (verified: `except
+            # Exception as exc` in starlette/middleware/errors.py), never a
+            # bare `BaseException` such as `asyncio.CancelledError` — a
+            # cancelled request (client disconnect, server shutdown) is not
+            # a crash and must not be recorded as a fabricated 500 either,
+            # so this deliberately lets it propagate through the `finally`
+            # below unmarked, with `status_code` staying whatever it already
+            # was (0 if the response never started).
             unhandled_exception = True
             raise
         finally:
