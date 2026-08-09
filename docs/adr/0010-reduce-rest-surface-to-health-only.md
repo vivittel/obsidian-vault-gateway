@@ -161,6 +161,12 @@ to the application or service layers.
    nothing to leave in place), but its docstring no longer cites a live
    caller — MCP's own U1 has always kept note paths out of its logs
    entirely, and REST no longer has a route that could set one either.
+   `query_length` is not left dead the same way: IMPLEMENTATION_PLAN
+   section 14 lists "検索語の長さ" (the search term's length) as a required
+   field regardless of transport, so `app/mcp_server.py`'s `search_notes`
+   tool now sets it on `_McpCall` (rendered as `q_len=...`, before
+   `result_count`'s `results=...`) — the one field this decision *moves* to
+   MCP rather than only removing from REST.
 
 10. **`tests/test_openapi.py`'s `test_every_reachable_error_code_appears_
     on_some_operation` drift guard is replaced, not weakened in place.**

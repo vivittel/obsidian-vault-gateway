@@ -690,6 +690,7 @@ method=tools/call
 tool=search_notes
 status=success
 duration_ms=...
+query_length=...
 result_count=...
 ```
 
@@ -733,7 +734,8 @@ status=unauthorized
 
 MCPアクセスログに呼び出し側由来の自由文字列が一切入らないこと（`transport`・
 `tool`（7ツール名）・`status`・`reason`・`code`はいずれも固定語彙、
-`duration_ms`/`result_count`は数値、`note_path`は上記U1により非記録）が、
+`duration_ms`/`query_length`/`result_count`は数値（`query_length`は`search_notes`
+のみ、クエリ本文ではなくその長さ）、`note_path`は上記U1により非記録）が、
 出力形式にJSONではなく平文を選べた根拠になっている。ログ注入や改行による
 1イベント2行化がMCP側では原理的に起きない。REST側の`note_path`のみ
 呼び出し側由来なので、フォーマッタが改行をエスケープして担保している。

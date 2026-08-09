@@ -14,9 +14,12 @@ fields that must be present, and above all the fields that must never appear.
 
 REST is health-only now (docs/adr/0010-*.md), so the "driven through the real
 application" section below exercises the ``rest`` transport column only via
-``/api/v1/health``, and the fields REST routes used to populate (note_path,
-result_count, q_len) through MCP records instead — matching how
-tests/test_mcp_tools.py already drives them.
+``/api/v1/health``. ``result_count``/``query_length`` — the fields REST's
+now-deleted search route used to populate — are exercised through MCP's
+``search_notes`` records instead, below and in tests/test_mcp_tools.py's own
+logging section. ``note_path`` has no such "instead": MCP's U1 has never
+recorded it, REST or no REST, so there is nothing left anywhere that sets it
+(docs/adr/0010-*.md decision 9).
 """
 
 from __future__ import annotations
@@ -268,10 +271,12 @@ def test_extra_field_outside_the_allow_list_is_never_rendered(rendered: Rendered
 def test_rest_transport_source_column_is_rendered(
     client: TestClient, rendered: Rendered
 ) -> None:
-    # REST is health-only now (docs/adr/0010-*.md) — note_path/result_count/
-    # q_len column rendering is exercised through MCP records instead (below
-    # and tests/test_mcp_tools.py's "logging" section); this pins only that
-    # the "rest" transport still gets the same column layout.
+    # REST is health-only now (docs/adr/0010-*.md) — result_count/q_len
+    # column rendering is exercised through MCP's search_notes records
+    # instead (below and tests/test_mcp_tools.py's "logging" section);
+    # note_path has no such coverage anywhere (MCP's U1 never records it).
+    # This test pins only that the "rest" transport still gets the same
+    # column layout.
     client.get("/api/v1/health")
 
     line = _line_with(rendered(), "/api/v1/health")
@@ -318,7 +323,7 @@ def test_absolute_vault_path_never_appears_in_a_rendered_line(
         assert str(vault_root) not in line
 
 
-def test_mcp_call_renders_tool_status_duration_and_result_count(
+def test_mcp_call_renders_tool_status_duration_query_length_and_result_count(
     mcp_client: TestClient, mcp_headers: dict[str, str], rendered: Rendered
 ) -> None:
     mcp_client.post(
@@ -338,6 +343,8 @@ def test_mcp_call_renders_tool_status_duration_and_result_count(
     assert fields[4] == "search_notes"
     assert fields[5] == "success"
     assert fields[6].endswith("ms")
+    # "RTX" is 3 characters — q_len must precede results= (_TAIL_FIELDS order).
+    assert "q_len=3" in fields
     assert any(field.startswith("results=") for field in fields)
 
 

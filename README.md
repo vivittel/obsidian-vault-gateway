@@ -371,7 +371,7 @@ plugin all show it.
 ```text
 2026-08-02T21:13:58.001+0900  INFO  uvicorn Started server process [1]
 2026-08-02T21:14:03.412+0900  DEBUG rest    GET        /api/v1/health             200          1.1ms
-2026-08-02T21:14:07.883+0900  INFO  mcp     tools/call search_notes               success      31.7ms   results=5
+2026-08-02T21:14:07.883+0900  INFO  mcp     tools/call search_notes               success      31.7ms   q_len=12 results=5
 2026-08-02T21:14:12.004+0900  INFO  mcp     tools/call read_note                  error        3.1ms    code=NOTE_NOT_FOUND
 2026-08-02T21:14:19.002+0900  INFO  mcp     -          mcp_auth_failed            unauthorized -        reason=bearer_token_mismatch
 ```
@@ -595,7 +595,7 @@ curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
 # MCP append_inbox_note: append to the note just created above.
 curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"append_inbox_note","arguments":{"path":"00_Inbox/ChatGPT/Gateway smoke test.md","content":"\nAppended by the OMV checklist.\n"}}}}'
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"append_inbox_note","arguments":{"path":"00_Inbox/ChatGPT/Gateway smoke test.md","content":"\nAppended by the OMV checklist.\n"}}}'
 
 # MCP create_inbox_note: a second, independent minimal structured export,
 # mode defaults to "summary"

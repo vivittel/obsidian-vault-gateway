@@ -48,8 +48,9 @@ Format is aligned plain text rather than JSON because the logs are read in
 Portainer's and OMV's plain-text log viewers, the field set is fixed by
 sections 14 and 16, and — decisively — the MCP access log contains no
 caller-controlled free text at all (``transport``, ``method``, ``tool``,
-``status``, ``reason`` and ``code`` are closed vocabularies; ``duration_ms``
-and ``result_count`` are numbers; section 16's U1 keeps ``note_path`` out of
+``status``, ``reason`` and ``code`` are closed vocabularies; ``duration_ms``,
+``query_length`` and ``result_count`` are numbers — the query itself is
+never logged, only its length; section 16's U1 keeps ``note_path`` out of
 MCP logs entirely). The log-injection and split-line risks that would argue
 for JSON's structural escaping therefore do not arise on the primary
 transport. :class:`PlainLogFormatter` still escapes newlines itself — see

@@ -115,6 +115,7 @@ def _log_mcp_call(
     status: str,
     duration_ms: float,
     code: str | None = None,
+    query_length: int | None = None,
     result_count: int | None = None,
 ) -> None:
     """The single ``mcp_call`` audit-log shape, shared by ``_McpCall`` (a
@@ -130,6 +131,8 @@ def _log_mcp_call(
         "status": status,
         "duration_ms": duration_ms,
     }
+    if query_length is not None:
+        extra["query_length"] = query_length
     if result_count is not None:
         extra["result_count"] = result_count
     if code is not None:
@@ -225,13 +228,18 @@ class _McpCall:
                 call.result_count = len(response.results)  # optional
                 return response
 
-    ``result_count`` is set from inside the ``with`` block, before the
-    ``return`` statement completes — ``__exit__`` runs as the block is left,
-    by which point it has already been assigned.
+    ``result_count``/``query_length`` are set from inside the ``with`` block,
+    before the ``return`` statement completes — ``__exit__`` runs as the
+    block is left, by which point they have already been assigned. Only
+    ``search_notes`` sets ``query_length`` (IMPLEMENTATION_PLAN section 14's
+    "検索語の長さ" — a length, never the query text itself), and sets it
+    before the scan runs so it still reaches the log on the error path below,
+    not only on success.
     """
 
     def __init__(self, tool_name: str) -> None:
         self.tool_name = tool_name
+        self.query_length: int | None = None
         self.result_count: int | None = None
         self._start = 0.0
 
@@ -252,6 +260,7 @@ class _McpCall:
                 self.tool_name,
                 status="success",
                 duration_ms=duration_ms,
+                query_length=self.query_length,
                 result_count=self.result_count,
             )
             return False
@@ -267,7 +276,13 @@ class _McpCall:
             error_code = exc.code.value
         else:
             error_code = ErrorCode.INTERNAL_ERROR.value
-        _log_mcp_call(self.tool_name, status="error", duration_ms=duration_ms, code=error_code)
+        _log_mcp_call(
+            self.tool_name,
+            status="error",
+            duration_ms=duration_ms,
+            code=error_code,
+            query_length=self.query_length,
+        )
 
         if isinstance(exc, GatewayError):
             log_extra = {
@@ -323,6 +338,12 @@ async def search_notes(
     cursor: str | None = None,
 ) -> SearchResponse:
     with _McpCall("search_notes") as call:
+        # Set before the scan runs, not after, so a failing scan's error
+        # log line still carries it (IMPLEMENTATION_PLAN section 14's
+        # "検索語の長さ" — the length only, never `query` itself).
+        if query is not None:
+            call.query_length = len(query)
+
         # A full-vault scan — run through app/runtime.py's dedicated
         # limiter, shared with get_vault_summary and
         # find_duplicate_candidates below, instead of the SDK's default
