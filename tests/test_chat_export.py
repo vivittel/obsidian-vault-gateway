@@ -2254,3 +2254,171 @@ def test_procedure_step_quote_is_never_moved_into_the_top_level_code_section() -
     )
     rendered = render_chat_export(export, title="t", now=_NOW)
     assert "## コード" not in rendered.content
+
+
+# === Bullet nesting depth and task-list checkboxes (docs/adr/0011-*.md) =======
+
+# --- Schema: BulletBlock.depth / .checked ---------------------------------------
+
+
+def test_bullet_depth_out_of_range_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(tldr=["ok"], design=[{"type": "bullet", "content": "a", "depth": 4}])
+
+
+def test_bullet_depth_negative_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(tldr=["ok"], design=[{"type": "bullet", "content": "a", "depth": -1}])
+
+
+def test_text_block_rejects_bullet_only_fields() -> None:
+    # TextBlock has no depth/checked at all — extra="forbid" is what keeps
+    # a client from sending a step block with bullet-only fields, no
+    # runtime check required (docs/adr/0011-*.md).
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            mode="procedure",
+            tldr=["ok"],
+            steps=[{"blocks": [{"type": "text", "content": "a", "depth": 1}]}],
+        )
+
+
+# --- Structure: nesting depth renders as CommonMark-nested bullet lists --------
+
+
+def test_bullet_nesting_depth_zero_one_two_renders_as_nested_lists() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "d0", "depth": 0},
+            {"type": "bullet", "content": "d1", "depth": 1},
+            {"type": "bullet", "content": "d2", "depth": 2},
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "- d0\n  - d1\n    - d2"
+    tokens = _MD.parse(rendered.content)
+    depths = []
+    depth = -1
+    for token in tokens:
+        if token.type == "bullet_list_open":
+            depth += 1
+        elif token.type == "bullet_list_close":
+            depth -= 1
+        elif token.type == "list_item_open":
+            depths.append(depth)
+    assert depths == [0, 1, 2]
+
+
+def test_bullet_depth_jump_of_more_than_one_is_rejected() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "a", "depth": 0},
+            {"type": "bullet", "content": "b", "depth": 2},
+        ],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "design[1]: bullet depth jumps from 0 to 2."
+
+
+def test_first_bullet_at_nonzero_depth_is_rejected() -> None:
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "bullet", "content": "a", "depth": 1}]
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "design[0]: bullet depth must start at 0."
+
+
+def test_bullet_after_a_table_must_restart_at_depth_zero() -> None:
+    # A section-level block ends the current bullet list — the next bullet
+    # starts a new one and must begin at depth 0 (docs/adr/0011-*.md).
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "a", "depth": 0},
+            {"type": "table", "headers": ["h"], "rows": []},
+            {"type": "bullet", "content": "b", "depth": 1},
+        ],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "design[2]: bullet depth must start at 0."
+
+
+def test_bullet_after_a_table_at_depth_zero_is_accepted() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "a", "depth": 0},
+            {"type": "table", "headers": ["h"], "rows": []},
+            {"type": "bullet", "content": "b", "depth": 0},
+        ],
+    )
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+def test_bullet_depth_jump_error_reports_the_source_index_not_the_normalised_one() -> None:
+    # docs/adr/0011-*.md: a bullet that normalises to empty content is
+    # dropped, which must not shift a later depth-jump error's reported
+    # index — it must still name the client's own input position.
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "A", "depth": 0},
+            {"type": "bullet", "content": "   ", "depth": 1},  # drops to empty
+            {"type": "bullet", "content": "C", "depth": 2},  # jump 0 -> 2 after the drop
+        ],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "design[2]: bullet depth jumps from 0 to 2."
+
+
+# --- Structure: GFM task-list checkboxes ----------------------------------------
+
+
+def test_bullet_checked_false_renders_an_open_checkbox() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "bullet", "content": "todo", "checked": False}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "- [ ] todo"
+
+
+def test_bullet_checked_true_renders_a_checked_checkbox() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "bullet", "content": "done", "checked": True}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "- [x] done"
+
+
+def test_bullet_without_checked_renders_an_ordinary_bullet() -> None:
+    export = ChatExport(mode="technical", tldr=["ok"], design=[{"type": "bullet", "content": "a"}])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "- a"
+
+
+def test_plain_string_bullets_default_to_depth_zero_and_no_checkbox() -> None:
+    # Backward compatibility: a bare string is still equivalent to
+    # {"type": "bullet", "content": ..., "depth": 0, "checked": None}.
+    export = ChatExport(mode="technical", tldr=["ok"], design=["a"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "- a"

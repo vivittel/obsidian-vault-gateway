@@ -329,6 +329,32 @@ def test_create_note_with_quote_callout_in_a_body_field(
     assert "> 本番では実行しない" in written
 
 
+def test_create_note_with_nested_bullets_and_task_list(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    # docs/adr/0011-*.md end-to-end: nesting depth and task-list checkboxes
+    # inside a mode-specific body field.
+    from app.models import ChatExport
+
+    application.create_chat_export_note(
+        title="Nested bullets test",
+        export=ChatExport(
+            mode="technical",
+            tldr=["ok"],
+            design=[
+                "設定手順",
+                {"type": "bullet", "content": "compose.yaml を編集する", "depth": 1},
+                {"type": "bullet", "content": "テストを実行する", "checked": False},
+                {"type": "bullet", "content": "レビューを依頼する", "checked": True},
+            ],
+        ),
+    )
+    written = (inbox_root / "Nested bullets test.md").read_text(encoding="utf-8")
+    assert "- 設定手順\n  - compose.yaml を編集する" in written
+    assert "- [ ] テストを実行する" in written
+    assert "- [x] レビューを依頼する" in written
+
+
 def test_create_note_with_related_notes(
     application: GatewayApplication, inbox_root: Path
 ) -> None:

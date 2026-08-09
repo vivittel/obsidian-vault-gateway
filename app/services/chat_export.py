@@ -310,11 +310,13 @@ class _NormalisedStep:
 @dataclass(frozen=True)
 class _NormalisedBullet:
     content: str
-    # Not used for rendering (rendering walks the normalised sequence in
-    # order) — carried so a future sequence check (e.g. a nesting-depth
-    # jump; docs/adr/0011-*.md) can report the *client's* item index after
-    # an empty bullet has already been dropped, rather than the index of
-    # whatever now sits in that position in the normalised sequence.
+    depth: int
+    checked: bool | None
+    # source_index is not used for rendering (rendering walks the
+    # normalised sequence in order) — carried so _check_bullet_depth's
+    # error message can report the *client's* item index after an empty
+    # bullet has already been dropped, rather than the index of whatever
+    # now sits in that position in the normalised sequence.
     source_index: int
 
 
@@ -537,6 +539,38 @@ def _normalise_quote(
     return _NormalisedQuote(callout=quote.callout, title=title or None, lines=lines)
 
 
+def _check_bullet_depth(
+    depth: int, *, previous_depth: int | None, field_name: str, index: int
+) -> None:
+    """Reject a nesting-depth jump a rendered Markdown bullet list cannot
+    represent (docs/adr/0011-*.md).
+
+    ``previous_depth`` is ``None`` at the start of a bullet run — the very
+    first bullet in the field, or the first bullet after a table/quote
+    that actually rendered (see :func:`_normalise_body_items`) — in which
+    case ``depth`` must be 0. Otherwise ``depth`` may be at most one more
+    than ``previous_depth``: never clamped to the nearest valid depth,
+    since a client-requested depth that cannot be honoured is a structural
+    problem the client needs to fix, the same fail-closed rule already
+    applied to a mismatched table row.
+    """
+    if previous_depth is None:
+        if depth != 0:
+            raise ValidationError(
+                f"{field_name}[{index}]: bullet depth must start at 0.",
+                log_detail=f"chat export: {field_name}[{index}] bullet depth starts at {depth}",
+            )
+        return
+    if depth > previous_depth + 1:
+        raise ValidationError(
+            f"{field_name}[{index}]: bullet depth jumps from {previous_depth} to {depth}.",
+            log_detail=(
+                f"chat export: {field_name}[{index}] bullet depth jumps from "
+                f"{previous_depth} to {depth}"
+            ),
+        )
+
+
 def _normalise_body_items(
     items: list[BulletBlock | TableBlock | QuoteBlock], field_name: str
 ) -> list[_NormalisedBodyItem]:
@@ -547,23 +581,43 @@ def _normalise_body_items(
     convention for the plain string list this generalises. A table is never
     dropped (see :func:`_normalise_table`); a quote can be (see
     :func:`_normalise_quote`). ``index`` is the *client's* item index, taken
-    before any drop — this is what makes a later sequence check's error
-    message (e.g. a nesting-depth jump) point at the item the client
-    actually sent, not at whatever now sits in that position once empty
-    bullets have been removed.
+    before any drop — this is what makes :func:`_check_bullet_depth`'s error
+    message point at the item the client actually sent, not at whatever now
+    sits in that position once empty bullets have been removed.
+
+    ``previous_depth`` only resets to ``None`` when a table/quote actually
+    survives into the result: a table/quote that itself normalises away to
+    nothing never breaks the rendered list, so the depth-jump check must not
+    treat it as one either — the surrounding bullets are adjacent in what
+    actually gets rendered.
     """
     result: list[_NormalisedBodyItem] = []
+    previous_depth: int | None = None
     for index, item in enumerate(items):
         if isinstance(item, BulletBlock):
             content = one_line(item.content)
-            if content:
-                result.append(_NormalisedBullet(content=content, source_index=index))
+            if not content:
+                continue
+            _check_bullet_depth(
+                item.depth, previous_depth=previous_depth, field_name=field_name, index=index
+            )
+            result.append(
+                _NormalisedBullet(
+                    content=content,
+                    depth=item.depth,
+                    checked=item.checked,
+                    source_index=index,
+                )
+            )
+            previous_depth = item.depth
         elif isinstance(item, TableBlock):
             result.append(_normalise_table(item, field_name=field_name, index=index))
+            previous_depth = None
         else:
             quote = _normalise_quote(item, field_name=field_name, index=index)
             if quote is not None:
                 result.append(quote)
+                previous_depth = None
     return result
 
 
@@ -1136,17 +1190,33 @@ def _render_indented_quote(quote: _NormalisedQuote, *, indent: str) -> list[str]
     return [f"{indent}{line}" if line else "" for line in _render_quote(quote).split("\n")]
 
 
+def _render_bullet(bullet: _NormalisedBullet) -> str:
+    """Render one bullet line, indented two spaces per ``depth`` level —
+    verified against markdown-it-py during design as the indent CommonMark
+    requires for a nested bullet list under an unordered (not ordered)
+    parent marker — with an optional GFM task-list checkbox before the
+    text.
+    """
+    indent = "  " * bullet.depth
+    marker = "- "
+    if bullet.checked is not None:
+        marker += "[x] " if bullet.checked else "[ ] "
+    return f"{indent}{marker}{_escape_block_start(bullet.content)}"
+
+
 def _render_body_items(items: list[_NormalisedBodyItem]) -> str:
     """Render a body field's rich block sequence (docs/adr/0011-*.md):
-    consecutive bullets become one Markdown bullet list; a table breaks the
-    list and becomes a section-level sibling block. Every block — the
-    bullet run as a whole, and each table — is joined with a blank line on
-    both sides: without one, a table immediately following a bullet list is
-    swallowed into the preceding list item's lazy continuation and silently
-    disappears (verified against markdown-it-py during design), and a GFM
-    table's own paragraph-interrupting behaviour is not something to rely on
-    for a construct (unlike a fenced code block) that is not CommonMark
-    core.
+    consecutive bullets become one Markdown bullet list (nested per
+    ``depth``, marked as a task item when ``checked`` is set); a table or
+    quote breaks the list and becomes a section-level sibling block. Every
+    block — the bullet run as a whole, and each table/quote — is joined
+    with a blank line on both sides: without one, a table or quote
+    immediately following a bullet list is swallowed into the preceding
+    list item's lazy continuation and silently disappears (verified against
+    markdown-it-py during design), and neither construct's own
+    paragraph-interrupting behaviour is something to rely on, being GFM/
+    Obsidian extensions rather than CommonMark core (unlike a fenced code
+    block).
     """
     blocks: list[str] = []
     bullet_run: list[str] = []
@@ -1158,7 +1228,7 @@ def _render_body_items(items: list[_NormalisedBodyItem]) -> str:
 
     for item in items:
         if isinstance(item, _NormalisedBullet):
-            bullet_run.append(f"- {_escape_block_start(item.content)}")
+            bullet_run.append(_render_bullet(item))
         else:
             _flush_bullet_run()
             if isinstance(item, _NormalisedTable):

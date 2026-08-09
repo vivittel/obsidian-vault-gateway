@@ -179,6 +179,12 @@ _MAX_TABLE_ROWS = 100
 # rich-block container caps (_MAX_BLOCKS_PER_STEP, _MAX_CODE_BLOCK_ITEMS).
 _MAX_QUOTE_LINES = 30
 
+# Maximum nesting depth for a BulletBlock (docs/adr/0011-*.md): a realistic
+# ceiling for a note's own nested lists, not a hard Markdown constraint —
+# app/services/chat_export.py separately rejects any *jump* deeper than one
+# level from the previous bullet, regardless of this cap.
+_MAX_BULLET_DEPTH = 3
+
 # _MAX_TOTAL_BLOCK_CHARS bounds the sum of every client-supplied string inside
 # every rich block in one export — code content/label, table label/headers/
 # rows, quote title/lines together (app/services/chat_export.py enforces this
@@ -447,12 +453,42 @@ class BulletBlock(BaseModel):
     replaces, and an empty/whitespace-only `content` is dropped by
     app/services/chat_export.py's normalisation like every other plain
     string list already is.
+
+    `depth` is validated only for its own range here; the *sequence* rule —
+    the first bullet in a run must start at depth 0, and every following
+    bullet may nest at most one level deeper than the one before it — is a
+    cross-item check app/services/chat_export.py enforces on normalised
+    data, the same split ADR-0005 decision 6 already draws between
+    per-field pydantic bounds and combination checks. A requested depth
+    that cannot be honoured is rejected outright, never silently clamped to
+    the nearest valid depth — the same fail-closed rule already applied to
+    a mismatched table row (docs/adr/0011-*.md).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["bullet"]
     content: Line = Field(description="Text for this bullet.")
+    depth: int = Field(
+        default=0,
+        ge=0,
+        le=_MAX_BULLET_DEPTH,
+        description=(
+            "Nesting depth: 0 for a top-level bullet, 1 for a bullet nested "
+            "one level under the previous one, and so on. The first bullet "
+            "after the start of a list (or after a table/quote) must be 0; "
+            "every later bullet may be at most one deeper than the bullet "
+            "immediately before it — never deeper, and never negative."
+        ),
+    )
+    checked: bool | None = Field(
+        default=None,
+        description=(
+            "Set to render this bullet as a GFM task-list item: false for "
+            "an open checkbox ('- [ ]'), true for a checked one ('- [x]'). "
+            "Omit for an ordinary bullet."
+        ),
+    )
 
 
 BodyBlock = Annotated[
