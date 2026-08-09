@@ -1,7 +1,8 @@
 """MCP server and tool definitions (MCP_IMPLEMENTATION_PLAN sections 9-14).
 
-Every tool calls the same :class:`~app.application.GatewayApplication` the
-REST routers do, so behaviour can never diverge between transports.
+Every tool calls the same :class:`~app.application.GatewayApplication`
+directly — the only other caller is REST's health route
+(docs/adr/0010-*.md), which needs none of this module's own logic.
 
 Error handling is the one place this module earns its keep beyond "call the
 application layer". The SDK's own fallback for a tool that raises anything
@@ -16,11 +17,12 @@ path in a client-visible message, which AGENTS.md forbids outright. Every
 tool below therefore runs its body inside :class:`_McpCall`, which is the
 only thing in this module allowed to see a raw exception, and which never
 lets one reach the SDK's default handling: it converts a ``GatewayError`` to
-an ``MCPError`` carrying only ``exc.message`` (the same client-facing string
-REST already uses), and anything else to a fixed, generic ``MCPError`` — the
-raw exception's own message is confined to the server log via
-``logger.exception``/``logger.error``, exactly as app/main.py's REST
-exception handlers already do for ``GatewayError.log_detail``.
+an ``MCPError`` carrying only ``exc.message`` — the same client-facing
+string the ``{"error": {...}}`` envelope contract (app/main.py) uses — and
+anything else to a fixed, generic ``MCPError``; the raw exception's own
+message is confined to the server log via
+``logger.exception``/``logger.error``, exactly as app/main.py's exception
+handlers already do for ``GatewayError.log_detail``.
 """
 
 from __future__ import annotations
@@ -321,10 +323,11 @@ async def search_notes(
     cursor: str | None = None,
 ) -> SearchResponse:
     with _McpCall("search_notes") as call:
-        # A full-vault scan — run through the same dedicated limiter as
-        # REST's /search (app/runtime.py), instead of the SDK's default
-        # thread pool, so MCP and REST scans are bounded together rather
-        # than each transport getting its own independent allowance.
+        # A full-vault scan — run through app/runtime.py's dedicated
+        # limiter, shared with get_vault_summary and
+        # find_duplicate_candidates below, instead of the SDK's default
+        # thread pool, so a blocked or slow scan can never starve /health
+        # (or any other lightweight tool) of a thread.
         response = await anyio.to_thread.run_sync(
             partial(
                 _application().search_notes,

@@ -19,9 +19,9 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The REST mount point. Shared between app/main.py (router prefix) and
-# app/middleware.py (the pure-ASGI scope guard that keeps REST-only
-# logging/size-limiting from ever touching /mcp — MCP_IMPLEMENTATION_PLAN
-# section 15) so the two can't drift apart.
+# app/middleware.py (the pure-ASGI scope guard that keeps REST-only access
+# logging from ever touching /mcp — MCP_IMPLEMENTATION_PLAN section 15) so
+# the two can't drift apart.
 API_PREFIX = "/api/v1"
 
 # The MCP mount point, for the same reason: app/main.py both mounts the
@@ -47,15 +47,16 @@ class Settings(BaseSettings):
         min_length=16,
         description=(
             "Secret used to sign pagination cursors, and — when AUTH_ENABLED=true "
-            "(the default) — the bearer token required by every endpoint except "
-            "/api/v1/health. Always required, even if AUTH_ENABLED=false."
+            "(the default) — the bearer token /mcp requires. REST is health-only "
+            "(docs/adr/0010-*.md) and /api/v1/health never requires a token. "
+            "api_token is always required, even if AUTH_ENABLED=false."
         ),
     )
 
     auth_enabled: bool = Field(
         default=True,
         description=(
-            "Require bearer authentication for REST and MCP. Disable only when an "
+            "Require bearer authentication for /mcp. Disable only when an "
             "equivalent access-control boundary already exists outside the "
             "application (e.g. a localhost-only listener)."
         ),

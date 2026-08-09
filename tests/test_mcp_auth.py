@@ -178,13 +178,12 @@ def test_correct_bearer_token_is_accepted(mcp_client: TestClient, mcp_headers: d
 
 
 @pytest.mark.parametrize("scheme", ["bearer", "BEARER", "BeArEr"])
-def test_scheme_name_is_case_insensitive_like_rest(
+def test_scheme_name_is_case_insensitive(
     mcp_client: TestClient, mcp_headers: dict, api_token: str, scheme: str
 ) -> None:
-    # Matches app/auth.py's require_token, which also does
-    # credentials.scheme.lower() != "bearer" — this is an existing, deliberate
-    # REST behaviour (RFC 7235 auth-scheme tokens are case-insensitive), not a
-    # new relaxation introduced for MCP.
+    # This middleware does credentials.scheme.lower() != "bearer" — a
+    # deliberate choice (RFC 7235 auth-scheme tokens are case-insensitive),
+    # not an incidental relaxation.
     headers = {**mcp_headers, "Authorization": f"{scheme} {api_token}"}
     response = mcp_client.post("/mcp/", json=_tools_list_body(), headers=headers)
     assert response.status_code == 200

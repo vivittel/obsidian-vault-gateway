@@ -142,7 +142,8 @@ ExportMode = Literal[
 
 # Every string field renders as exactly one Markdown line, so a per-string cap
 # plus a per-list cap is what bounds the rendered note deterministically.
-# MAX_REQUEST_BYTES (enforced pre-parse by both transports) stays the outer
+# MAX_REQUEST_BYTES (enforced pre-parse by /mcp's own SDK middleware — REST
+# is health-only and takes no body, docs/adr/0010-*.md) stays the outer
 # backstop; note creation itself has no byte cap (docs/adr/0005-*.md records
 # this as an accepted gap, not an oversight).
 _MAX_LINE_CHARS = 1_000
@@ -297,8 +298,8 @@ class ProcedureStep(BaseModel):
 def _coerce_step(value: object) -> object:
     """Backward-compatible shorthand: a bare string step becomes a
     `ProcedureStep` with exactly one `TextBlock`. Existing callers sending
-    `steps: ["do it", ...]` (REST or MCP) keep working unchanged — this is
-    the only place that equivalence is expressed.
+    `steps: ["do it", ...]` keep working unchanged — this is the only place
+    that equivalence is expressed.
     """
     if isinstance(value, str):
         return {"blocks": [{"type": "text", "content": value}]}

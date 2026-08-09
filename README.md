@@ -2,11 +2,12 @@
 
 A secure gateway over a private Obsidian vault: full-vault search, note
 reads, staged directory/summary browsing, and note creation and append
-restricted to one directory. **MCP is the primary interface** — for the
-ChatGPT desktop app, Codex CLI, and the Codex IDE extension, all sharing one
-MCP server configuration on the same Codex host, without exposing the
-Gateway to the public internet. A secondary REST API is kept for health
-checks, curl-based diagnostics, and regression tests.
+restricted to one directory. **MCP is the sole functional interface** — for
+the ChatGPT desktop app, Codex CLI, and the Codex IDE extension, all sharing
+one MCP server configuration on the same Codex host, without exposing the
+Gateway to the public internet. REST is health-only
+(`docs/adr/0010-reduce-rest-surface-to-health-only.md`): `GET /api/v1/health`
+for `docker healthcheck`, Caddy, and curl-based diagnostics — nothing else.
 
 **Phase 2** of `docs/IMPLEMENTATION_PLAN.md` is complete — implemented,
 covered by the automated test suite, and verified on the OMV host together
@@ -32,20 +33,20 @@ duplicate detection is its own read-only tool rather than a check embedded in
 `create_inbox_note`, `docs/adr/0008-normalize-bare-mcp-path.md` for why the
 bare `/mcp` path is normalized in-scope rather than redirected,
 `docs/adr/0009-verbatim-code-blocks-in-structured-exports.md` for how
-`procedure.steps` preserves code content and step ordering, and
-`docs/MCP_IMPLEMENTATION_PLAN.md` for the MCP design in full. Phase 1 and
-Phase 1.5 (the REST-only and MCP-introduction predecessors) are documented as
-completed history in `docs/PHASE1_PLAN.md` and `docs/IMPLEMENTATION_PLAN.md`.
+`procedure.steps` preserves code content and step ordering,
+`docs/adr/0010-reduce-rest-surface-to-health-only.md` for why REST was
+reduced to `GET /api/v1/health`, and `docs/MCP_IMPLEMENTATION_PLAN.md` for
+the MCP design in full. Phase 1 and Phase 1.5 (the REST-only and
+MCP-introduction predecessors) are documented as completed history in
+`docs/PHASE1_PLAN.md` and `docs/IMPLEMENTATION_PLAN.md`.
 
 ## Security invariants
 
-These hold regardless of what future phases add (see `AGENTS.md`), for both
-transports:
+These hold regardless of what future phases add (see `AGENTS.md`):
 
 - The whole vault is mounted **read-only**.
 - Only `00_Inbox/ChatGPT` is writable, and only through the `create_inbox_note`
-  / `append_inbox_note` MCP tools or `POST /api/v1/inbox/notes` /
-  `POST /api/v1/inbox/notes/append`. `append_inbox_note` can only extend an
+  / `append_inbox_note` MCP tools. `append_inbox_note` can only extend an
   existing note already directly inside that directory — it cannot create
   one, and cannot target a subdirectory or anywhere else.
 - There is no delete, move, rename, or arbitrary-path write endpoint or tool.
@@ -65,14 +66,15 @@ transports:
   `docs/adr/0004-allow-disabling-bearer-authentication.md` for the decision
   and accepted boundary conditions.
 
-MCP and REST call the same `app/application.py` and service functions
-(`app/services/`); neither transport calls the other over HTTP, so they can
-never diverge in behaviour for the same operation.
+MCP and REST's own health route both call `app/application.py`
+(`GatewayApplication`) and the service functions it wraps (`app/services/`);
+neither transport calls the other over HTTP, so behaviour for a given
+operation can never diverge by transport.
 
 ## MCP (primary interface)
 
 Endpoint: `/mcp`, Streamable HTTP transport, Bearer authentication by default
-(same `API_TOKEN` as REST; runtime-disableable with `AUTH_ENABLED=false`, see
+(`API_TOKEN`; runtime-disableable with `AUTH_ENABLED=false`, see
 Security invariants above and Configuration below). Stateless
 (`stateless_http=True`): no session is
 tracked across requests, so there is nothing for a client to terminate and
@@ -299,10 +301,15 @@ Caddy forwards with a real Host header — set it to whatever hostname(s) the
 Gateway is actually reached by, e.g. `obsidian-api.example.com`. See
 `.env.example`.
 
-## REST (secondary interface)
+## REST (health-only)
 
-Kept for `docker healthcheck`, curl-based diagnostics, regression tests, and
-any non-MCP client.
+`docs/adr/0010-reduce-rest-surface-to-health-only.md` records why: MCP is
+the sole functional interface, and REST's job is limited to
+`docker healthcheck`, Caddy, and curl-based diagnostics.
+
+| Method | Path | operationId | Auth |
+|---|---|---|---|
+| GET | `/api/v1/health` | `getHealth` | none |
 
 `GET /api/v1/health` always answers HTTP 200 — even when a mount is missing or
 has the wrong permissions, `status` in the body is `"degraded"` instead (see
@@ -315,77 +322,15 @@ an unreachable server: it parses the body and only exits 0 when `status` is
 so treat `unhealthy` as something to go look at, not something that
 self-heals.
 
-| Method | Path | operationId | Auth |
-|---|---|---|---|
-| GET | `/api/v1/health` | `getHealth` | none |
-| GET | `/api/v1/search` | `searchNotes` | Bearer |
-| GET | `/api/v1/notes` | `readNote` | Bearer |
-| GET | `/api/v1/vault/tree` | `getVaultTree` | Bearer |
-| GET | `/api/v1/vault/summary` | `getVaultSummary` | Bearer |
-| GET | `/api/v1/inbox/duplicate-candidates` | `findDuplicateCandidates` | Bearer |
-| POST | `/api/v1/inbox/notes` | `createInboxNote` | Bearer |
-| POST | `/api/v1/inbox/notes/append` | `appendInboxNote` | Bearer |
-
-`GET /api/v1/inbox/duplicate-candidates` takes `keywords` as a
-comma-separated query parameter, the same shape `/search`'s `tags` already
-uses — the MCP tool takes the same field as a JSON array instead, since
-JSON-RPC has a native array type and a REST query string does not.
-
-"Bearer" above reflects the default (`AUTH_ENABLED=true`); with
-`AUTH_ENABLED=false` these endpoints accept requests with no Authorization
-header at all. `openapi.json` always advertises Bearer authentication for
-them regardless of `AUTH_ENABLED` — the published API contract is
-intentionally independent of any one deployment's runtime setting.
-
 Full schema: `openapi.json` (regenerate with `scripts/export_openapi.py`
-after changing any router/model), or `GET /docs`/`GET /redoc`/
-`GET /openapi.json` on a running instance — FastAPI serves all three with no
-Bearer requirement, same as `/api/v1/health`. The example Caddy site block
-(`docs/caddy/obsidian-api.Caddyfile`) only proxies `/mcp` and `/api/v1/*` and
-404s everything else, so these three stay unreachable in that deployment;
-if a deployment proxies more of the app than that example does, they are
-reachable without a token.
-
-`GET /api/v1/notes` takes the note path as a **query parameter**
-(`?path=Knowledge/Examples/Device.md`), not as part of the URL path — see
-`docs/PHASE1_PLAN.md` section 4.5 for why. `POST /api/v1/inbox/notes/append`
-follows the same reasoning: the target note's path is a JSON body field
-(`path`), not a URL path segment.
-
-`POST /api/v1/inbox/notes` accepts **either** the raw-Markdown fields
-(`content`, optionally `frontmatter`) that existing callers already use, or
-the structured `export` field described under MCP's "Tools" section above —
-never both, and never `export` together with `frontmatter` (its frontmatter
-is formatter-owned). Exactly one of `content` or `export` is required.
-
-```json
-{"title": "Gateway smoke test", "content": "# Gateway smoke test\n"}
-```
-
-```json
-{
-  "title": "MCPゲートウェイの構造化エクスポート設計",
-  "export": {"tldr": ["create_inbox_noteを構造化入力の単一窓口に拡張した。"]}
-}
-```
-
-`updated` in a structured export's frontmatter is set once, at creation
-time, to the same value as `created`. `POST /api/v1/inbox/notes/append`
-writes raw bytes and does not parse or rewrite frontmatter, so appending to
-a note does not currently advance its `updated` field.
-
-`GET /api/v1/search` and `GET /api/v1/vault/tree` both support an opaque
-`cursor` query parameter for pagination — take the previous response's
-`next_cursor` and pass it back with the same other query parameters to get
-the next page. A cursor is bound to those parameters (and to the current
-`API_TOKEN`) and is rejected with `INVALID_CURSOR` if either changes.
-
-Both take a `folder`, but a nonexistent one is not an error for either the
-same way: `/vault/tree` resolves and lists an actual directory, so a
-nonexistent `folder` is a **404** `NOTE_NOT_FOUND`; `/search`'s `folder`
-only checks syntax and filters by path prefix, so a nonexistent one is not
-a lookup failure at all — it simply matches nothing, returning `200` with
-an empty `results`.
+after changing `app/routers/health.py`/`app/models.py`), or `GET /docs`/
+`GET /redoc`/`GET /openapi.json` on a running instance — FastAPI serves all
+three with no Bearer requirement, same as `/api/v1/health`, and this is
+unaffected by the REST surface reduction. The example Caddy site block
+(`docs/caddy/obsidian-api.Caddyfile`) only proxies `/mcp` and
+`/api/v1/health` and 404s everything else, so these three stay unreachable
+in that deployment; a deployment that proxies more of the app than that
+example does would reach them without a token.
 
 ## Configuration
 
@@ -408,9 +353,10 @@ both for free from the same `.env`. Running `uvicorn` directly instead
 or exported into the shell — `cp .env.example .env` alone does nothing for
 that path.
 
-`AUTH_ENABLED` (default `true`) gates bearer-token enforcement on both REST
-and MCP; see "Security invariants" above for when `false` is appropriate.
-`API_TOKEN` stays required either way — it also signs pagination cursors.
+`AUTH_ENABLED` (default `true`) gates bearer-token enforcement on `/mcp`
+(REST is health-only and never requires a token — docs/adr/0010-*.md); see
+"Security invariants" above for when `false` is appropriate. `API_TOKEN`
+stays required either way — it also signs pagination cursors.
 Disabling it logs a `WARNING authentication_disabled` line once at startup
 (see Logging below), so a deployment running without auth is always visible
 in `docker logs`.
@@ -424,12 +370,15 @@ plugin all show it.
 
 ```text
 2026-08-02T21:13:58.001+0900  INFO  uvicorn Started server process [1]
-2026-08-02T21:14:03.412+0900  INFO  rest    GET        /api/v1/notes              200          12.4ms   note=Knowledge/Examples/Device.md
-2026-08-02T21:14:05.100+0900  INFO  rest    GET        /api/v1/search             200          48.2ms   q_len=29 results=5
+2026-08-02T21:14:03.412+0900  INFO  rest    GET        /api/v1/health             200          1.1ms
 2026-08-02T21:14:07.883+0900  INFO  mcp     tools/call search_notes               success      31.7ms   results=5
-2026-08-02T21:14:12.004+0900  INFO  mcp     tools/call read_note                  error        3.1ms
+2026-08-02T21:14:12.004+0900  INFO  mcp     tools/call read_note                  error        3.1ms    code=NOTE_NOT_FOUND
 2026-08-02T21:14:19.002+0900  INFO  mcp     -          mcp_auth_failed            unauthorized -        reason=bearer_token_mismatch
 ```
+
+REST's own line is logged at `DEBUG`, not `INFO` (see below) — shown here at
+`INFO` only to illustrate the column layout; in practice you will only see
+it with `LOG_LEVEL=DEBUG`.
 
 | Field | Meaning |
 |---|---|
@@ -437,7 +386,7 @@ plugin all show it.
 | `$2` | Level (`DEBUG`/`INFO`/`WARN`/`ERROR`/`CRIT`) |
 | `$3` | Source: `rest` or `mcp` for the access logs, otherwise `uvicorn` / `mcp-sdk` / `app` |
 | `$4` | Method: HTTP verb, or `tools/call` |
-| `$5` | Target: full REST route, MCP tool name, or the event when there is neither |
+| `$5` | Target: `/api/v1/health` (REST's only route), MCP tool name, or the event when there is neither |
 | `$6` | Status: HTTP status, or `success` / `error` / `unauthorized` |
 | `$7` | Duration |
 | rest of line | `key=value` for whatever optional fields the event has |
@@ -573,8 +522,8 @@ result set is unusually large, could use more. If the container is OOM
 killed, do not simply raise the limit — first check the log for which
 request was in flight, how large the vault/notes involved are, and how many
 requests were running concurrently (`VAULT_SCAN_CONCURRENCY` in
-`app/runtime.py` bounds full-vault scans to 2 at a time, shared by both
-REST and MCP); raise the limit only once that points at a real, expected
+`app/runtime.py` bounds MCP's full-vault-scanning tools to 2 concurrent
+scans at a time); raise the limit only once that points at a real, expected
 memory need rather than a leak.
 
 > **Not verified in this repository's automated tests.** The development
@@ -601,34 +550,6 @@ QUERY='<a term that matches several notes in your vault>'
 
 curl -fsS "$BASE/api/v1/health"
 
-# Skip these two if NOTE/QUERY are still placeholders — the literal values
-# above match nothing, and `curl -fsS` would report a 404 as a real failure.
-case "$NOTE$QUERY" in
-  *'<'*)
-    echo 'Set NOTE and QUERY to real values in your vault first — skipped.' >&2
-    ;;
-  *)
-    curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/search" \
-         --data-urlencode "q=$QUERY" --data-urlencode 'limit=5'
-
-    curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/notes" \
-         --data-urlencode "path=$NOTE"
-    ;;
-esac
-
-curl -fsS -H "Authorization: Bearer $API_TOKEN" --get "$BASE/api/v1/vault/tree" \
-     --data-urlencode 'limit=100'
-
-curl -fsS -H "Authorization: Bearer $API_TOKEN" "$BASE/api/v1/vault/summary"
-
-curl -fsS -X POST -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
-     -d '{"title":"Gateway smoke test","content":"# Gateway smoke test\n"}' \
-     "$BASE/api/v1/inbox/notes"
-
-curl -fsS -X POST -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
-     -d '{"path":"00_Inbox/ChatGPT/Gateway smoke test.md","content":"\nAppended by the OMV checklist.\n"}' \
-     "$BASE/api/v1/inbox/notes/append"
-
 # MCP: no Bearer → 401; tools/list → 8 tools
 curl -i -X POST "$BASE/mcp/" -H 'Content-Type: application/json' \
      -H 'Accept: application/json, text/event-stream' \
@@ -638,7 +559,46 @@ curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 
-# MCP create_inbox_note: minimal structured export, mode defaults to "summary"
+# Skip these two if NOTE/QUERY are still placeholders — the literal values
+# above match nothing, and a tool error would report as a real failure.
+case "$NOTE$QUERY" in
+  *'<'*)
+    echo 'Set NOTE and QUERY to real values in your vault first — skipped.' >&2
+    ;;
+  *)
+    curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
+         -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+         -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_notes","arguments":{"query":"'"$QUERY"'","limit":5}}}'
+
+    curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
+         -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+         -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_note","arguments":{"path":"'"$NOTE"'"}}}'
+    ;;
+esac
+
+curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
+     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_vault_tree","arguments":{"limit":100}}}'
+
+curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
+     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_vault_summary","arguments":{}}}'
+
+# MCP create_inbox_note: the smoke-test note used by the append/mode/ownership
+# checks below. Structured export, not raw content — create_inbox_note has
+# taken only `title`/`export` since docs/adr/0010-*.md removed REST's
+# raw-Markdown create path.
+curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
+     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_inbox_note","arguments":{"title":"Gateway smoke test","export":{"tldr":["OMV checklist smoke test."]}}}}'
+
+# MCP append_inbox_note: append to the note just created above.
+curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
+     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"append_inbox_note","arguments":{"path":"00_Inbox/ChatGPT/Gateway smoke test.md","content":"\nAppended by the OMV checklist.\n"}}}}'
+
+# MCP create_inbox_note: a second, independent minimal structured export,
+# mode defaults to "summary"
 curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_inbox_note","arguments":{"title":"MCP structured export check","export":{"tldr":["OMV checklist smoke test."]}}}}'
@@ -663,26 +623,23 @@ curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
 ```
 
 Walk the vault tree a level at a time to confirm pagination works end to
-end: request `/api/v1/vault/tree` with a small `limit`, follow `next_cursor`
-until it comes back null, and confirm every entry was seen exactly once.
-Repeat for `/api/v1/search` with `$QUERY` and a `limit` smaller than its
-match count.
+end: call `get_vault_tree` with a small `limit`, follow `next_cursor` until
+it comes back null, and confirm every entry was seen exactly once. Repeat
+for `search_notes` with `$QUERY` and a `limit` smaller than its match count.
 
 For the `related_notes` check above: open the created note in Obsidian and
 confirm the wikilink resolves (not shown as unresolved/red) and that the note
 appears in the linked note's backlinks pane.
 
-**The `POST /api/v1/inbox/notes` and any `create_inbox_note` calls above
-create a real note in `00_Inbox/ChatGPT` on your vault; `append_inbox_note`
-/ the append call above appends to it.** There is no delete endpoint or tool
-(by design — see Security invariants above), so the Gateway itself cannot
-remove it. After confirming it synced correctly, delete the note manually,
-from Obsidian or directly on the OMV host. Do the same for any note created
-while checking LiveSync below.
+**Every `create_inbox_note` call above creates a real note in
+`00_Inbox/ChatGPT` on your vault; `append_inbox_note` appends to one.**
+There is no delete endpoint or tool (by design — see Security invariants
+above), so the Gateway itself cannot remove it. After confirming it synced
+correctly, delete the note manually, from Obsidian or directly on the OMV
+host. Do the same for any note created while checking LiveSync below.
 
-Also confirm `append_inbox_note` / `POST /api/v1/inbox/notes/append` reject
-a path outside `00_Inbox/ChatGPT` (e.g. `Knowledge/...`) with
-`PATH_OUTSIDE_VAULT`.
+Also confirm `append_inbox_note` rejects a path outside `00_Inbox/ChatGPT`
+(e.g. `Knowledge/...`) with `PATH_OUTSIDE_VAULT`.
 
 Container permission checks:
 
@@ -697,11 +654,11 @@ docker compose exec obsidian-api sh -c '
 Expect: a non-root uid/gid, the `/vault-ro` write to fail, and the
 `/vault-write/inbox` write/remove to succeed.
 
-**Create mode policy**: a newly created note (`create_inbox_note` /
-`POST /api/v1/inbox/notes`) is always written with mode `0o644` — matching
-the mode an ordinary note in the vault has — regardless of the container
-process's umask. An appended-to note instead keeps whatever mode it already
-had before the append (see below); append never changes a note's mode.
+**Create mode policy**: a newly created note (`create_inbox_note`) is always
+written with mode `0o644` — matching the mode an ordinary note in the vault
+has — regardless of the container process's umask. An appended-to note
+instead keeps whatever mode it already had before the append (see below);
+append never changes a note's mode.
 
 **Append and ownership** (`docs/adr/0003-allow-os-replace-for-inbox-append.md`):
 `append_inbox_note` uses `os.replace()`, which preserves the note's file
@@ -711,7 +668,7 @@ confirm on the OMV host:
 
 ```bash
 ls -ln /path/to/vault/00_Inbox/ChatGPT/'Gateway smoke test.md'   # before append
-# ... run the append curl command above ...
+# ... run the MCP append_inbox_note call above ...
 ls -ln /path/to/vault/00_Inbox/ChatGPT/'Gateway smoke test.md'   # after append
 ```
 
@@ -805,11 +762,12 @@ override) once a fixed image is published.
 ## Caddy
 
 Example site block: `docs/caddy/obsidian-api.Caddyfile`. Requirements it
-covers: HTTPS-only, only `/mcp` (primary) and `/api/v1/*` (diagnostics)
-served on this host name, a request-size cap matching `MAX_REQUEST_BYTES`'s
-default (2 MiB) — a hardcoded `request_body { max_size 2MiB }`, not read
-from the container's environment, so update it too if `MAX_REQUEST_BYTES`
-is ever overridden away from its default — and access logging. Bearer token
+covers: HTTPS-only, only `/mcp` (the sole functional interface) and
+`/api/v1/health` (diagnostics only — docs/adr/0010-*.md) served on this host
+name, a request-size cap matching `MAX_REQUEST_BYTES`'s default (2 MiB) — a
+hardcoded `request_body { max_size 2MiB }`, not read from the container's
+environment, so update it too if `MAX_REQUEST_BYTES` is ever overridden
+away from its default — and access logging. Bearer token
 checking stays inside the application. `MCP_ALLOWED_HOSTS` on the container
 must include this host name, or the MCP transport's own DNS-rebinding
 protection rejects every request Caddy forwards.

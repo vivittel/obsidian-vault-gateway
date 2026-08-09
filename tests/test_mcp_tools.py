@@ -541,9 +541,9 @@ async def test_create_inbox_note_rejects_control_characters_leaving_nothing_usab
 
 
 async def test_create_inbox_note_title_over_max_length_is_rejected(env: None) -> None:
-    # Unlike REST, bare-str MCP params carry no length constraint from the SDK
-    # unless declared via Annotated[..., Field(...)] — this tool declares
-    # max_length=300 on `title` for REST parity, so 301 chars is a schema
+    # Bare-str MCP params carry no length constraint from the SDK unless
+    # declared via Annotated[..., Field(...)] — this tool declares
+    # max_length=300 on `title` explicitly, so 301 chars is a schema
     # rejection (ToolError), not a silent truncation to the 100-char file stem.
     with pytest.raises(ToolError):
         await mcp.call_tool("create_inbox_note", {"title": "x" * 301, "export": {"tldr": ["y"]}})
@@ -903,8 +903,10 @@ async def test_mcp_access_log_never_contains_query_value(
 async def test_mcp_access_log_never_contains_a_note_path_field(
     env: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """U1: unlike REST's access log, the MCP access log never records
-    ``note_path`` at all — for a read, a write, or an error.
+    """U1: the MCP access log never records ``note_path`` at all — for a
+    read, a write, or an error. (REST's own access log has no route left
+    that sets one either, but for the unrelated reason that REST is
+    health-only now — docs/adr/0010-*.md — not because of this rule.)
     """
     caplog.set_level(logging.INFO, logger="obsidian_gateway.mcp")
     await mcp.call_tool("read_note", {"path": "Knowledge/PC/GPU/RTX 5070.md"})

@@ -1,10 +1,11 @@
 """Bearer authentication for the ``/mcp`` Streamable HTTP endpoint
 (MCP_IMPLEMENTATION_PLAN section 8, section 17; ADR-0001 security invariants).
 
-REST's ``Depends(require_token)`` only runs for FastAPI *routes* — a mounted
-ASGI sub-application (the MCP transport) never goes through FastAPI's
-dependency injection at all. This middleware wraps the MCP sub-app *before*
-it is mounted in app/main.py, so every HTTP request reaching it is checked
+A FastAPI dependency (``Depends(...)``) only runs for FastAPI *routes* — a
+mounted ASGI sub-application (the MCP transport) never goes through
+FastAPI's dependency injection at all, so it needs its own bearer check
+rather than reusing one. This middleware wraps the MCP sub-app *before* it
+is mounted in app/main.py, so every HTTP request reaching it is checked
 regardless of which JSON-RPC method the body names — including the
 2026-07-28 spec's ``server/discover`` and the legacy ``initialize`` (MCP
 section 8: "``/mcp``はinitializeを含む全リクエストで認証必須"). Passthrough

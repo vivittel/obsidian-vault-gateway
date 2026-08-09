@@ -214,6 +214,10 @@ MCP Python SDKは`mcp==2.0.0`に厳密固定する。実装開始時点でPyPI�
 
 ### REST
 
+> 本節は歴史的記録。`docs/adr/0010-reduce-rest-surface-to-health-only.md` により
+> REST は `GET /api/v1/health` のみに縮小され、以下のエンドポイント一覧は
+> 現状を反映していない。
+
 既存エンドポイントを維持する。
 
 ```text
@@ -807,6 +811,10 @@ handle @obsidian_api {
 ## 17. テスト計画
 
 ### 既存REST回帰
+
+> 本節は歴史的記録。`docs/adr/0010-reduce-rest-surface-to-health-only.md` により
+> 該当機能の回帰テストは `GatewayApplication` 直呼びまたは MCP 経由のテストへ
+> 移行済み。REST 自体は `GET /api/v1/health` のみ。
 
 - health
 - 認証なし401
