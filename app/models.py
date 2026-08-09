@@ -1,9 +1,10 @@
 """Request and response schemas.
 
 Response models are fixed and fully typed on purpose: section 12 of the plan
-requires stable schemas with explicit required fields, and the same models
-back both the REST responses here and the MCP tools' structured output
-(app/mcp_server.py) — one schema, two transports.
+requires stable schemas with explicit required fields. Most also back MCP's
+structured tool output (app/mcp_server.py) — REST is health-only
+(docs/adr/0010-*.md), so ``HealthResponse``/``ErrorResponse``/``ErrorDetail``
+are the only ones a REST response still uses directly.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from app.exceptions import ErrorCode
 
@@ -21,10 +22,6 @@ from app.exceptions import ErrorCode
 # vault note through the frontmatter field.
 FrontmatterScalar = str | int | float | bool | None
 FrontmatterValue = FrontmatterScalar | list[FrontmatterScalar]
-
-# Backstop only — MAX_REQUEST_BYTES (default 2 MiB) is enforced by middleware
-# before the body is parsed. A body that fits in 2 MiB cannot exceed 2M chars.
-_MAX_CONTENT_CHARS = 2_000_000
 
 
 class ErrorDetail(BaseModel):
@@ -637,61 +634,6 @@ class ChatExport(BaseModel):
     )
 
 
-class InboxNoteCreateRequest(BaseModel):
-    """Exactly one of `content` or `export` is required; sending both, or
-    sending neither, is rejected. `export` and `frontmatter` are also
-    mutually exclusive — `export`'s frontmatter (title/created/updated/
-    source/export_mode/tags) is formatter-owned and cannot be supplied as
-    arbitrary free-form frontmatter alongside it. `content`/`frontmatter`
-    remain the raw-Markdown path kept for existing callers; `export` is the
-    structured chat-export path (issue #12 / docs/adr/0005-*.md).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    title: str = Field(
-        min_length=1,
-        max_length=300,
-        description=(
-            "Human-readable title. The file name is derived from it by the API; "
-            "callers cannot choose a path."
-        ),
-    )
-    content: str | None = Field(
-        default=None,
-        max_length=_MAX_CONTENT_CHARS,
-        description=(
-            "Markdown body. Written as-is with LF line endings. Exactly one of "
-            "`content` or `export` is required."
-        ),
-    )
-    frontmatter: dict[str, FrontmatterValue] | None = Field(
-        default=None,
-        description=(
-            "Optional YAML frontmatter for the `content` path. Scalars and flat "
-            "lists of scalars only. Rejected together with `export`, whose "
-            "frontmatter is formatter-owned."
-        ),
-    )
-    export: ChatExport | None = Field(
-        default=None,
-        description=(
-            "Structured chat-export input (issue #12). The Gateway renders this "
-            "into deterministic Markdown and frontmatter; the client never "
-            "supplies raw Markdown or frontmatter alongside it. Exactly one of "
-            "`content` or `export` is required."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _check_content_and_export_are_mutually_exclusive(self) -> InboxNoteCreateRequest:
-        if (self.content is None) == (self.export is None):
-            raise ValueError("Exactly one of `content` or `export` is required.")
-        if self.export is not None and self.frontmatter is not None:
-            raise ValueError("`export` and `frontmatter` cannot be supplied together.")
-        return self
-
-
 class CreatedNoteResponse(BaseModel):
     id: str = Field(description="Vault-relative path of the created note.")
     path: str = Field(description="Vault-relative path of the created note.")
@@ -718,21 +660,6 @@ class CreatedNoteResponse(BaseModel):
             "documented maximum is a separate, harder failure: the whole "
             "request is rejected before this count is ever produced."
         ),
-    )
-
-
-class InboxNoteAppendRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    path: str = Field(
-        min_length=1,
-        max_length=1024,
-        description="Vault-relative path of an existing .md note directly inside the inbox.",
-    )
-    content: str = Field(
-        min_length=1,
-        max_length=_MAX_CONTENT_CHARS,
-        description="Markdown to append. The existing note's line ending is preserved.",
     )
 
 

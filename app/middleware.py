@@ -1,43 +1,40 @@
-"""Request size limiting and access logging (IMPLEMENTATION_PLAN sections 14 and 17).
+"""Access logging (IMPLEMENTATION_PLAN sections 14 and 17).
 
-Two things must never reach the log, per section 14: the bearer token and note
-content. The access log below only ever writes method, route, status and
-duration — the search term's *length*, never its value; the note path a read
-or a write touched, never its content.
+One thing must never reach the log, per section 14: the bearer token. The
+access log below only ever writes method, route, status and duration — never
+a note path or note content (REST is health-only now, docs/adr/0010-*.md, so
+there is no route left that could set either).
 
 uvicorn's own access log is disabled (see ``scripts`` invocation / Dockerfile
-CMD, ``--no-access-log``) because it logs the raw query string, which would leak
-the search term this middleware deliberately omits.
+CMD, ``--no-access-log``) because it logs the raw query string; MCP's own
+request log (app/mcp_server.py) is what section 14 actually relies on for
+search-query-length and result-count reporting now.
 
-Both middlewares below are plain ASGI callables, not ``BaseHTTPMiddleware``
-subclasses, and both pass a request straight through — without touching
-``receive``/``send`` at all — for anything that isn't an HTTP request under
-``/api/v1``. Two independent reasons forced this once ``/mcp`` existed
-alongside ``/api/v1`` (MCP_IMPLEMENTATION_PLAN section 15):
+``AccessLogMiddleware`` below is a plain ASGI callable, not a
+``BaseHTTPMiddleware`` subclass, and passes a request straight through —
+without touching ``receive``/``send`` at all — for anything that isn't an
+HTTP request under ``/api/v1``. Two independent reasons forced this once
+``/mcp`` existed alongside ``/api/v1`` (MCP_IMPLEMENTATION_PLAN section 15):
 
 1. ``BaseHTTPMiddleware`` buffers the whole response before handing it back,
    which is incompatible with the Streamable HTTP transport's SSE responses.
-2. Scoping by ``scope["path"]`` keeps this REST-only logging/limiting logic
-   from ever touching MCP traffic, whose own access log (transport=mcp) is
-   written by the MCP tool wrapper instead — see app/mcp_server.py.
+2. Scoping by ``scope["path"]`` keeps this REST-only logging logic from ever
+   touching MCP traffic, whose own access log (transport=mcp) is written by
+   the MCP tool wrapper instead — see app/mcp_server.py.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from collections import deque
 from typing import TYPE_CHECKING
 
-from starlette.datastructures import Headers
 from starlette.requests import Request
-from starlette.responses import JSONResponse
 
-from app.config import API_PREFIX, get_settings
-from app.exceptions import FileTooLargeError, error_envelope
+from app.config import API_PREFIX
 
 if TYPE_CHECKING:
-    from starlette.types import Message, Receive, Scope, Send
+    from starlette.types import Receive, Scope, Send
 
 access_logger = logging.getLogger("obsidian_gateway.access")
 
@@ -48,142 +45,13 @@ access_logger = logging.getLogger("obsidian_gateway.access")
 # floor.
 _HEALTH_ROUTE = f"{API_PREFIX}/health"
 
-# Every REST write goes through POST; PUT/PATCH are included for whatever a
-# future endpoint adds. GET/HEAD/DELETE never carry a body on this API, so
-# skipping the buffering-and-replay path below for them is not just an
-# optimisation — it keeps every read-only route's `receive` untouched, exactly
-# as before this class started reading bodies at all.
-_BODY_BEARING_METHODS = frozenset({"POST", "PUT", "PATCH"})
-
 
 def _is_rest_http_request(scope: Scope) -> bool:
     return scope["type"] == "http" and scope["path"].startswith(API_PREFIX)
 
 
-class RequestSizeLimitMiddleware:
-    """Reject an oversized body before it reaches request parsing.
-
-    Two checks, in order:
-
-    1. The client-supplied ``Content-Length``, when present and already over
-       the limit — rejected without reading a single body chunk.
-    2. The body's actual cumulative size as it streams in, buffered here (see
-       :meth:`_read_and_replay`) and checked message by message. (1) alone
-       trusts a header a client can simply omit — a chunked-transfer body
-       (no ``Content-Length`` at all) sailed through unchecked until this
-       check existed. Caddy's own request size limit is still the second
-       line of defence in production (docs/PHASE1_PLAN.md section 4.7 /
-       IMPLEMENTATION_PLAN section 11), but the application must not depend
-       on it alone.
-
-    Mirrors the MCP SDK's own ``RequestBodyLimitMiddleware``
-    (``mcp.server.streamable_http_manager``), which the ``/mcp`` transport
-    already relies on for exactly this — the two transports now enforce
-    their request-body cap the same way.
-
-    Returns the error response directly rather than raising ``FileTooLargeError``:
-    an exception raised from ASGI middleware never reaches the
-    ``@app.exception_handler(GatewayError)`` registered in app/main.py — those
-    handlers live inside ``ExceptionMiddleware``, further down the stack — so
-    it would only ever surface as the generic 500 handler, silently losing the
-    intended 413 and error code.
-    """
-
-    def __init__(self, app) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if not _is_rest_http_request(scope):
-            await self.app(scope, receive, send)
-            return
-
-        max_bytes = get_settings().max_request_bytes
-        content_length = Headers(scope=scope).get("content-length")
-        if content_length is not None:
-            try:
-                declared_size = int(content_length)
-            except ValueError:
-                declared_size = None
-            if declared_size is not None and declared_size > max_bytes:
-                await self._reject(scope, receive, send)
-                return
-
-        if scope["method"] not in _BODY_BEARING_METHODS:
-            await self.app(scope, receive, send)
-            return
-
-        replay_receive = await self._read_and_replay(receive, max_bytes)
-        if replay_receive is None:
-            await self._reject(scope, receive, send)
-            return
-
-        await self.app(scope, replay_receive, send)
-
-    @staticmethod
-    async def _reject(scope: Scope, receive: Receive, send: Send) -> None:
-        response = JSONResponse(
-            status_code=FileTooLargeError.status_code,
-            content=error_envelope(FileTooLargeError.code, FileTooLargeError.default_message),
-        )
-        await response(scope, receive, send)
-
-    @staticmethod
-    async def _read_and_replay(receive: Receive, max_bytes: int) -> Receive | None:
-        """Read the whole body, bounded by ``max_bytes``, and hand back a
-        ``receive`` that replays it unchanged — or ``None`` if it exceeded
-        the bound partway through.
-
-        The body is fully buffered before the downstream app ever sees it:
-        the point is to know the *complete* size is within budget before
-        request parsing starts, not to stream-validate chunk by chunk. The
-        buffer itself can never exceed ``max_bytes`` (checked after every
-        chunk, before extending it), so this adds no unbounded memory use.
-        """
-        received = bytearray()
-        received_request = False
-        body_complete = False
-        trailing_message: Message | None = None
-
-        while True:
-            message = await receive()
-            if message["type"] != "http.request":
-                trailing_message = message
-                break
-
-            received_request = True
-            body = message.get("body", b"")
-            if len(received) + len(body) > max_bytes:
-                return None
-            received.extend(body)
-            if not message.get("more_body", False):
-                body_complete = True
-                break
-
-        cached: deque[Message] = deque()
-        if received_request:
-            cached.append(
-                {"type": "http.request", "body": bytes(received), "more_body": not body_complete}
-            )
-        if trailing_message is not None:
-            cached.append(trailing_message)
-
-        async def replay() -> Message:
-            if cached:
-                return cached.popleft()
-            return await receive()
-
-        return replay
-
-
 class AccessLogMiddleware:
-    """One log line per REST request: transport, method, route, status, duration.
-
-    Note or Inbox paths and result counts are logged by the routers themselves
-    via ``request.state.accessed_note`` / ``request.state.created_note`` /
-    ``request.state.appended_note`` / ``request.state.result_count`` (set on the
-    shared ``scope["state"]`` dict) so this middleware stays generic and never
-    inspects the body.
-    """
+    """One log line per REST request: transport, method, route, status, duration."""
 
     def __init__(self, app) -> None:
         self.app = app
@@ -194,10 +62,6 @@ class AccessLogMiddleware:
             return
 
         request = Request(scope)
-        request.state.accessed_note = None
-        request.state.created_note = None
-        request.state.appended_note = None
-        request.state.result_count = None
 
         start = time.monotonic()
         status_code = 0
@@ -258,28 +122,18 @@ class AccessLogMiddleware:
                 "status_code": 500 if unhandled_exception and status_code == 0 else status_code,
                 "duration_ms": duration_ms,
             }
-            if request.state.accessed_note:
-                extra["note_path"] = request.state.accessed_note
-            if request.state.created_note:
-                extra["note_path"] = request.state.created_note
-            if request.state.appended_note:
-                extra["note_path"] = request.state.appended_note
-            if request.state.result_count is not None:
-                extra["result_count"] = request.state.result_count
-            if request.method == "GET" and "q" in request.query_params:
-                extra["query_length"] = len(request.query_params["q"])
 
             level = logging.DEBUG if route_path == _HEALTH_ROUTE else logging.INFO
             access_logger.log(level, "request", extra=extra)
 
     @staticmethod
     def _route_path(scope: Scope, request: Request) -> str:
-        """The full public path of the matched route, e.g. ``/api/v1/search``.
+        """The full public path of the matched route, e.g. ``/api/v1/health``.
 
         The matched route's own ``path`` is *not* prefixed: this FastAPI version
         applies ``include_router(prefix=...)`` at match time via an
         ``_IncludedRouter`` wrapper, leaving ``scope["route"].path`` as the
-        router-relative ``/search`` (verified against the installed version).
+        router-relative ``/health`` (verified against the installed version).
         Logging that unprefixed form made the route ambiguous and impossible to
         line up against Caddy's access log, and it silently defeated the health
         check's DEBUG downgrade above, which compares against the full path.

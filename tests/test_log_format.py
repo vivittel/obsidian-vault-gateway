@@ -11,6 +11,12 @@ tests/test_logging.py already asserts on ``LogRecord`` *attributes* via
 were all discarded on the way out. Record-level coverage cannot catch that.
 Everything here therefore asserts on the rendered string: the columns, the
 fields that must be present, and above all the fields that must never appear.
+
+REST is health-only now (docs/adr/0010-*.md), so the "driven through the real
+application" section below exercises the ``rest`` transport column only via
+``/api/v1/health``, and the fields REST routes used to populate (note_path,
+result_count, q_len) through MCP records instead — matching how
+tests/test_mcp_tools.py already drives them.
 """
 
 from __future__ import annotations
@@ -259,63 +265,54 @@ def test_extra_field_outside_the_allow_list_is_never_rendered(rendered: Rendered
 # --- driven through the real application -------------------------------------
 
 
-def test_rest_read_renders_transport_route_status_and_note_path(
-    client: TestClient, auth_headers: dict[str, str], rendered: Rendered
+def test_rest_transport_source_column_is_rendered(
+    client: TestClient, rendered: Rendered
 ) -> None:
-    client.get(
-        "/api/v1/notes",
-        params={"path": "Knowledge/PC/GPU/RTX 5070.md"},
-        headers=auth_headers,
-    )
+    # REST is health-only now (docs/adr/0010-*.md) — note_path/result_count/
+    # q_len column rendering is exercised through MCP records instead (below
+    # and tests/test_mcp_tools.py's "logging" section); this pins only that
+    # the "rest" transport still gets the same column layout.
+    client.get("/api/v1/health")
 
-    line = _line_with(rendered(), "/api/v1/notes")
+    line = _line_with(rendered(), "/api/v1/health")
     fields = line.split()
     assert fields[2] == "rest"
     assert fields[3] == "GET"
-    assert fields[4] == "/api/v1/notes"
+    assert fields[4] == "/api/v1/health"
     assert fields[5] == "200"
-    assert line.endswith("note=Knowledge/PC/GPU/RTX 5070.md")
-
-
-def test_rest_search_renders_query_length_and_result_count_but_not_the_query(
-    client: TestClient, auth_headers: dict[str, str], rendered: Rendered
-) -> None:
-    secret_query = "very-specific-search-term-xyz"
-    client.get("/api/v1/search", params={"q": secret_query}, headers=auth_headers)
-
-    line = _line_with(rendered(), "/api/v1/search")
-    assert secret_query not in line
-    assert f"q_len={len(secret_query)}" in line
-    assert "results=" in line
-
-
-def test_vault_tree_renders_result_count(
-    client: TestClient, auth_headers: dict[str, str], rendered: Rendered
-) -> None:
-    client.get("/api/v1/vault/tree", params={"limit": 100}, headers=auth_headers)
-
-    assert "results=" in _line_with(rendered(), "/api/v1/vault/tree")
 
 
 def test_bearer_token_never_appears_in_a_rendered_line(
-    client: TestClient, auth_headers: dict[str, str], api_token: str, rendered: Rendered
+    mcp_client: TestClient, mcp_headers: dict[str, str], api_token: str, rendered: Rendered
 ) -> None:
-    client.get("/api/v1/search", params={"q": "anything"}, headers=auth_headers)
-    client.get("/api/v1/notes", params={"path": "does-not-exist.md"}, headers=auth_headers)
+    mcp_client.post(
+        "/mcp/",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "read_note", "arguments": {"path": "does-not-exist.md"}},
+        },
+        headers=mcp_headers,
+    )
 
     for line in rendered():
         assert api_token not in line
 
 
 def test_absolute_vault_path_never_appears_in_a_rendered_line(
-    client: TestClient, auth_headers: dict[str, str], vault_root: Path, rendered: Rendered
+    mcp_client: TestClient, mcp_headers: dict[str, str], vault_root: Path, rendered: Rendered
 ) -> None:
-    client.get(
-        "/api/v1/notes",
-        params={"path": "Knowledge/PC/GPU/RTX 5070.md"},
-        headers=auth_headers,
+    mcp_client.post(
+        "/mcp/",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "read_note", "arguments": {"path": "../secret.md"}},
+        },
+        headers=mcp_headers,
     )
-    client.get("/api/v1/notes", params={"path": "../secret.md"}, headers=auth_headers)
 
     for line in rendered():
         assert str(vault_root) not in line
@@ -386,28 +383,6 @@ def test_mcp_call_note_not_found_renders_the_error_code(
     assert fields[4] == "read_note"
     assert fields[5] == "error"
     assert "code=NOTE_NOT_FOUND" in fields
-
-
-def test_oversized_request_renders_413_access_log(
-    client: TestClient, auth_headers: dict[str, str], rendered: Rendered
-) -> None:
-    from app.config import get_settings
-
-    content = "x" * (get_settings().max_request_bytes + 1)
-    response = client.post(
-        "/api/v1/inbox/notes",
-        json={"title": "oversized", "content": content},
-        headers=auth_headers,
-    )
-    assert response.status_code == 413
-
-    line = _line_with(rendered(), "/api/v1/inbox/notes")
-    fields = line.split()
-    assert fields[2] == "rest"
-    assert fields[3] == "POST"
-    assert fields[4] == "/api/v1/inbox/notes"
-    assert fields[5] == "413"
-    assert content[:100] not in line
 
 
 # --- configure_logging's own contract ----------------------------------------
@@ -526,7 +501,7 @@ def test_auth_disabled_warning_renders_with_detail_and_no_secret(rendered: Rende
     """
     logging.getLogger("obsidian_gateway").warning(
         "authentication_disabled",
-        extra={"detail": "AUTH_ENABLED=false: no bearer token is required for REST or MCP"},
+        extra={"detail": "AUTH_ENABLED=false: no bearer token is required for MCP"},
     )
 
     line = _line_with(rendered(), "authentication_disabled")

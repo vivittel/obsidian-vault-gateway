@@ -1,12 +1,12 @@
 """Transport-neutral application layer (MCP_IMPLEMENTATION_PLAN section 7).
 
-:class:`GatewayApplication` is the one place both the REST routers and, from
-Phase 1.5, the MCP tools call into. It depends on nothing HTTP-specific and
-nothing MCP-specific — only on :class:`~app.config.Settings` and the existing
+:class:`GatewayApplication` is the one place both the health REST route and
+the MCP tools call into. It depends on nothing HTTP-specific and nothing
+MCP-specific — only on :class:`~app.config.Settings` and the existing
 services — so the two transports can never observe different behaviour for
 the same operation. Anything transport-specific (setting ``request.state``
-for the access log, the REST ``Location`` header, MCP tool annotations) stays
-in the adapter that calls in here.
+for the access log, MCP tool annotations) stays in the adapter that calls in
+here.
 """
 
 from __future__ import annotations
@@ -124,8 +124,8 @@ class GatewayApplication:
         """Search the vault. ``limit`` is validated against [1, 200] here — not
         just at whichever transport's own parameter validation runs first —
         then clamped to the configured ``MAX_SEARCH_RESULTS`` (U7). Calling
-        this directly, as the MCP tool does, gets the same two-stage behaviour
-        the REST endpoint has always had.
+        this directly, as the MCP tool does, gets this two-stage validation
+        regardless of what (if anything) a transport already checked first.
 
         ``cursor`` resumes a previous page. It is bound to ``query``/``folder``/
         ``tags`` (not to ``limit`` — the page size may change between calls
@@ -353,13 +353,15 @@ class GatewayApplication:
     def create_chat_export_note(self, *, title: str, export: ChatExport) -> CreatedNoteResponse:
         """Render a structured chat export and write it via :meth:`create_inbox_note`.
 
-        A second method rather than an extra parameter on
-        :meth:`create_inbox_note`: MCP can only ever send ``export`` (never
-        ``content``/``frontmatter``), so the "exactly one of" rule is a REST
-        request-shape concern that belongs on ``InboxNoteCreateRequest``, not
-        here. Both paths still converge on the one
-        ``inbox_service.create_inbox_note`` call, which is the invariant that
-        actually matters (single write path, single never-overwrite guarantee).
+        This is the only path any transport reaches to create a new Inbox
+        note (docs/adr/0005-*.md, docs/adr/0010-*.md): MCP's ``create_inbox_note``
+        tool always sends ``export`` — a bare Markdown ``content``/
+        ``frontmatter`` pair is no longer accepted at any boundary.
+        :meth:`create_inbox_note` stays a separate method rather than being
+        folded into this one because it is the one place that actually calls
+        ``inbox_service.create_inbox_note`` — the invariant that matters
+        (single write path, single never-overwrite guarantee) lives there,
+        not in how a caller assembled the Markdown it writes.
 
         This is the only place ``datetime.now()`` appears in ``app/`` — the
         formatter (``app.services.chat_export``) stays a pure function of its
