@@ -749,12 +749,9 @@ def test_inbox_lock_timeout_is_logged_by_the_rest_exception_handler_with_a_reaso
     """
     from app.main import handle_gateway_error
 
+    exc = InboxLockTimeoutError(log_detail="timed out waiting for the inbox append lock")
     with caplog.at_level("INFO", logger="obsidian_gateway"):
-        asyncio.run(
-            handle_gateway_error(
-                None, InboxLockTimeoutError(log_detail="timed out waiting for the inbox append lock")
-            )
-        )
+        asyncio.run(handle_gateway_error(None, exc))
 
     records = [r for r in caplog.records if r.name == "obsidian_gateway"]
     assert any(getattr(r, "code", None) == "INBOX_LOCK_TIMEOUT" for r in records)

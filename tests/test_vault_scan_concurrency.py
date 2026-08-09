@@ -162,8 +162,9 @@ async def test_limiter_token_is_released_after_a_scan_raises(
     """A scan that raises must still give its limiter token back — otherwise
     every failure would permanently shrink the effective concurrency.
     """
-    from app import application as application_module
     from mcp.shared.exceptions import MCPError
+
+    from app import application as application_module
 
     def failing_summarise(*args, **kwargs):
         raise RuntimeError("boom")
