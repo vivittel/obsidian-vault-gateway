@@ -63,6 +63,7 @@ from itertools import chain
 from app.exceptions import ValidationError
 from app.models import (
     _LANGUAGE_PATTERN,
+    _MAX_TOTAL_CODE_CHARS,
     ChatExport,
     CodeBlock,
     ExportMode,
@@ -198,13 +199,15 @@ _CODE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _BACKTICK_RUN_RE = re.compile(r"`+")
 _LANGUAGE_RE = re.compile(_LANGUAGE_PATTERN)
 
-# The counterpart of app.models._MAX_CODE_CHARS's per-block budget: no single
+# _MAX_TOTAL_CODE_CHARS (imported above) is the counterpart of
+# app.models._MAX_CODE_CHARS's per-block budget: no single
 # Field(max_length=...) can see the *sum* across every code block in one
 # export (steps[].blocks and the top-level code_blocks together), so this is
 # enforced here, on normalised data, like every other cross-field check in
-# this module. ~400 KiB worst-case UTF-8 (4 bytes/code point), comfortably
-# inside MAX_NOTE_SIZE_BYTES's default 1 MiB.
-_MAX_TOTAL_CODE_CHARS = 100_000
+# this module. Defined once on app.models (single source of truth, alongside
+# the other size constants schema/docs already reference) rather than
+# re-declared here, so a future change to the budget can't drift between the
+# schema-facing constant and the value runtime validation actually enforces.
 
 # Rendered only via _render_supplementary_sections, never through
 # _render_section/_HEADINGS: unlike every mode's own heading, "## コード" is

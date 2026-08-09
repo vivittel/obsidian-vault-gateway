@@ -374,7 +374,7 @@
         "description": "One fenced code block: a command, a config file, a log, CLI output —\nanything whose line breaks and indentation must survive verbatim.\n\nRendered as-is inside a dynamically-sized Markdown fence (docs/adr/\n0009-*.md): no line-breaking, no whitespace collapsing, no Markdown\nescaping is applied to `content`. Unlike `TextBlock.content`, `content`\nhere has `min_length=1` — a rich-object code block carries no meaning\nwhen empty, and (unlike a legacy plain-string step) there is no\nbackward-compatibility reason to accept one.",
         "properties": {
           "content": {
-            "description": "The code/config/log/output itself, exactly as it should appear.",
+            "description": "The code/config/log/output itself. Rendered verbatim/structure-preserving: indentation and blank lines are kept exactly, but this is not byte-level lossless — line endings are normalised to LF, non-tab/newline control characters are stripped, and at most one trailing newline is collapsed (a second one is kept as a deliberate blank line). See docs/adr/0009-*.md.",
             "maxLength": 8000,
             "minLength": 1,
             "title": "Content",

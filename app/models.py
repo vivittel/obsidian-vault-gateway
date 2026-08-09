@@ -262,7 +262,14 @@ class CodeBlock(BaseModel):
         ),
     )
     content: CodeContent = Field(
-        description="The code/config/log/output itself, exactly as it should appear."
+        description=(
+            "The code/config/log/output itself. Rendered verbatim/structure-"
+            "preserving: indentation and blank lines are kept exactly, but "
+            "this is not byte-level lossless — line endings are normalised "
+            "to LF, non-tab/newline control characters are stripped, and at "
+            "most one trailing newline is collapsed (a second one is kept "
+            "as a deliberate blank line). See docs/adr/0009-*.md."
+        )
     )
 
 
