@@ -1,11 +1,11 @@
 """Note reading (IMPLEMENTATION_PLAN sections 6.3 and 8).
 
-Split out of ``routers/notes.py`` so the read path is transport-neutral: this
-is the one place both the REST router and, from Phase 1.5, the MCP
-``read_note`` tool call to turn a caller-supplied vault-relative path into a
-:class:`~app.models.NoteResponse`. Like every other service, it takes the
-root/limits it needs as arguments rather than reaching for ``Settings``
-itself (see app/config.py's docstring).
+Transport-neutral: this is the one place the MCP ``read_note`` tool calls to
+turn a caller-supplied vault-relative path into a
+:class:`~app.models.NoteResponse` (REST's own read route was removed —
+docs/adr/0010-*.md). Like every other service, it takes the root/limits it
+needs as arguments rather than reaching for ``Settings`` itself (see
+app/config.py's docstring).
 """
 
 from __future__ import annotations

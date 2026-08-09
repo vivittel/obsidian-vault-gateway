@@ -1177,3 +1177,130 @@ semanticsのescape、supplementary sectionという新カテゴリの位置づ�
 （実Vault・本番`obsidian-api.tokonemore.com`は使用せず）に書き込んだ
 ノートを`read_note`で読み戻し、`markdown-it-py`のfence token contentが
 `canonicalise_code(入力) + "\n"`と一致することを確認した。
+
+## REST API を `/api/v1/health` のみに縮小（docs/adr/0010-*.md）
+
+REST は 8 エンドポイントから `GET /api/v1/health`（認証なし）1 本のみに
+縮小した。MCP が機能面の唯一のインターフェースになる（ADR-0001 の延長）。
+
+### 実装
+
+4 段階のコミットに分けた（`git log --oneline` で確認可能）。
+
+1. **テスト移行**（production code 無変更）: `tests/test_{search,vault,
+   notes,inbox}.py` を `GatewayApplication` 直呼びへ書き換え、
+   `tests/conftest.py` に共有 `application` fixture を追加（既存 2 箇所の
+   重複定義を集約）。この時点で `pytest -q` が無変更のまま緑であることを
+   確認し、移行が同じ application/service 層の振る舞いを検証していることの
+   根拠とした。
+2. **REST 実装の削除**: `app/routers/{search,notes,vault,inbox}.py` を削除。
+   `app/main.py`（router 登録・`RequestSizeLimitMiddleware` 登録・
+   description・auth-disabled warning）、`app/auth.py`（`require_token`/
+   `bearer_scheme`/`CredentialsDep` 削除、`verify_bearer_token` は
+   `app/mcp_auth.py` 用に残す）、`app/models.py`（`InboxNoteCreateRequest`/
+   `InboxNoteAppendRequest`/`_MAX_CONTENT_CHARS` 削除）、`app/middleware.py`
+   （`RequestSizeLimitMiddleware` 削除、`AccessLogMiddleware` から
+   `note_path`/`result_count`/`query_length` の scope-state 受け渡しを削除）
+   を変更。`GatewayApplication`（`app/application.py`）はロジック無変更
+   （docstring のみ）。この段階で依存していた `tests/test_{auth,
+   error_envelope,middleware,logging,log_format,vault_scan_concurrency,
+   rest_regression}.py` も同時に削除・retarget し、`pytest -q` を緑に保った
+   （2 点、実行して初めて判明した問題を修正: `/api/v1/health` は DEBUG
+   ログなので INFO capture のテストでは別ルートか `caplog.set_level(DEBUG)`
+   が必要だったこと、`mcp.call_tool()` はエラー時に `is_error=True` を返す
+   のではなく `MCPError` を raise すること）。
+3. **REST 表面テストの書き換えと `openapi.json` 再生成**: `test_openapi.py`
+   の `EXPECTED_OPERATIONS` を health 1 件に、`test_every_reachable_
+   error_code_appears_on_some_operation` を `test_rest_surface_is_exactly_
+   health`（`set(schema["paths"]) == {"/api/v1/health"}` かつ
+   `securitySchemes` 不在）に置き換え。`components.schemas` の完全一致は
+   assert しない（pydantic の生成形式に依存するため）。
+   `scripts/export_openapi.py` で `openapi.json` を再生成
+   （73KB → 4 schema）。
+4. **stale docstring 一掃 + docs/ADR-0010 + 最終検証**: `app/mcp_server.py`
+   `app/runtime.py` `app/mcp_auth.py` `app/services/note_service.py`
+   `app/logging_config.py` `app/config.py` `app/models.py` `app/__init__.py`
+   `.env.example` の「REST or MCP」「both transports」等の古い前提記述を
+   実態（MCP 単独、または REST は health のみ）に合わせて修正（ロジック
+   変更なし）。`tests/test_mcp_auth.py`/`test_mcp_tools.py` の 2 箇所も
+   削除済みシンボル（`require_token`）や成立しなくなった比較
+   （「REST parity」「unlike REST's access log」）を修正。新規
+   `docs/adr/0010-reduce-rest-surface-to-health-only.md`（11 decision
+   items）。`README.md`（intro・Security invariants・MCP 節・
+   REST 節の全面縮小・Logging サンプル・OMV verification checklist の
+   curl 群を MCP 経由に置換）、`Usage.md`（REST API の位置づけ・ADR 一覧）、
+   `docs/caddy/obsidian-api.Caddyfile`（`/api/v1/*` → `/api/v1/health`）を
+   更新。`docs/IMPLEMENTATION_PLAN.md` は歴史的記録として本文は保持し、
+   古いエンドポイント一覧の節の先頭に ADR-0010 へのポインタを追加のみ。
+
+### 意図的に変更しなかったもの
+
+- `GatewayApplication`（`app/application.py`）のロジック。MCP 8 ツールの
+  振る舞いは一切変わらない。
+- `app/exceptions.py`（`ErrorCode` 体系）。未マッチ REST パスの 404 が
+  既存挙動のまま `NOTE_NOT_FOUND` を返す点は意味論的に不自然だが、
+  transport 汎用の route-not-found コード追加は範囲外（ADR-0010 決定 8）。
+- `app/main.py` の 4 つの exception handler。`handle_validation_error` は
+  現在到達不能だが、将来 REST route が追加された際の envelope 不変条件の
+  砦として残す（ADR-0010 決定 5）。
+- FastAPI の `/docs`/`/redoc`/`/openapi.json`。無認証で残る
+  （`docs_url=None` 等は不採用、ADR-0010 決定 2）。例示 Caddy 構成
+  （`/api/v1/health` 完全一致）からは到達不能になるが、8000/tcp 直接では
+  従来どおり応答する。
+
+### 検証結果
+
+`.venv/bin/pytest -q` → 873 passed（レビュー指摘反映後の実測値。
+`query_length`/`q_len` 復活に伴う `tests/test_mcp_tools.py` の追加3件を含む）。
+`.venv/bin/ruff check .` → All checks passed。
+`.venv/bin/python scripts/export_openapi.py --check` → up to date。
+`docker compose config` → この開発環境に docker が無いため未実行
+（`compose.yaml` 自体は本変更で触っていない）。
+
+手動確認:
+- `openapi.json` の `paths` が `["/api/v1/health"]` のみ、
+  `components.securitySchemes` が存在しないこと。
+- `TestClient` で `/api/v1/search`・`/api/v1/notes`・`/api/v1/inbox/notes`
+  が `{"error": {"code": "NOTE_NOT_FOUND", "message": "Not Found"}}` を
+  返すこと（FastAPI 標準の `{"detail": ...}` ではない）。
+- `/docs`・`/openapi.json` が 200 のままであること。
+- `grep -rn "api/v1/" README.md Usage.md docs/caddy/` の残存参照が
+  `/api/v1/health` のみであること。
+- `grep -rn "require_token\|InboxNoteCreateRequest\|InboxNoteAppendRequest\|
+  RequestSizeLimitMiddleware" app tests` が空であること。
+- stale comment sweep（`grep -RniE "REST routers|REST's /search|both
+  transports|REST and MCP|MCP and REST|for REST or MCP" app README.md
+  Usage.md docs .env.example --exclude-dir=build`）: `app/` 配下のヒットは
+  すべて内容として正確（health も REST リクエストである、`ErrorCode` の
+  version advertisement は両 transport 共通、等）。`docs/IMPLEMENTATION_
+  PLAN.md`・`PHASE2_PLAN.md`・ADR-0001/0004/0006/0007 のヒットは歴史記録
+  として残して正しい。
+- `.venv/bin/pytest tests/test_mcp_tools.py tests/test_mcp_protocol.py
+  tests/test_mcp_auth.py tests/test_health.py -q` → 180 passed
+  （MCP 8 ツールと health が無変更で動くこと。実測値は上と同じ理由で更新）。
+
+### PR #21 再レビューでの追加修正（2巡目）
+
+1. **P2**: README OMV checklist の `$QUERY`/`$NOTE`/`$REAL_NOTE_PATH` を
+   単純な文字列連結で JSON-RPC body に埋め込んでいたため、値に `"` や `\`
+   が含まれると壊れた JSON になる問題を修正。`jq -n --arg` でペイロードを
+   組み立てる形に変更し、`jq` が OMV ホストで前提であることを明記した。
+2. **P3**: PR 本文・本ファイルのテスト件数を実測値（873/180）に更新。
+   これは別途 `query_length`/`q_len` 復活修正（`ce7256f`、`AccessLogMiddleware`
+   削除時に誤って落ちていた IMPLEMENTATION_PLAN section 14 の「検索語の
+   長さ」要件を `search_notes` の `_McpCall` に復元）で追加された
+   `tests/test_mcp_tools.py` の3テストによる増分。
+3. 軽微: `test_mcp_access_log_records_query_length_not_the_query` の
+   docstring が「削除済みの REST `/search` route が満たす必要がある」と
+   読める文言だったため、要件は ADR-0010 以前からの既存要件で現在は
+   `search_notes` のみが対象、という文言に修正。
+
+### 未解決・残存事項（ADR-0010 に記録済み）
+
+- 生 Markdown（`content`/`frontmatter`）でのノート新規作成は完全に廃止。
+  実運用では未使用という前提に基づく判断。
+- `InboxNoteAppendRequest` の `_MAX_CONTENT_CHARS`（2,000,000）上限は消えたが、
+  MCP の `append_inbox_note` は元々この上限を持たず、`MAX_REQUEST_BYTES`/
+  `MAX_NOTE_SIZE_BYTES` が実効的な bound として変わらず機能する。
+- 将来 REST に body を受けるルートを追加する場合、`RequestSizeLimitMiddleware`
+  相当と `require_token` 相当の復活が必須（自動的には戻らない）。

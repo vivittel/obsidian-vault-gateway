@@ -68,9 +68,9 @@ openssl rand -hex 32
 
 ### REST API の位置づけ
 
-REST API も実装されていますが、主インターフェースは MCP です。REST API はヘルスチェック、診断、テスト、MCP を利用しないクライアント向けの補助機能として残されています。
+REST API は `GET /api/v1/health` のみです（`docs/adr/0010-reduce-rest-surface-to-health-only.md`）。検索・ノート読み取り・Vault 参照・Inbox 作成/追記など、すべての操作は MCP のツール経由でのみ行います。REST 側にはこれらの代替経路はありません。
 
-開発者自身は REST API を日常運用では使用していません。そのため、主要な MCP フローと比べると、実利用で見つかる使いにくさや設計上の不足が残っている可能性があります。通常は MCP を使用し、REST API を採用する場合は事前に必要な操作とエラー処理を検証してください。
+`/api/v1/health` は `docker healthcheck` や Caddy、curl での死活診断だけを目的としています。
 
 ## 運用全体の流れ
 
@@ -430,6 +430,7 @@ Gateway で保存した後の整理は、次のように Codex へ依頼しま�
 - ADR-0006: 関連ノートはクライアントが候補を選び、Gateway が保存時に再検証する
 - ADR-0007: duplicate detection は Inbox 直下だけを対象とする読み取り専用・助言的な機能とする
 - ADR-0009: `procedure.steps` はコードと説明文の順序を保持し、コードは `## コード` へ集約しない
+- ADR-0010: REST は `GET /api/v1/health` のみとし、操作はすべて MCP のツール経由とする
 - Issue #15: 会話アーカイブと長期的な知識を分け、昇格・整理は別のレビュー工程として扱う
 
 このため、export mode を Vault の分類名として使ったり、duplicate detection を Vault 全体の知識監査として扱ったり、Gateway に移動・統合・削除を追加したりしません。

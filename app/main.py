@@ -1,6 +1,6 @@
-"""ASGI entrypoint: the REST FastAPI app, the /mcp Streamable HTTP transport,
-and the top-level composition that combines them (MCP_IMPLEMENTATION_PLAN
-sections 9 and 15).
+"""ASGI entrypoint: ``rest_app`` (health-only REST — docs/adr/0010-*.md), the
+/mcp Streamable HTTP transport, and the top-level composition that combines
+them (MCP_IMPLEMENTATION_PLAN sections 9 and 15).
 
 ``app`` — the object Dockerfile's ``uvicorn app.main:app`` and
 ``docker-compose``'s healthcheck expect unchanged (MCP section 22: "CMDは既存
@@ -19,7 +19,10 @@ below) are installed via Starlette's ``ExceptionMiddleware``, which wraps
 all unless it fails ``/mcp``'s own ``Mount`` match first, so those handlers
 can never see, and can never rewrite, anything from the MCP transport — the
 exact property MCP_IMPLEMENTATION_PLAN section 15 asks to have "担保"
-(guaranteed), not just usually true.
+(guaranteed), not just usually true. This composition, and the reasoning
+above, holds regardless of how many routes ``rest_app`` carries — it is
+unaffected by docs/adr/0010-*.md's reduction of that surface to
+``GET /api/v1/health``.
 """
 
 from __future__ import annotations
@@ -45,8 +48,8 @@ from app.exceptions import ErrorCode, GatewayError, error_envelope
 # than here. See app/logging_config.py and app/mcp_server.py's comment above
 # `configure_logging(get_settings())`.
 from app.mcp_server import build_mcp_transport, mcp
-from app.middleware import AccessLogMiddleware, RequestSizeLimitMiddleware
-from app.routers import health, inbox, notes, search, vault
+from app.middleware import AccessLogMiddleware
+from app.routers import health
 
 if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
@@ -56,12 +59,13 @@ logger = logging.getLogger("obsidian_gateway")
 rest_app = FastAPI(
     title="Obsidian Vault Gateway",
     description=(
-        "Read-mostly gateway over an Obsidian vault: full-vault search, note "
-        "reads, vault tree/summary browsing, inbox duplicate-candidate "
-        "detection, and note creation and append restricted to "
-        "00_Inbox/ChatGPT. MCP (mounted at /mcp) is the primary interface; "
-        "this REST API is kept for health checks, curl-based diagnostics, "
-        "and regression tests. Every failing response uses the single "
+        "Health-only REST API (docs/adr/0010-*.md). MCP (mounted at /mcp) is "
+        "the sole functional interface — full-vault search, note reads, "
+        "vault tree/summary browsing, inbox duplicate-candidate detection, "
+        "and note creation/append restricted to 00_Inbox/ChatGPT are all "
+        "MCP tools, not REST routes. This REST API exists only for "
+        "`docker healthcheck`/Caddy/curl-based diagnostics against "
+        "GET /api/v1/health. Every failing response uses the single "
         "`{\"error\": {\"code\": ..., \"message\": ...}}` envelope described "
         "on each operation below — never FastAPI's default `{\"detail\": "
         "...}` shape."
@@ -109,14 +113,9 @@ async def handle_unexpected_error(_request: Request, _exc: Exception) -> JSONRes
     )
 
 
-rest_app.add_middleware(RequestSizeLimitMiddleware)
 rest_app.add_middleware(AccessLogMiddleware)
 
 rest_app.include_router(health.router, prefix=API_PREFIX)
-rest_app.include_router(search.router, prefix=API_PREFIX)
-rest_app.include_router(notes.router, prefix=API_PREFIX)
-rest_app.include_router(inbox.router, prefix=API_PREFIX)
-rest_app.include_router(vault.router, prefix=API_PREFIX)
 
 
 # --- MCP: built once at import time --------------------------------------
@@ -149,7 +148,7 @@ async def _lifespan(_app: Starlette) -> AsyncIterator[None]:
         # has already installed the formatter that renders it.
         logger.warning(
             "authentication_disabled",
-            extra={"detail": "AUTH_ENABLED=false: no bearer token is required for REST or MCP"},
+            extra={"detail": "AUTH_ENABLED=false: no bearer token is required for MCP"},
         )
 
     async with contextlib.AsyncExitStack() as stack:

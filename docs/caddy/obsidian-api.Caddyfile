@@ -1,16 +1,21 @@
 # Example Caddy site block for the gateway (IMPLEMENTATION_PLAN.md section 11,
-# MCP_IMPLEMENTATION_PLAN.md section 21).
+# MCP_IMPLEMENTATION_PLAN.md section 21, docs/adr/0010-*.md).
 #
 # Copy the relevant parts into your OMV Caddy configuration (or include this
 # file), replacing the hostname. Requirements this block satisfies:
 #   - HTTPS required, HTTP auto-redirected (Caddy's default behaviour)
-#   - only /mcp (primary) and /api/v1/* (diagnostics) are served — nothing
-#     else on this host name
+#   - only /mcp (the sole functional interface) and /api/v1/health
+#     (diagnostics only — REST carries no other route, docs/adr/0010-*.md)
+#     are served — nothing else on this host name. FastAPI's /docs, /redoc,
+#     and /openapi.json stay unreachable through this Caddyfile as a result,
+#     even though the application itself still serves them unauthenticated
+#     on 8000/tcp directly.
 #   - request body size is capped at MAX_REQUEST_BYTES's default (2 MiB,
 #     U3), matching the app's own limit rather than a rounder but different
 #     value — the `max_size 2MiB` below is hardcoded, not read from the
 #     container's environment, so update it too if MAX_REQUEST_BYTES is ever
-#     overridden away from its default
+#     overridden away from its default. This only bounds what reaches /mcp
+#     through Caddy — REST's /api/v1/health takes no body at all.
 #   - access is logged
 #   - kept on its own host name, separate from any CouchDB/LiveSync endpoint
 #
@@ -36,7 +41,7 @@ obsidian-api.example.com {
         reverse_proxy obsidian-api:8000
     }
 
-    handle /api/v1/* {
+    handle /api/v1/health {
         reverse_proxy obsidian-api:8000
     }
 

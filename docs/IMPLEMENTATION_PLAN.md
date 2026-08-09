@@ -214,6 +214,10 @@ MCP Python SDKは`mcp==2.0.0`に厳密固定する。実装開始時点でPyPI�
 
 ### REST
 
+> 本節は歴史的記録。`docs/adr/0010-reduce-rest-surface-to-health-only.md` により
+> REST は `GET /api/v1/health` のみに縮小され、以下のエンドポイント一覧は
+> 現状を反映していない。
+
 既存エンドポイントを維持する。
 
 ```text
@@ -710,10 +714,11 @@ INTERNAL_ERROR
 - 結果件数
 
 **MCPでの逸脱（U1）**: MCPアクセスログは`transport=mcp` / `tool` / `status` /
-`duration_ms` / `result_count`のみを記録し、読み取り・作成したノートの相対パス
-（`note_path`）は記録しない。REST側は上記のとおり相対パスを記録するため、
-transport間でログ項目が完全には一致しない。両者を統一するのではなく、MCP側を
-より保守的（記録項目を少なく）にする方向で意図的に逸脱している。
+`duration_ms` / `query_length`（`search_notes`のみ） / `result_count`のみを
+記録し、読み取り・作成したノートの相対パス（`note_path`）は記録しない。REST側は
+上記のとおり相対パスを記録するため、transport間でログ項目が完全には一致しない。
+両者を統一するのではなく、MCP側をより保守的（記録項目を少なく）にする方向で
+意図的に逸脱している。
 
 記録しない項目:
 
@@ -807,6 +812,10 @@ handle @obsidian_api {
 ## 17. テスト計画
 
 ### 既存REST回帰
+
+> 本節は歴史的記録。`docs/adr/0010-reduce-rest-surface-to-health-only.md` により
+> 該当機能の回帰テストは `GatewayApplication` 直呼びまたは MCP 経由のテストへ
+> 移行済み。REST 自体は `GET /api/v1/health` のみ。
 
 - health
 - 認証なし401

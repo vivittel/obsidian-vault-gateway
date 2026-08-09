@@ -48,15 +48,17 @@ Format is aligned plain text rather than JSON because the logs are read in
 Portainer's and OMV's plain-text log viewers, the field set is fixed by
 sections 14 and 16, and — decisively — the MCP access log contains no
 caller-controlled free text at all (``transport``, ``method``, ``tool``,
-``status``, ``reason`` and ``code`` are closed vocabularies; ``duration_ms``
-and ``result_count`` are numbers; section 16's U1 keeps ``note_path`` out of
+``status``, ``reason`` and ``code`` are closed vocabularies; ``duration_ms``,
+``query_length`` and ``result_count`` are numbers — the query itself is
+never logged, only its length; section 16's U1 keeps ``note_path`` out of
 MCP logs entirely). The log-injection and split-line risks that would argue
 for JSON's structural escaping therefore do not arise on the primary
 transport. :class:`PlainLogFormatter` still escapes newlines itself — see
-:func:`_escape` — because REST's ``note_path`` *is* caller-derived and
-``app/services/path_security.py`` rejects null bytes and backslashes but not
-newlines. Swapping in a JSON formatter later means adding one class here and
-changing which one :func:`configure_logging` installs.
+:func:`_escape` — because an unstructured record's own message (e.g. an
+exception traceback, or anything a future field puts through this
+formatter's tail) is free text and can legitimately contain one. Swapping
+in a JSON formatter later means adding one class here and changing which
+one :func:`configure_logging` installs.
 """
 
 from __future__ import annotations
@@ -111,10 +113,15 @@ def _escape(value: object) -> str:
     """Render a value on a single line.
 
     One log record must be one log line: a value containing a newline would
-    otherwise split into two lines and read as two independent events. REST's
-    ``note_path`` is derived from a real filename, and a newline in a filename
-    is legal on Linux even though app/services/path_security.py rejects null
-    bytes and backslashes, so this is not purely theoretical.
+    otherwise split into two lines and read as two independent events. Applied
+    to every allow-listed tail value, not just free text (an unstructured
+    record's own message, an exception traceback): the ``note_path``/``note``
+    entry below is kept for exactly this reason even though no current caller
+    populates it (REST is health-only now and MCP's U1 keeps note paths out
+    of its own logs entirely — see this module's docstring) — a note path is
+    derived from a real filename, and a newline in a filename is legal on
+    Linux even though app/services/path_security.py rejects null bytes and
+    backslashes, so this is not purely theoretical.
     """
     text = str(value).replace("\\", "\\\\")
     return text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
@@ -128,7 +135,7 @@ class PlainLogFormatter(logging.Formatter):
     ``$4`` method, ``$5`` target, ``$6`` status, ``$7`` duration, then the
     tail::
 
-        2026-08-02T21:14:03.412+0900  INFO  rest    GET        /api/v1/notes
+        2026-08-02T21:14:03.412+0900  DEBUG rest    GET        /api/v1/health
         2026-08-02T21:14:07.883+0900  INFO  mcp     tools/call search_notes
 
     Everything else — uvicorn's startup lines, the MCP SDK's own messages, and
@@ -200,7 +207,7 @@ class PlainLogFormatter(logging.Formatter):
         return _escape(record.name.split(".", 1)[0])[:_SOURCE_WIDTH]
 
     def _target(self, record: logging.LogRecord) -> str:
-        """What the operation acted on: a REST route, an MCP tool, or the event.
+        """What the operation acted on: the health route, an MCP tool, or the event.
 
         Falling back to the message keeps a record with neither — currently
         only ``mcp_auth_failed``, rejected before any tool is named — from

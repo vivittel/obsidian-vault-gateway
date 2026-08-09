@@ -1,51 +1,19 @@
+"""app.auth.verify_bearer_token and Settings.auth_enabled/api_token.
+
+REST's own bearer-token dependency (``require_token``) was removed along
+with the rest of the REST surface (docs/adr/0010-*.md) — ``/mcp``'s
+authentication middleware (app/mcp_auth.py) is now ``verify_bearer_token``'s
+only caller, and is exercised end-to-end in tests/test_mcp_auth.py, including
+the ``AUTH_ENABLED=false`` no-op case.
+"""
+
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.auth import verify_bearer_token
-from app.config import Settings, get_settings
+from app.config import Settings
 
 TEST_API_TOKEN = "test-token-0123456789abcdef"  # noqa: S105 - test fixture, not a real secret
-
-PROTECTED_ENDPOINTS = [
-    ("GET", "/api/v1/search"),
-    ("GET", "/api/v1/notes?path=Knowledge/no_frontmatter.md"),
-]
-
-
-@pytest.mark.parametrize(("method", "url"), PROTECTED_ENDPOINTS)
-def test_missing_token_rejected(client: TestClient, method: str, url: str) -> None:
-    response = client.request(method, url)
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "UNAUTHORIZED"
-
-
-@pytest.mark.parametrize(("method", "url"), PROTECTED_ENDPOINTS)
-def test_wrong_token_rejected(client: TestClient, method: str, url: str) -> None:
-    response = client.request(method, url, headers={"Authorization": "Bearer wrong-token"})
-    assert response.status_code == 401
-
-
-@pytest.mark.parametrize(("method", "url"), PROTECTED_ENDPOINTS)
-def test_malformed_auth_header_rejected(client: TestClient, method: str, url: str) -> None:
-    response = client.request(method, url, headers={"Authorization": "Basic dXNlcjpwYXNz"})
-    assert response.status_code == 401
-
-
-def test_correct_token_accepted(client: TestClient, auth_headers: dict[str, str]) -> None:
-    response = client.get("/api/v1/search", headers=auth_headers)
-    assert response.status_code == 200
-
-
-def test_error_body_never_leaks_detail(client: TestClient) -> None:
-    response = client.get("/api/v1/search")
-    body = response.json()
-    assert set(body.keys()) == {"error"}
-    assert set(body["error"].keys()) == {"code", "message"}
-
-
-# verify_bearer_token: the pure comparison shared by the REST dependency above
-# and, from Phase 1.5 on, the MCP ASGI auth middleware (app/mcp_auth.py).
 
 
 def test_verify_bearer_token_accepts_matching_value() -> None:
@@ -126,38 +94,3 @@ def test_api_token_min_length_applies_after_stripping() -> None:
 def test_api_token_whitespace_is_stripped_for_a_valid_token() -> None:
     settings = Settings(**_settings_kwargs(api_token=f"  {TEST_API_TOKEN}  "))
     assert settings.api_token == TEST_API_TOKEN
-
-
-# AUTH_ENABLED=false: require_token becomes a no-op for REST.
-
-
-def _disable_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AUTH_ENABLED", "false")
-    get_settings.cache_clear()
-
-
-@pytest.mark.parametrize(("method", "url"), PROTECTED_ENDPOINTS)
-def test_auth_disabled_allows_missing_token(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, method: str, url: str
-) -> None:
-    _disable_auth(monkeypatch)
-    response = client.request(method, url)
-    assert response.status_code == 200
-
-
-@pytest.mark.parametrize(("method", "url"), PROTECTED_ENDPOINTS)
-def test_auth_disabled_allows_wrong_token(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, method: str, url: str
-) -> None:
-    _disable_auth(monkeypatch)
-    response = client.request(method, url, headers={"Authorization": "Bearer wrong-token"})
-    assert response.status_code == 200
-
-
-@pytest.mark.parametrize(("method", "url"), PROTECTED_ENDPOINTS)
-def test_auth_disabled_allows_malformed_auth_header(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, method: str, url: str
-) -> None:
-    _disable_auth(monkeypatch)
-    response = client.request(method, url, headers={"Authorization": "Basic dXNlcjpwYXNz"})
-    assert response.status_code == 200
