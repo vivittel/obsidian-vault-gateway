@@ -35,8 +35,10 @@ bare `/mcp` path is normalized in-scope rather than redirected,
 `docs/adr/0009-verbatim-code-blocks-in-structured-exports.md` for how
 `procedure.steps` preserves code content and step ordering,
 `docs/adr/0010-reduce-rest-surface-to-health-only.md` for why REST was
-reduced to `GET /api/v1/health`, and `docs/MCP_IMPLEMENTATION_PLAN.md` for
-the MCP design in full. Phase 1 and Phase 1.5 (the REST-only and
+reduced to `GET /api/v1/health`,
+`docs/adr/0011-rich-body-blocks-in-structured-exports.md` for how every
+body field can carry a table, a blockquote/callout, or a nested/task-list
+bullet, and `docs/MCP_IMPLEMENTATION_PLAN.md` for the MCP design in full. Phase 1 and Phase 1.5 (the REST-only and
 MCP-introduction predecessors) are documented as completed history in
 `docs/PHASE1_PLAN.md` and `docs/IMPLEMENTATION_PLAN.md`.
 
@@ -157,14 +159,42 @@ structure-preservingly, not just as one flattened line** (issue #12 follow-up
 `{"type": "code", "language": ..., "label": ..., "content": ...}` — so a step
 can interleave explanation and commands in the order the conversation had
 them ("open the file, edit it, restart it") instead of losing indentation,
-blank lines, and fence markers to the single-line rendering every other
-field uses. A bare string is still accepted as a backward-compatible
-shorthand for a step with one text block — every export with no code renders
-exactly as before this feature existed. Code that does not belong to any
-single step (a finished config file, a complete script, an appendix log) can
-instead go in the top-level `export.code_blocks`, available in every mode,
-rendered as the optional `## コード` section above — never both: code that
-belongs to a step stays in that step, so the procedure keeps its order.
+blank lines, and fence markers to the single-line rendering a plain bullet
+uses. A bare string is still accepted as a backward-compatible shorthand for
+a step with one text block — every export with no code renders exactly as
+before this feature existed. Code that does not belong to any single step (a
+finished config file, a complete script, an appendix log) can instead go in
+the top-level `export.code_blocks`, available in every mode, rendered as the
+optional `## コード` section above — never both: code that belongs to a step
+stays in that step, so the procedure keeps its order.
+
+**Every body field can carry a table, a blockquote/Obsidian callout, or a
+nested/task-list bullet, in the order the client sent them** (`docs/adr/
+0011-*.md`). A bare string is still an ordinary bullet (backward-compatible,
+byte-identical to before this feature existed), but any item in a list such
+as `decisions`, `design`, or `topics[].points` can instead be:
+
+- `{"type": "table", "label": ..., "headers": [...], "alignments": [...], "rows": [[...], ...]}`
+  — the Gateway generates the table's Markdown itself from structured
+  `headers`/`rows` rather than accepting client-written GFM syntax, and
+  rejects a mismatched row length or an empty header outright instead of
+  rendering a corrupt table.
+- `{"type": "quote", "callout": ..., "title": ..., "lines": [...]}` — a
+  plain blockquote when `callout` is omitted, or an Obsidian callout
+  (`> [!warning] title`) when it is set. `title` is only valid together
+  with `callout`.
+- `{"type": "bullet", "content": ..., "depth": ..., "checked": ...}` — an
+  ordinary bullet by default; `depth` nests it under the previous bullet
+  (at most one level deeper at a time — a bigger jump is rejected, never
+  silently flattened), and `checked` (`true`/`false`) renders a GFM
+  task-list checkbox instead of a plain marker.
+
+A table or blockquote/callout ends the current bullet list and renders as
+its own block, directly under the field's heading, at the point the client
+placed it — never collected into a separate section the way `code_blocks`
+is. `ProcedureStep.blocks` accepts the same table/quote options alongside
+`text`/`code`, but not `bullet` — a step's own numbered-list structure
+already has its own indent rules.
 
 **Related notes are client-selected, Gateway-verified** (issue #13 /
 `docs/adr/0006-*.md`). The client calls `search_notes`, picks relevant
@@ -483,7 +513,12 @@ output to confirm a rendered note's *structure*, not just its raw text:
 step numbering never breaks (including step 10 and beyond, whose 4-character
 marker needs a wider continuation indent than steps 1-9), a code fence never
 closes early on embedded backtick runs, and a step's later text stays in the
-same list item as its earlier code.
+same list item as its earlier code. The same parser confirms every rich
+body block (`docs/adr/0011-*.md`) — a bullet/table/quote sequence renders
+as siblings, never nested; a mismatched table row or an empty header is
+rejected rather than silently degraded; a bullet's nesting-depth jump is
+rejected, never clamped; and every block-forgery hazard `_escape_block_start`
+guards against holds inside a quote line, not only inside a bullet.
 
 `tests/test_related_notes.py` covers `app/services/related_notes.py` —
 verified related-note wikilink resolution (issue #13 / `docs/adr/0006-*.md`)
