@@ -1992,3 +1992,265 @@ def test_code_block_label_counts_toward_the_total_block_budget() -> None:
     assert excinfo.value.message == (
         f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
     )
+
+
+# --- Schema: QuoteBlock ----------------------------------------------------------
+
+
+def test_quote_block_rejects_unknown_field() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(tldr=["ok"], design=[{"type": "quote", "lines": ["a"], "bogus": 1}])
+
+
+def test_quote_lines_empty_list_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(tldr=["ok"], design=[{"type": "quote", "lines": []}])
+
+
+@pytest.mark.parametrize("callout", ["1bad", "has space", "-leading-dash", ""])
+def test_quote_invalid_callout_is_rejected_at_schema_level(callout: str) -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(tldr=["ok"], design=[{"type": "quote", "callout": callout, "lines": ["a"]}])
+
+
+@pytest.mark.parametrize("callout", ["note", "warning", "my-custom-type", "A"])
+def test_quote_valid_callout_examples_are_accepted(callout: str) -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "quote", "callout": callout, "lines": ["a"]}],
+    )
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+# --- Formatter: title requires callout; an empty quote is dropped --------------
+
+
+def test_quote_title_without_callout_is_rejected() -> None:
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "quote", "title": "t", "lines": ["a"]}]
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "design[0]: quote title requires callout."
+
+
+def test_quote_with_only_whitespace_lines_is_dropped() -> None:
+    # The same "min_length=1 at the schema layer, still droppable once
+    # whitespace-only" precedent _normalise_code_block already sets.
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=["a", {"type": "quote", "lines": ["   ", "\t"]}, "b"]
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert ">" not in rendered.content
+    assert "- a\n- b" in rendered.content
+
+
+# --- Structure: plain blockquote, callout header, sibling blocks ---------------
+
+
+def test_quote_without_callout_renders_as_a_plain_blockquote() -> None:
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "quote", "lines": ["a", "b"]}]
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    design_section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert design_section == "> a\n> b"
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "blockquote_open") == 1
+
+
+def test_quote_with_callout_renders_the_header_line() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "quote", "callout": "warning", "title": "注意", "lines": ["a"]}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    design_section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert design_section == "> [!warning] 注意\n> a"
+
+
+def test_quote_without_title_renders_the_header_line_with_no_trailing_space() -> None:
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "quote", "callout": "note", "lines": ["a"]}]
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    design_section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert design_section == "> [!note]\n> a"
+
+
+def test_quote_title_keeps_inline_markdown_live() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "quote", "callout": "note", "title": "**bold**", "lines": ["a"]}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    header_inline = next(
+        t
+        for t in tokens
+        if t.type == "inline" and any("bold" in c.content for c in (t.children or []))
+    )
+    assert any(c.type == "strong_open" for c in header_inline.children)
+
+
+def test_bullet_quote_bullet_render_as_sibling_blocks_in_one_field() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=["a", {"type": "quote", "lines": ["quoted"]}, "b"],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 2
+    assert sum(1 for t in tokens if t.type == "blockquote_open") == 1
+
+
+# --- Block-forgery hazards inside a quote line are all escaped -----------------
+
+_QUOTE_HAZARD_LINES = [
+    "# heading",
+    "> nested quote",
+    "<tag>",
+    "[ref]: url",
+    "- bullet",
+    "* bullet",
+    "+ bullet",
+    "```fence",
+    "~~~fence",
+    "---",
+    "===",
+    "___",
+    "1. item",
+    "1) item",
+]
+
+
+@pytest.mark.parametrize("hazard_line", _QUOTE_HAZARD_LINES)
+def test_quote_line_hazard_classes_are_all_escaped(hazard_line: str) -> None:
+    # _escape_block_start's full hazard set (the same set the pre-existing
+    # bullet/tldr tests pin) must also hold for a quote line — testing only
+    # "#" would not catch a future narrowing of _BLOCK_HAZARD_RE that a
+    # quote-specific code path happened not to exercise.
+    baseline = render_chat_export(
+        ChatExport(mode="technical", tldr=["ok"], design=[{"type": "quote", "lines": ["safe"]}]),
+        title="t",
+        now=_NOW,
+    )
+    baseline_headings = sum(1 for t in _MD.parse(baseline.content) if t.type == "heading_open")
+
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "quote", "lines": [hazard_line]}]
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "blockquote_open") == 1
+    assert sum(1 for t in tokens if t.type == "hr") == 0
+    assert sum(1 for t in tokens if t.type == "fence") == 0
+    assert sum(1 for t in tokens if t.type == "html_block") == 0
+    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 0
+    assert sum(1 for t in tokens if t.type == "ordered_list_open") == 0
+    assert sum(1 for t in tokens if t.type == "heading_open") == baseline_headings
+
+
+# --- Quote inside a procedure step ----------------------------------------------
+
+
+def test_quote_in_a_step_stays_within_that_step_and_preserves_numbering() -> None:
+    steps = [{"blocks": [{"type": "text", "content": f"step {i}"}]} for i in range(1, 11)]
+    steps[9] = {
+        "blocks": [
+            {"type": "text", "content": "step 10"},
+            {"type": "quote", "callout": "warning", "lines": ["careful"]},
+        ]
+    }
+    export = ChatExport(mode="procedure", tldr=["ok"], steps=steps)
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "ordered_list_open") == 1
+    assert sum(1 for t in tokens if t.type == "list_item_open") == 10
+
+    item_index = 0
+    quote_item_index = None
+    for token in tokens:
+        if token.type == "list_item_open":
+            item_index += 1
+        elif token.type == "blockquote_open":
+            quote_item_index = item_index
+    assert quote_item_index == 10
+
+
+def test_quote_first_step_is_rejected() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[{"blocks": [{"type": "quote", "lines": ["a"]}]}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "steps[0] must start with a text block."
+
+
+# --- Quote lines/title count toward the total block budget ---------------------
+
+
+def test_quote_lines_count_toward_the_total_block_budget() -> None:
+    # A single QuoteBlock cannot reach the budget on its own (30 lines x
+    # 1000 chars, its own schema max, is only 30,000 chars), so four
+    # quotes of 25 lines x 1000 chars each — 100,000 chars total, still
+    # within every per-item schema bound — sit exactly at the budget;
+    # a fifth line anywhere pushes the total one character over.
+    quote = {"type": "quote", "lines": ["x" * 1000 for _ in range(25)]}  # 25,000 chars
+    at_budget = ChatExport(
+        mode="technical", tldr=["ok"], design=[dict(quote) for _ in range(4)]
+    )
+    render_chat_export(at_budget, title="t", now=_NOW)  # 100_000 chars, must not raise
+
+    over_budget_quotes = [dict(quote) for _ in range(4)]
+    over_budget_quotes[0] = {"type": "quote", "lines": ["x" * 1000 for _ in range(26)]}
+    over_budget = ChatExport(mode="technical", tldr=["ok"], design=over_budget_quotes)
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(over_budget, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
+    )
+
+
+def test_quote_title_counts_toward_the_total_block_budget() -> None:
+    # Same "exactly at budget, then +1 via one field alone" shape as the
+    # lines test above, isolating the title's own contribution this time:
+    # four 25,000-char quotes sit exactly at budget; adding a 1-char title
+    # to one of them alone must push the identical export over.
+    quote = {"type": "quote", "lines": ["x" * 1000 for _ in range(25)]}
+    at_budget = ChatExport(
+        mode="technical", tldr=["ok"], design=[dict(quote) for _ in range(4)]
+    )
+    render_chat_export(at_budget, title="t", now=_NOW)  # 100_000 chars, must not raise
+
+    with_title = [dict(quote) for _ in range(4)]
+    with_title[0] = {**quote, "callout": "note", "title": "x"}
+    over_budget = ChatExport(mode="technical", tldr=["ok"], design=with_title)
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(over_budget, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
+    )
+
+
+def test_procedure_step_quote_is_never_moved_into_the_top_level_code_section() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "a"},
+                    {"type": "quote", "lines": ["careful"]},
+                ]
+            }
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "## コード" not in rendered.content

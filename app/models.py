@@ -174,6 +174,11 @@ _MAX_CODE_BLOCK_ITEMS = 10
 _MAX_TABLE_COLUMNS = 12
 _MAX_TABLE_ROWS = 100
 
+# Bound for a blockquote/callout's body (docs/adr/0011-*.md) — a realistic
+# ceiling for a note or warning pasted into a note, matching the other
+# rich-block container caps (_MAX_BLOCKS_PER_STEP, _MAX_CODE_BLOCK_ITEMS).
+_MAX_QUOTE_LINES = 30
+
 # _MAX_TOTAL_BLOCK_CHARS bounds the sum of every client-supplied string inside
 # every rich block in one export — code content/label, table label/headers/
 # rows, quote title/lines together (app/services/chat_export.py enforces this
@@ -342,7 +347,46 @@ class TableBlock(BaseModel):
     )
 
 
-StepBlock = Annotated[TextBlock | CodeBlock | TableBlock, Field(discriminator="type")]
+class QuoteBlock(BaseModel):
+    """One blockquote, or an Obsidian callout (docs/adr/0011-*.md):
+    ``> line`` for each of `lines`, optionally preceded by a
+    ``> [!callout] title`` header line.
+
+    `callout` is a pattern, not an enumerated vocabulary — the same choice
+    `CodeBlock.language` already makes (docs/adr/0009-*.md decision 5) —
+    since Obsidian accepts both its own built-in callout types and
+    arbitrary custom ones; the Gateway has no reason to maintain a list.
+    `title` is only meaningful alongside `callout`: a plain blockquote has
+    no header line to put a title on.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["quote"]
+    callout: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z][A-Za-z0-9-]{0,31}$",
+        description=(
+            "Optional Obsidian callout type, e.g. 'note', 'warning', 'tip', or "
+            "a custom type — any of these render '> [!callout] ...' instead of "
+            "a plain blockquote. Omit for an ordinary blockquote."
+        ),
+    )
+    title: str | None = Field(
+        default=None,
+        max_length=_MAX_LABEL_CHARS,
+        description="Optional callout header text. Only valid together with callout.",
+    )
+    lines: list[Line] = Field(
+        min_length=1,
+        max_length=_MAX_QUOTE_LINES,
+        description="The quoted text, one line per item.",
+    )
+
+
+StepBlock = Annotated[
+    TextBlock | CodeBlock | TableBlock | QuoteBlock, Field(discriminator="type")
+]
 
 
 class ProcedureStep(BaseModel):
@@ -362,7 +406,10 @@ class ProcedureStep(BaseModel):
     blocks: list[StepBlock] = Field(
         min_length=1,
         max_length=_MAX_BLOCKS_PER_STEP,
-        description="Ordered text/code/table parts of this step, in the order they should appear.",
+        description=(
+            "Ordered text/code/table/quote parts of this step, in the order they "
+            "should appear."
+        ),
     )
 
 
@@ -408,7 +455,9 @@ class BulletBlock(BaseModel):
     content: Line = Field(description="Text for this bullet.")
 
 
-BodyBlock = Annotated[BulletBlock | TableBlock, Field(discriminator="type")]
+BodyBlock = Annotated[
+    BulletBlock | TableBlock | QuoteBlock, Field(discriminator="type")
+]
 
 
 def _coerce_body_item(value: object) -> object:

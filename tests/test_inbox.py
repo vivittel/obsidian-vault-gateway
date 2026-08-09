@@ -299,6 +299,36 @@ def test_create_note_with_table_in_a_body_field(
     assert "## 表" not in written
 
 
+def test_create_note_with_quote_callout_in_a_body_field(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    # docs/adr/0011-*.md end-to-end: an Obsidian callout inside a
+    # mode-specific body field renders as "> [!type] title" plus quoted
+    # lines, not a separate section.
+    from app.models import ChatExport
+
+    application.create_chat_export_note(
+        title="Quote body test",
+        export=ChatExport(
+            mode="technical",
+            tldr=["ok"],
+            design=[
+                "案Aを採用した",
+                {
+                    "type": "quote",
+                    "callout": "warning",
+                    "title": "注意",
+                    "lines": ["本番では実行しない"],
+                },
+            ],
+        ),
+    )
+    written = (inbox_root / "Quote body test.md").read_text(encoding="utf-8")
+    assert "## 設計" in written
+    assert "> [!warning] 注意" in written
+    assert "> 本番では実行しない" in written
+
+
 def test_create_note_with_related_notes(
     application: GatewayApplication, inbox_root: Path
 ) -> None:

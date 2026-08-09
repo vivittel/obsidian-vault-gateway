@@ -196,6 +196,7 @@ async def test_create_inbox_note_body_field_accepts_a_bare_string_or_a_rich_bloc
     assert discriminated["discriminator"]["mapping"] == {
         "bullet": "#/$defs/BulletBlock",
         "table": "#/$defs/TableBlock",
+        "quote": "#/$defs/QuoteBlock",
     }
 
 
