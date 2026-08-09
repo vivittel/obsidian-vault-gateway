@@ -535,7 +535,12 @@ memory need rather than a leak.
 ### OMV verification checklist
 
 All `curl` commands use `-fsS` so a failure shows up as a non-zero exit code
-instead of scrolling past silently.
+instead of scrolling past silently. The commands below that embed a
+variable value (`$QUERY`, `$NOTE`, `$REAL_NOTE_PATH`) into a JSON-RPC body
+build it with `jq -n` rather than string-concatenating it into a
+single-quoted literal — a value containing `"` or `\` would otherwise
+produce invalid JSON. `jq` is assumed to be available on the OMV host for
+this reason.
 
 ```bash
 docker compose config
@@ -568,11 +573,15 @@ case "$NOTE$QUERY" in
   *)
     curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
          -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-         -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_notes","arguments":{"query":"'"$QUERY"'","limit":5}}}'
+         -d "$(jq -n --arg q "$QUERY" \
+              '{jsonrpc:"2.0",id:1,method:"tools/call",
+                params:{name:"search_notes",arguments:{query:$q,limit:5}}}')"
 
     curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
          -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-         -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_note","arguments":{"path":"'"$NOTE"'"}}}'
+         -d "$(jq -n --arg p "$NOTE" \
+              '{jsonrpc:"2.0",id:1,method:"tools/call",
+                params:{name:"read_note",arguments:{path:$p}}}')"
     ;;
 esac
 
@@ -619,7 +628,11 @@ curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
 # "## 関連ノート" section should contain exactly one wikilink, not two.
 curl -fsS -X POST "$BASE/mcp/" -H "Authorization: Bearer $API_TOKEN" \
      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_inbox_note","arguments":{"title":"MCP related notes check","export":{"tldr":["OMV checklist related-notes smoke test."],"related_notes":["'"$REAL_NOTE_PATH"'","Knowledge/does-not-exist.md"]}}}}'
+     -d "$(jq -n --arg real "$REAL_NOTE_PATH" \
+          '{jsonrpc:"2.0",id:1,method:"tools/call",
+            params:{name:"create_inbox_note",arguments:{title:"MCP related notes check",
+              export:{tldr:["OMV checklist related-notes smoke test."],
+                      related_notes:[$real,"Knowledge/does-not-exist.md"]}}}}')"
 ```
 
 Walk the vault tree a level at a time to confirm pagination works end to

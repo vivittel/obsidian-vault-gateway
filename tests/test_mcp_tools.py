@@ -903,11 +903,12 @@ async def test_mcp_access_log_never_contains_query_value(
 async def test_mcp_access_log_records_query_length_not_the_query(
     env: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """IMPLEMENTATION_PLAN section 14's "検索語の長さ" (search-term length) —
-    the one field REST's deleted /search route and MCP's search_notes both
-    still need to satisfy. A query is never omitted from ``query_length``
-    just because ``test_mcp_access_log_never_contains_query_value`` above
-    also proves the value itself never appears.
+    """IMPLEMENTATION_PLAN section 14's "検索語の長さ" (search-term length)
+    requirement predates docs/adr/0010-*.md's removal of REST's `/search`
+    route; `search_notes` is the only place left that must satisfy it. A
+    query is never omitted from ``query_length`` just because
+    ``test_mcp_access_log_never_contains_query_value`` above also proves the
+    value itself never appears.
     """
     caplog.set_level(logging.INFO, logger="obsidian_gateway.mcp")
     secret_query = "very-specific-search-term-xyz"

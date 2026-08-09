@@ -1250,7 +1250,8 @@ REST は 8 エンドポイントから `GET /api/v1/health`（認証なし）1 �
 
 ### 検証結果
 
-`.venv/bin/pytest -q` → 870 passed。
+`.venv/bin/pytest -q` → 873 passed（レビュー指摘反映後の実測値。
+`query_length`/`q_len` 復活に伴う `tests/test_mcp_tools.py` の追加3件を含む）。
 `.venv/bin/ruff check .` → All checks passed。
 `.venv/bin/python scripts/export_openapi.py --check` → up to date。
 `docker compose config` → この開発環境に docker が無いため未実行
@@ -1275,8 +1276,24 @@ REST は 8 エンドポイントから `GET /api/v1/health`（認証なし）1 �
   PLAN.md`・`PHASE2_PLAN.md`・ADR-0001/0004/0006/0007 のヒットは歴史記録
   として残して正しい。
 - `.venv/bin/pytest tests/test_mcp_tools.py tests/test_mcp_protocol.py
-  tests/test_mcp_auth.py tests/test_health.py -q` → 177 passed
-  （MCP 8 ツールと health が無変更で動くこと）。
+  tests/test_mcp_auth.py tests/test_health.py -q` → 180 passed
+  （MCP 8 ツールと health が無変更で動くこと。実測値は上と同じ理由で更新）。
+
+### PR #21 再レビューでの追加修正（2巡目）
+
+1. **P2**: README OMV checklist の `$QUERY`/`$NOTE`/`$REAL_NOTE_PATH` を
+   単純な文字列連結で JSON-RPC body に埋め込んでいたため、値に `"` や `\`
+   が含まれると壊れた JSON になる問題を修正。`jq -n --arg` でペイロードを
+   組み立てる形に変更し、`jq` が OMV ホストで前提であることを明記した。
+2. **P3**: PR 本文・本ファイルのテスト件数を実測値（873/180）に更新。
+   これは別途 `query_length`/`q_len` 復活修正（`ce7256f`、`AccessLogMiddleware`
+   削除時に誤って落ちていた IMPLEMENTATION_PLAN section 14 の「検索語の
+   長さ」要件を `search_notes` の `_McpCall` に復元）で追加された
+   `tests/test_mcp_tools.py` の3テストによる増分。
+3. 軽微: `test_mcp_access_log_records_query_length_not_the_query` の
+   docstring が「削除済みの REST `/search` route が満たす必要がある」と
+   読める文言だったため、要件は ADR-0010 以前からの既存要件で現在は
+   `search_notes` のみが対象、という文言に修正。
 
 ### 未解決・残存事項（ADR-0010 に記録済み）
 
