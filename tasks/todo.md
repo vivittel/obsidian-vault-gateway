@@ -1103,3 +1103,77 @@ path_security}.py`（補助関数の追加・共有）。テスト:
 あることが判明した（`limit`が小さいとconfidence `medium`の候補が
 confidence `low`の候補より先に切り捨てられ得る）。この修正は本PR自身の
 別セクションで扱う（confidenceを第一ソートキーへ変更、テスト追加）。
+
+# procedure.stepsのverbatim/structure-preserving対応（issue #12 follow-up、ADR-0009）
+
+## 背景
+
+`create_inbox_note`の構造化export（issue #12、ADR-0005）は「1フィールド=
+1 Markdown行」を前提としており、`one_line`の改行空白化・`_escape_block_start`
+のfenceエスケープにより、`procedure.steps`にコマンドや設定ファイルを
+そのまま保存できなかった。コードを独立した`## コード`セクションへ集約する
+案は、手順書の「説明→コード→説明→コード」という順序そのものを失うため
+不採用とした。
+
+## 変更内容
+
+`app.models.ProcedureStep`（`blocks: list[TextBlock | CodeBlock]`、
+discriminated union）を新設し、`ChatExport.steps`を`list[StepInput]`に変更。
+`_coerce_step`（`BeforeValidator`）により既存の`steps: ["文字列", ...]`は
+1つのtext blockを持つstepとして後方互換に解釈される。全モード共通の任意
+フィールド`ChatExport.code_blocks`（手順に属さない完成版コード用）も追加。
+
+`app/services/chat_export.py`に`_canonicalise_code`（CRLF/CR統一・制御文字
+除去・末尾LF最大1個吸収のみ、それ以外は変更しない verbatim/structure-
+preserving契約）、`_fence_for`（動的fence長）、`_escape_inline`
+（caption専用、CommonMark/GFM + Obsidian固有構文`#`/`^`/`==`/`$`/`%%`の
+escape）、`_normalise_steps`（先頭text block必須の検証を含む）、
+`_render_step`/`_render_fenced_code`（step番号由来のcontinuation indent）、
+`_render_supplementary_sections`（`## コード`、空なら省略）を追加。
+`_MODE_SECTIONS`/`_HEADINGS`（modeごとの固定見出し集合を扱う既存コード）は
+一切変更していない — `## コード`はADR-0005決定4の例外ではなく、新しい
+optional supplementary sectionという別カテゴリとして実装した。
+
+コード全体の合計文字数上限（`_MAX_TOTAL_CODE_CHARS = 100_000`、正規化後
+データに対して検証）を追加。単一fieldの`Field(max_length=...)`では複数
+フィールドをまたぐ合計を検証できないため。
+
+主な変更ファイル: `app/models.py`（新モデル3つ、`_MAX_CODE_CHARS`等の定数、
+`ChatExport.steps`/`.code_blocks`）、`app/services/chat_export.py`
+（canonicalization・fence・caption escape・rich step/code renderer）、
+`pyproject.toml`（dev extrasに`markdown-it-py==3.0.0`を追加）。
+テスト: `tests/test_chat_export.py`（schema・preservation・fence・label・
+markdown-it-pyによるレンダラ構造検証・regression）、`tests/test_mcp_tools.py`・
+`tests/test_inbox.py`（MCP/REST経路、legacy互換、code-first step拒否）。
+`app/application.py`・`app/mcp_server.py`・`app/services/inbox_service.py`・
+`app/routers/inbox.py`は変更不要（既存の`_CREATE_INBOX_NOTE_ALLOWED_ARGUMENTS`
+が`{"title", "export"}`のままで足りる）。
+
+詳細な設計判断（canonicalization境界、動的fence、Obsidian固有inline
+semanticsのescape、supplementary sectionという新カテゴリの位置づけ、
+サイズ上限の根拠、後方互換ポリシー）は`docs/adr/0009-*.md`を参照。
+
+## 実装しないもの（対象外、別issueへ）
+
+- `technical`/`issue`/`reference`等、他モードの本文フィールドへの
+  rich block化の拡張 — 今回は`procedure.steps`のみ。既存schemaとの
+  整合調査が別途必要
+- `code_blocks`とstepに属するコードの取り違えを防ぐschemaレベルの
+  ガード — 役割分担は現時点ではfield descriptionによる規約のみ
+  （ADR-0009決定10）
+
+## 検証結果
+
+`.venv/bin/pytest -q` → 928 passed。
+`.venv/bin/ruff check .` → All checks passed。
+`.venv/bin/python scripts/export_openapi.py --check` → up to date
+（`openapi.json`を再生成済み）。
+`docker compose config` → この開発環境にdockerが無いため未実行
+（`compose.yaml`自体は本変更で触っていない）。
+
+手動確認: 同一`now`での2回レンダリングがbyte一致すること、
+`markdown-it-py`によるtoken解析でstep 10以降も`ordered_list_open`が
+1個のまま崩れないこと、`tempfile.TemporaryDirectory`上のテスト用Inbox
+（実Vault・本番`obsidian-api.tokonemore.com`は使用せず）に書き込んだ
+ノートを`read_note`で読み戻し、`markdown-it-py`のfence token contentが
+`canonicalise_code(入力) + "\n"`と一致することを確認した。

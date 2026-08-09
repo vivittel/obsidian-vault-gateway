@@ -573,6 +573,7 @@ frontmatterキー順）だけを転記する。
 | 1 | `## 要約` | （必須・非空） |
 | 2 | `## 決定事項` | `なし` |
 | 3 | *(モード固有ブロック)* | モードごとに異なる |
+| 3.5 | `## コード` | `export.code_blocks`が空なら**セクション自体を省略**（プレースホルダなし） |
 | 4 | `## 未解決の論点` | `なし` |
 | 5 | `## 次のアクション` | `なし` |
 | 6 | `## 関連ノート` | `なし`（検証済みリンクが0件のとき） |
@@ -581,7 +582,22 @@ frontmatterキー順）だけを転記する。
 モード固有ブロックの見出しはモードごとに固定（例: `summary`→`## 概要`/`## 要点`、
 `issue`→`## 症状`/`## 環境`/`## 調査`/`## 原因`/`## 回避策`）。空時は`未記録`が
 既定だが、`issue`モードの`## 原因`のみ`未解決`（原因が未確定であることの明示）。
-全モードの見出し一覧はADR-0005参照。
+全モードの見出し一覧はADR-0005参照。`## コード`は他の見出しと異なり、モード固有
+セクション群の直後に**任意で追加される supplementary section**であり、ADR-0005
+決定4（選択modeの見出しは常に出力する）が対象とする固定見出し集合そのものは
+変更しない（詳細はADR-0009）。
+
+**`procedure.steps`のrich block化（ADR-0009）**: `steps`の各要素は
+`{"blocks": [...]}`形式で、`blocks`は`{"type": "text", ...}`と
+`{"type": "code", "language": ..., "label": ..., "content": ...}`を任意の
+順序・回数で混在できる。既存の`steps: ["文字列", ...]`は1つのtext blockを
+持つstepの後方互換shorthandとして受理される（`app.models._coerce_step`）。
+code contentは`one_line`/`_escape_block_start`を通さない
+verbatim/structure-preserving契約（byte-level losslessではない — CRLF/CR統一・
+制御文字除去・末尾LFの0/1差の吸収のみ行う）。動的fence長・step番号由来の
+continuation indent・Obsidian固有inline構文（`#`タグ/`^`ブロックID等）を
+escapeするcaption描画の詳細はADR-0009参照。手順に直接属さないコードは
+全モード共通の任意フィールド`export.code_blocks`に置ける。
 
 **frontmatterキー順**: `title` → `created` → `updated` → `source`（常に`chatgpt`）
 → `export_mode` → `project`（任意、省略可）→ `conversation_type`（任意、省略可）
@@ -829,6 +845,30 @@ handle @obsidian_api {
 - 正規化後データに対する検証（正規化前は非空だが正規化後に空になる入力）
 - タイトル・本文への構造注入（偽見出し）耐性
 - 決定性（同一`now`での再実行がバイト一致すること）
+
+**`procedure.steps`のrich block化とtop-level `code_blocks`（issue #12
+follow-up、ADR-0009）**: 依存として`markdown-it-py`をdev extrasに追加し、
+文字列containsだけでなく描画結果を実際にparseして構造を検証する。
+
+- schema: text/code blockのフィールド検証、`language`パターン、
+  未知フィールド拒否、`blocks`/`CodeBlock.content`の空拒否
+  （`TextBlock.content`はlegacy shorthand互換のため空を許容）、
+  1 blockあたり・1 stepあたり・export全体のコード文字数上限
+- canonicalization境界: CRLF/CR統一、制御文字除去（tab/newlineは保持）、
+  末尾LFは最大1個のみ吸収（2個以上の末尾空行は保持）— 契約は
+  `fence_token.content == canonicalise_code(input) + "\n"`
+- 動的fence長（content内の最長backtick runより1長い）
+- captionのinline escape（CommonMark/GFM + Obsidian固有構文`#`/`^`/`==`/
+  `$`/`%%`）— Obsidian層は`markdown-it-py`では検出できないため文字集合を
+  直接pin
+- レンダラ構造（`markdown-it-py`のtoken解析）: step番号が10以上でも
+  `ordered_list_open`が1個のまま崩れないこと、fenceが対象step内に収まる
+  こと、code後の続きのtextが同じlist itemに残ること
+- 後方互換: `steps: ["文字列", ...]`が既存と同じ出力になること、
+  コードを含まないexportのgolden outputが不変であること
+- code-firstなstep（先頭がcode block）の拒否
+- `## コード`が空なら省略されること、全モードで利用できること、procedure
+  step内のコードが`## コード`へ集約されないこと
 
 ### 検証済み関連ノートwikilink（`tests/test_related_notes.py`、issue #13）
 

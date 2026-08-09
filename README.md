@@ -30,7 +30,9 @@ second write tool, `docs/adr/0006-verified-related-note-wikilinks.md` for how
 rendered, `docs/adr/0007-scoped-duplicate-note-detection.md` for why
 duplicate detection is its own read-only tool rather than a check embedded in
 `create_inbox_note`, `docs/adr/0008-normalize-bare-mcp-path.md` for why the
-bare `/mcp` path is normalized in-scope rather than redirected, and
+bare `/mcp` path is normalized in-scope rather than redirected,
+`docs/adr/0009-verbatim-code-blocks-in-structured-exports.md` for how
+`procedure.steps` preserves code content and step ordering, and
 `docs/MCP_IMPLEMENTATION_PLAN.md` for the MCP design in full. Phase 1 and
 Phase 1.5 (the REST-only and MCP-introduction predecessors) are documented as
 completed history in `docs/PHASE1_PLAN.md` and `docs/IMPLEMENTATION_PLAN.md`.
@@ -130,6 +132,7 @@ this fixed order, regardless of mode:
 | 1 | `## 要約` | Required; 2–5 sentences summarising the conversation |
 | 2 | `## 決定事項` | Adopted conclusions only; `なし` when empty |
 | 3 | *(mode-specific headings)* | See the tool's input schema for each mode's fields |
+| 3.5 | `## コード` | Optional; present only when `export.code_blocks` is non-empty (see below) — omitted entirely otherwise, in every mode |
 | 4 | `## 未解決の論点` | Open questions, never merged with next actions; `なし` when empty |
 | 5 | `## 次のアクション` | Concrete next steps; `なし` when empty |
 | 6 | `## 関連ノート` | Verified wikilinks, or `なし` when none survive verification |
@@ -144,6 +147,22 @@ stable key order — `title`, `created`, `updated`, `source: chatgpt`,
 `export_mode`, optionally `project` and `conversation_type`, then `tags` —
 and none of those keys can be supplied as free-form `frontmatter` alongside
 `export`.
+
+**`procedure.steps` preserves code content and step order verbatim/
+structure-preservingly, not just as one flattened line** (issue #12 follow-up
+/ `docs/adr/0009-*.md`). Each step is an ordered list of blocks —
+`{"type": "text", "content": ...}` or
+`{"type": "code", "language": ..., "label": ..., "content": ...}` — so a step
+can interleave explanation and commands in the order the conversation had
+them ("open the file, edit it, restart it") instead of losing indentation,
+blank lines, and fence markers to the single-line rendering every other
+field uses. A bare string is still accepted as a backward-compatible
+shorthand for a step with one text block — every export with no code renders
+exactly as before this feature existed. Code that does not belong to any
+single step (a finished config file, a complete script, an appendix log) can
+instead go in the top-level `export.code_blocks`, available in every mode,
+rendered as the optional `## コード` section above — never both: code that
+belongs to a step stays in that step, so the procedure keeps its order.
 
 **Related notes are client-selected, Gateway-verified** (issue #13 /
 `docs/adr/0006-*.md`). The client calls `search_notes`, picks relevant
@@ -509,6 +528,13 @@ headings and required fields, empty-state placeholders, frontmatter key
 order and omission rules, tag normalisation, and the cases where validation
 must run against normalised text rather than the raw request (a field that
 is non-empty before normalisation but empty after it, e.g. `steps: ["\n"]`).
+It also covers `procedure.steps`' verbatim/structure-preserving code content
+(`docs/adr/0009-*.md`) — the `markdown-it-py` dev dependency parses rendered
+output to confirm a rendered note's *structure*, not just its raw text:
+step numbering never breaks (including step 10 and beyond, whose 4-character
+marker needs a wider continuation indent than steps 1-9), a code fence never
+closes early on embedded backtick runs, and a step's later text stays in the
+same list item as its earlier code.
 
 `tests/test_related_notes.py` covers `app/services/related_notes.py` —
 verified related-note wikilink resolution (issue #13 / `docs/adr/0006-*.md`)

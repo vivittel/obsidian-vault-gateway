@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 import yaml
+from markdown_it import MarkdownIt
 from pydantic import ValidationError as PydanticValidationError
 
 from app.exceptions import ValidationError
@@ -16,12 +17,21 @@ from app.models import ChatExport
 from app.services.chat_export import (
     _ALL_MODE_FIELDS_IN_ORDER,
     _FIELD_OWNER_MODES,
+    _INLINE_ESCAPE_CHARS,
+    _MAX_TOTAL_CODE_CHARS,
     _MODE_SECTIONS,
+    _canonicalise_code,
+    _escape_inline,
+    _fence_for,
+    _NormalisedCodeBlock,
+    _render_fenced_code,
     format_wikilink,
     is_renderable_wikilink_target,
     one_line,
     render_chat_export,
 )
+
+_MD = MarkdownIt("commonmark")
 
 _NOW = datetime(2026, 8, 6, 14, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
 
@@ -765,3 +775,794 @@ def test_field_owner_modes_is_derived_correctly_from_mode_sections() -> None:
     assert _FIELD_OWNER_MODES["steps"] == ("procedure",)
     assert _FIELD_OWNER_MODES["topics"] == ("full",)
     assert set(_FIELD_OWNER_MODES) == set(_ALL_MODE_FIELDS_IN_ORDER)
+
+
+# =================================================================================
+# Verbatim/structure-preserving code content (docs/adr/0009-*.md)
+#
+# The contract is verbatim/structure-preserving, not byte-level lossless: see
+# _canonicalise_code's own docstring for the three canonicalisations this
+# module still applies (CRLF/CR -> LF, non-tab/newline control-character
+# stripping, at-most-one trailing newline). Every "preservation" test below
+# therefore compares against _canonicalise_code(input) + "\n" — the fence
+# token's content, not the raw input — never the raw Markdown string
+# (procedure steps add list-item indentation the fence content itself never
+# carries).
+# =================================================================================
+
+
+def _fence_tokens(markdown: str) -> list:
+    return [token for token in _MD.parse(markdown) if token.type == "fence"]
+
+
+def _single_fence_content_for(step_blocks: list[dict]) -> tuple[str, str]:
+    """Render one procedure step from ``step_blocks``, parse the result, and
+    return the sole fence token's ``(content, info)``. Fails loudly if the
+    step did not render to exactly one fence."""
+    export = ChatExport(mode="procedure", tldr=["ok"], steps=[{"blocks": step_blocks}])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    fences = _fence_tokens(rendered.content)
+    assert len(fences) == 1, rendered.content
+    return fences[0].content, fences[0].info
+
+
+# --- Schema: TextBlock / CodeBlock / ProcedureStep -----------------------------
+
+
+def test_text_and_code_blocks_are_accepted_in_a_procedure_step() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "open it"},
+                    {"type": "code", "language": "bash", "content": "ls"},
+                ]
+            }
+        ],
+    )
+    assert export.steps[0].blocks[0].content == "open it"
+    assert export.steps[0].blocks[1].content == "ls"
+
+
+def test_code_block_language_and_label_default_to_none() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[{"blocks": [{"type": "text", "content": "a"}, {"type": "code", "content": "x"}]}],
+    )
+    code = export.steps[0].blocks[1]
+    assert code.language is None
+    assert code.label is None
+
+
+def test_text_block_rejects_unknown_field() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            mode="procedure",
+            tldr=["ok"],
+            steps=[{"blocks": [{"type": "text", "content": "a", "bogus": 1}]}],
+        )
+
+
+def test_code_block_rejects_unknown_field() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            mode="procedure",
+            tldr=["ok"],
+            steps=[
+                {
+                    "blocks": [
+                        {"type": "text", "content": "a"},
+                        {"type": "code", "content": "x", "bogus": 1},
+                    ]
+                }
+            ],
+        )
+
+
+def test_procedure_step_rejects_unknown_field() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            mode="procedure",
+            tldr=["ok"],
+            steps=[{"blocks": [{"type": "text", "content": "a"}], "bogus": 1}],
+        )
+
+
+@pytest.mark.parametrize(
+    "language",
+    ["ba sh", "bash\n", "bash\r", "bash`", "", "a" * 33, "b@sh", "\x00bash", " bash"],
+)
+def test_invalid_language_is_rejected_at_schema_level(language: str) -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            mode="procedure",
+            tldr=["ok"],
+            steps=[
+                {
+                    "blocks": [
+                        {"type": "text", "content": "a"},
+                        {"type": "code", "language": language, "content": "x"},
+                    ]
+                }
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    "language", ["bash", "yaml", "json", "c++", "c#", "shell-session", "text", "Dockerfile"]
+)
+def test_valid_language_examples_are_accepted(language: str) -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "a"},
+                    {"type": "code", "language": language, "content": "x"},
+                ]
+            }
+        ],
+    )
+    assert export.steps[0].blocks[1].language == language
+
+
+def test_empty_blocks_list_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(mode="procedure", tldr=["ok"], steps=[{"blocks": []}])
+
+
+def test_missing_blocks_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(mode="procedure", tldr=["ok"], steps=[{}])
+
+
+def test_empty_code_content_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            mode="procedure",
+            tldr=["ok"],
+            steps=[
+                {
+                    "blocks": [
+                        {"type": "text", "content": "a"},
+                        {"type": "code", "content": ""},
+                    ]
+                }
+            ],
+        )
+
+
+def test_whitespace_only_code_content_passes_schema_but_is_dropped_by_formatter() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "a"},
+                    {"type": "code", "content": "   \n\t \n  "},
+                ]
+            }
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "```" not in rendered.content
+
+
+def test_empty_text_content_passes_schema_and_is_dropped_like_a_legacy_string_step() -> None:
+    # The one deliberate asymmetry (docs/adr/0009-*.md): TextBlock.content has
+    # no min_length, unlike CodeBlock.content, because a legacy plain-string
+    # step ("" or whitespace-only) must keep being silently dropped exactly as
+    # it was before this feature existed — see steps=["", "second"] below.
+    export = ChatExport(mode="procedure", tldr=["ok"], steps=["", "second"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "1. second" in rendered.content
+
+
+def test_code_content_over_max_length_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            mode="procedure",
+            tldr=["ok"],
+            steps=[
+                {
+                    "blocks": [
+                        {"type": "text", "content": "a"},
+                        {"type": "code", "content": "x" * 8001},
+                    ]
+                }
+            ],
+        )
+
+
+def test_code_content_at_max_length_is_accepted_at_schema_level() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "a"},
+                    {"type": "code", "content": "x" * 8000},
+                ]
+            }
+        ],
+    )
+    assert len(export.steps[0].blocks[1].content) == 8000
+
+
+def test_blocks_over_max_per_step_is_rejected_at_schema_level() -> None:
+    blocks = [{"type": "text", "content": "a"}] + [
+        {"type": "code", "content": f"x{i}"} for i in range(12)
+    ]
+    with pytest.raises(PydanticValidationError):
+        ChatExport(mode="procedure", tldr=["ok"], steps=[{"blocks": blocks}])
+
+
+def test_code_blocks_over_max_items_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            tldr=["ok"],
+            code_blocks=[{"type": "code", "content": f"x{i}"} for i in range(11)],
+        )
+
+
+def test_code_blocks_at_max_items_is_accepted_at_schema_level() -> None:
+    export = ChatExport(
+        tldr=["ok"], code_blocks=[{"type": "code", "content": f"x{i}"} for i in range(10)]
+    )
+    assert len(export.code_blocks) == 10
+
+
+# --- Backward compatibility: legacy plain-string steps -------------------------
+
+
+def test_legacy_string_step_is_equivalent_to_a_single_text_block() -> None:
+    export_string = ChatExport(mode="procedure", tldr=["ok"], steps=["do it"])
+    export_object = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[{"blocks": [{"type": "text", "content": "do it"}]}],
+    )
+    a = render_chat_export(export_string, title="t", now=_NOW)
+    b = render_chat_export(export_object, title="t", now=_NOW)
+    assert a == b
+
+
+def test_multiple_steps_mix_legacy_strings_and_rich_objects() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            "plain first",
+            {"blocks": [{"type": "text", "content": "second"}, {"type": "code", "content": "x"}]},
+            "plain third",
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "1. plain first" in rendered.content
+    assert "2. second" in rendered.content
+    assert "3. plain third" in rendered.content
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "ordered_list_open") == 1
+    assert sum(1 for t in tokens if t.type == "list_item_open") == 3
+
+
+# --- Ordering: a single step with several interleaved text/code blocks -------
+
+
+def test_one_step_with_text_and_code_alternating_several_times_preserves_order() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "a"},
+                    {"type": "code", "content": "1"},
+                    {"type": "text", "content": "b"},
+                    {"type": "code", "content": "2"},
+                    {"type": "text", "content": "c"},
+                    {"type": "code", "content": "3"},
+                ]
+            }
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+
+    assert sum(1 for t in tokens if t.type == "ordered_list_open") == 1
+    assert sum(1 for t in tokens if t.type == "list_item_open") == 1
+
+    fences = [t for t in tokens if t.type == "fence"]
+    assert [f.content for f in fences] == ["1\n", "2\n", "3\n"]
+
+    inline_lines = {
+        "".join(child.content for child in (t.children or [])): t.map[0]
+        for t in tokens
+        if t.type == "inline"
+    }
+    fence_lines = [f.map[0] for f in fences]
+    assert inline_lines["a"] < fence_lines[0]
+    assert fence_lines[0] < inline_lines["b"] < fence_lines[1]
+    assert fence_lines[1] < inline_lines["c"] < fence_lines[2]
+
+
+# --- Structural rejection: a step must start with a text block ----------------
+
+
+def test_code_first_step_is_rejected() -> None:
+    export = ChatExport(
+        mode="procedure", tldr=["ok"], steps=[{"blocks": [{"type": "code", "content": "x"}]}]
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "steps[0] must start with a text block."
+
+
+def test_code_first_step_error_identifies_the_right_index() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=["fine", {"blocks": [{"type": "code", "content": "x"}]}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "steps[1] must start with a text block."
+
+
+def test_step_that_normalises_to_only_a_code_block_is_rejected() -> None:
+    # A text block that drops out during normalisation (whitespace-only)
+    # leaves the step starting with code — this must be caught after
+    # normalisation, not only against the raw schema shape.
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "\n"},
+                    {"type": "code", "content": "x"},
+                ]
+            }
+        ],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "steps[0] must start with a text block."
+
+
+# --- Total code-size budget (docs/adr/0009-*.md; app/models._MAX_TOTAL_CODE_CHARS) --
+
+
+def test_total_code_content_within_the_budget_is_accepted() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        code_blocks=[{"type": "code", "content": "x" * 8000} for _ in range(10)],
+        steps=["s"],
+    )
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+def test_total_code_content_over_the_budget_is_rejected() -> None:
+    blocks = [{"type": "text", "content": "a"}] + [
+        {"type": "code", "content": "z" * 8000} for _ in range(3)
+    ]
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        code_blocks=[{"type": "code", "content": "x" * 8000} for _ in range(10)],
+        steps=[{"blocks": blocks}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"Code content exceeds the total limit of {_MAX_TOTAL_CODE_CHARS} characters."
+    )
+
+
+def test_total_code_content_error_never_echoes_client_code() -> None:
+    secret = ("SECRET_TOKEN=abc123" * 421)[:8000]  # exactly at the per-block max
+    blocks = [{"type": "text", "content": "a"}] + [
+        {"type": "code", "content": secret} for _ in range(3)
+    ]
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        code_blocks=[{"type": "code", "content": secret} for _ in range(10)],
+        steps=[{"blocks": blocks}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert "SECRET_TOKEN" not in excinfo.value.message
+    assert excinfo.value.log_detail is not None
+    assert "SECRET_TOKEN" not in excinfo.value.log_detail
+
+
+def _build_export_with_total_code_chars(total: int) -> ChatExport:
+    """Build an export whose normalised code content sums to exactly
+    ``total`` characters: 10 top-level code_blocks at the maximum
+    _MAX_CODE_CHARS each (80,000 — app.models._MAX_CODE_BLOCK_ITEMS x
+    _MAX_CODE_CHARS), plus as many 8,000-char code blocks in a single step
+    as needed for the remainder — never exceeding _MAX_BLOCKS_PER_STEP or
+    _MAX_CODE_CHARS per block.
+    """
+    remainder = total - 80_000
+    blocks = [{"type": "text", "content": "a"}]
+    while remainder > 0:
+        chunk = min(remainder, 8_000)
+        blocks.append({"type": "code", "content": "y" * chunk})
+        remainder -= chunk
+    return ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        code_blocks=[{"type": "code", "content": "x" * 8_000} for _ in range(10)],
+        steps=[{"blocks": blocks}],
+    )
+
+
+def test_total_code_content_at_exactly_the_budget_is_accepted() -> None:
+    # Pins the implementation's `>` (not `>=`) comparison: the limit itself
+    # is an accepted amount, not a rejected one.
+    export = _build_export_with_total_code_chars(_MAX_TOTAL_CODE_CHARS)
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+def test_total_code_content_one_char_over_the_budget_is_rejected() -> None:
+    export = _build_export_with_total_code_chars(_MAX_TOTAL_CODE_CHARS + 1)
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"Code content exceeds the total limit of {_MAX_TOTAL_CODE_CHARS} characters."
+    )
+
+
+# --- Canonicalisation boundary: what _canonicalise_code changes, and only that -
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("a\r\nb\r\n", "a\nb"),
+        ("a\rb\r", "a\nb"),
+        ("a\n", "a"),
+        ("a\n\n", "a\n"),  # a deliberate trailing blank line is preserved
+        ("a\n\n\n", "a\n\n"),
+        ("a\x01b\x1fc", "abc"),
+        ("a\tb\nc", "a\tb\nc"),  # tab and newline both survive
+        ("\nleading blank\nafter", "\nleading blank\nafter"),
+    ],
+)
+def test_canonicalise_code_boundary_cases(raw: str, expected: str) -> None:
+    assert _canonicalise_code(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw_code",
+    [
+        "  indented\n\tmixed tab\nplain",
+        "line1\n\nline3",
+        "trailing space   \nnext",
+        "日本語 コメント # not a heading\n- not a bullet\n> not a quote",
+        "environment:\n  FOO: bar\n  BAZ:\n    - one\n    - two",
+        '{\n  "a": 1,\n  "b": [1, 2, 3]\n}',
+        "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new",
+        "2026-08-09 12:00:00 INFO starting\n2026-08-09 12:00:01 ERROR boom",
+        "$ ls -la\ntotal 0\ndrwxr-xr-x",
+        "絵文字😀テスト、日本語",
+        "< > [ ] # - * _ special",
+        "back`tick`s",
+    ],
+)
+def test_code_content_is_preserved_up_to_canonicalisation(raw_code: str) -> None:
+    content, _info = _single_fence_content_for(
+        [{"type": "text", "content": "a"}, {"type": "code", "content": raw_code}]
+    )
+    assert content == _canonicalise_code(raw_code) + "\n"
+
+
+# --- Dynamic fence length -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_fence"),
+    [
+        ("plain", "```"),
+        ("`x`", "```"),
+        ("``y``", "```"),
+        ("```z```", "````"),
+        ("````w````", "`````"),
+        ("`````v`````", "``````"),
+    ],
+)
+def test_fence_for_is_one_longer_than_the_longest_backtick_run(
+    content: str, expected_fence: str
+) -> None:
+    assert _fence_for(content) == expected_fence
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["contains ` one backtick", "contains `` two", "contains ``` three", "contains ```` four"],
+)
+def test_fence_never_closes_early_for_embedded_backtick_runs(content: str) -> None:
+    fenced_content, _info = _single_fence_content_for(
+        [{"type": "text", "content": "a"}, {"type": "code", "content": content}]
+    )
+    assert fenced_content == _canonicalise_code(content) + "\n"
+
+
+# --- Defensive re-check: an unsafe language bypassing pydantic ----------------
+#
+# _is_safe_language's rejection path is unreachable through the public
+# ChatExport API — pydantic's Field(pattern=_LANGUAGE_PATTERN) already
+# guarantees a safe value before a _NormalisedCodeBlock can exist. This
+# constructs one directly, bypassing pydantic entirely, the same approach
+# test_related_notes_section_drops_a_hazardous_link_defensively uses for
+# is_renderable_wikilink_target's own defensive re-check.
+
+
+def test_render_fenced_code_omits_info_string_for_a_bypassed_unsafe_language() -> None:
+    unsafe = _NormalisedCodeBlock(language="not safe\n", label=None, content="x")
+    safe = _NormalisedCodeBlock(language="bash", label=None, content="x")
+    assert _render_fenced_code(unsafe, indent="")[0] == "```"
+    assert _render_fenced_code(safe, indent="")[0] == "```bash"
+
+
+# --- Label / caption: plain, literal, never a Markdown heading or emphasis ----
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "compose.yaml",
+        "docker-compose.yml",
+        "起動コマンド",
+        "**bold**",
+        "`cmd`",
+        "[l](u)",
+        "# head",
+        "1. item",
+        "a_b_c",
+        "<tag>",
+        "~~s~~",
+        "a\\b",
+        "- dash",
+        "> q",
+        "+ p",
+    ],
+)
+def test_caption_renders_as_literal_inline_text(label: str) -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "a"},
+                    {"type": "code", "label": label, "content": "x"},
+                ]
+            }
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    caption_inlines = [
+        t
+        for t in tokens
+        if t.type == "inline"
+        and "".join(c.content for c in (t.children or []) if c.type == "text") == label
+    ]
+    assert caption_inlines, f"label {label!r} did not round-trip as literal inline text"
+    for inline in caption_inlines:
+        kinds = {child.type for child in inline.children or []}
+        assert kinds == {"text"}, f"label {label!r} rendered as non-literal token kinds {kinds}"
+
+
+@pytest.mark.parametrize(
+    ("label", "obsidian_marker"),
+    [
+        ("C#", "#"),
+        ("^blockid", "^"),
+        ("==highlight==", "="),
+        ("$math$", "$"),
+        ("%%comment%%", "%"),
+        ("[[wikilink]]", "["),
+    ],
+)
+def test_caption_escapes_obsidian_specific_inline_markers(
+    label: str, obsidian_marker: str
+) -> None:
+    # markdown-it-py cannot detect Obsidian-specific inline semantics (tags,
+    # block IDs, highlight, math, comments, wikilinks/embeds) — this asserts
+    # the fixed character set directly rather than through a CommonMark
+    # parse, and docs/adr/0009-*.md records that this is a constructional
+    # guarantee, not something the test suite can verify by parsing.
+    escaped = _escape_inline(label)
+    assert f"\\{obsidian_marker}" in escaped
+    assert obsidian_marker in _INLINE_ESCAPE_CHARS
+
+
+def test_caption_for_ordinary_filenames_is_unescaped() -> None:
+    for label in ["compose.yaml", "docker-compose.yml", "起動コマンド", "実行結果"]:
+        assert _escape_inline(label) == label
+
+
+def test_blank_label_produces_no_caption_line() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "a"},
+                    {"type": "code", "label": "   ", "content": "x"},
+                ]
+            }
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "```" in rendered.content
+    lines = rendered.content.splitlines()
+    fence_line = next(line for line in lines if line.strip().startswith("```"))
+    caption_candidate = lines[lines.index(fence_line) - 1]
+    assert caption_candidate == ""  # a blank line, not a caption, precedes the fence
+
+
+# --- Renderer structure: step numbering never breaks (markdown-it-py) --------
+
+
+def test_step_ten_and_beyond_keeps_a_single_ordered_list_with_correct_numbering() -> None:
+    # _MAX_STEP_ITEMS allows up to 50 steps; step 10 onward has a 4-character
+    # marker ("10. "). A fixed 3-space continuation indent would put a code
+    # fence outside the list item (verified against markdown-it-py during
+    # design), splitting the list and renumbering everything after it.
+    steps = [{"blocks": [{"type": "text", "content": f"s{i}"}]} for i in range(1, 10)]
+    steps.append(
+        {
+            "blocks": [
+                {"type": "text", "content": "s10"},
+                {"type": "code", "content": "x"},
+            ]
+        }
+    )
+    steps.append({"blocks": [{"type": "text", "content": "s11"}]})
+    export = ChatExport(mode="procedure", tldr=["ok"], steps=steps)
+    rendered = render_chat_export(export, title="t", now=_NOW)
+
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "ordered_list_open") == 1
+    assert sum(1 for t in tokens if t.type == "list_item_open") == 11
+
+    item_index = 0
+    fence_item_index = None
+    for token in tokens:
+        if token.type == "list_item_open":
+            item_index += 1
+        elif token.type == "fence":
+            fence_item_index = item_index
+    assert fence_item_index == 10
+
+
+def test_code_in_a_step_produces_a_fence_not_an_indented_code_block() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[{"blocks": [{"type": "text", "content": "a"}, {"type": "code", "content": "x"}]}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "code_block") == 0
+    assert sum(1 for t in tokens if t.type == "fence") == 1
+
+
+def test_text_after_code_within_a_step_stays_in_the_same_list_item() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "before"},
+                    {"type": "code", "content": "x"},
+                    {"type": "text", "content": "after"},
+                ]
+            },
+            "next step",
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "ordered_list_open") == 1
+    assert sum(1 for t in tokens if t.type == "list_item_open") == 2
+
+    item_index = 0
+    after_item_index = None
+    for token in tokens:
+        if token.type == "list_item_open":
+            item_index += 1
+        elif token.type == "inline":
+            text = "".join(child.content for child in (token.children or []))
+            if text == "after":
+                after_item_index = item_index
+    assert after_item_index == 1
+
+
+# --- Regression: no code_blocks input renders exactly as before this feature --
+
+
+@pytest.mark.parametrize("mode", list(_MODE_SECTIONS))
+def test_no_code_blocks_input_never_renders_a_code_heading(mode: str) -> None:
+    export = _build(mode)
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "## コード" not in rendered.content
+
+
+def test_top_level_code_blocks_that_all_normalise_to_empty_omit_the_heading() -> None:
+    # Distinct from test_no_code_blocks_input_never_renders_a_code_heading
+    # above: here code_blocks is non-empty in the *raw* input, but every
+    # entry drops to nothing after normalisation (whitespace-only content)
+    # — the same "normalised to empty -> section omitted" outcome must still
+    # hold, not just "never emit a placeholder-only section".
+    export = ChatExport(tldr=["ok"], code_blocks=[{"type": "code", "content": "   \n\t  "}])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "## コード" not in rendered.content
+
+
+def test_code_blocks_section_appears_between_mode_fields_and_unresolved_issues() -> None:
+    export = _build("summary", code_blocks=[{"type": "code", "content": "x"}])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    headings = _heading_lines(rendered.content)
+    assert headings[0] == "## 要約"
+    assert headings[1] == "## 決定事項"
+    assert headings[-4:] == ["## 未解決の論点", "## 次のアクション", "## 関連ノート", "## 出典"]
+    assert "## コード" in headings
+    assert headings.index("## コード") > headings.index("## 要点")
+    assert headings.index("## コード") < headings.index("## 未解決の論点")
+
+
+def test_top_level_code_blocks_render_outside_any_list() -> None:
+    export = ChatExport(
+        tldr=["ok"],
+        code_blocks=[
+            {"type": "code", "language": "yaml", "label": "compose.yaml", "content": "a: b"},
+            {"type": "code", "content": "second"},
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "list_item_open") == 0
+    fences = [t for t in tokens if t.type == "fence"]
+    assert [(f.content, f.info) for f in fences] == [("a: b\n", "yaml"), ("second\n", "")]
+
+
+def test_top_level_code_blocks_available_outside_procedure_mode() -> None:
+    export = _build("summary", code_blocks=[{"type": "code", "content": "x"}])
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+def test_procedure_step_code_is_never_moved_into_the_top_level_section() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {"blocks": [{"type": "text", "content": "a"}, {"type": "code", "content": "step-code"}]}
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "## コード" not in rendered.content
+    assert "step-code" in rendered.content
+
+
+# --- Existing golden-output pins must still hold byte-for-byte -----------------
+
+
+def test_procedure_with_plain_steps_still_renders_the_pre_existing_numbered_list() -> None:
+    export = _build("procedure", steps=["first", "second", "third"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "1. first\n2. second\n3. third" in rendered.content

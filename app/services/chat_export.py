@@ -34,6 +34,21 @@ not run through ``_escape_block_start`` (escaping would corrupt the `[[...]]`
 syntax). Both are safe only because the caller has already restricted the
 values to paths that passed ``is_renderable_wikilink_target`` and resolved to
 a real note.
+
+Code content (``procedure.steps[].blocks`` and the top-level ``code_blocks``;
+docs/adr/0009-verbatim-code-blocks-in-structured-exports.md) is rendered
+verbatim/structure-preserving, not byte-level lossless: ``_canonicalise_code``
+still unifies line endings, strips non-newline/tab control characters, and
+collapses a trailing 0-or-1 newline difference before the value is ever
+placed inside a Markdown fence. None of ``one_line``'s other transforms
+(whitespace-run collapsing, per-line stripping) and none of
+``_escape_block_start``'s hazard-escaping ever run on code content — a fence
+is already structurally closed, so the hazards that rule exists for
+(a bullet/heading/HTML-block forgery) cannot occur inside one. A code block's
+optional ``label`` is the one exception: it renders as plain inline text
+above the fence, so it is escaped by ``_escape_inline`` (covering both
+CommonMark/GFM inline syntax and Obsidian-specific inline semantics —
+``#`` tags, ``^`` block IDs, ``==``/``$``/``%%``) before ``_escape_block_start``.
 """
 
 from __future__ import annotations
@@ -47,10 +62,14 @@ from itertools import chain
 
 from app.exceptions import ValidationError
 from app.models import (
+    _LANGUAGE_PATTERN,
     ChatExport,
+    CodeBlock,
     ExportMode,
     FrontmatterValue,
+    ProcedureStep,
     TermDefinition,
+    TextBlock,
     TimelineEntry,
     TopicSection,
 )
@@ -172,11 +191,67 @@ _WIKILINK_HAZARD_RE = re.compile(r"[\[\]|#^]")
 
 _MARKDOWN_SUFFIX = ".md"
 
+# Code content (docs/adr/0009-*.md): unlike _CONTROL_RE (used by one_line for
+# single-line text), \t and \n must survive — only the other C0/C1 control
+# characters are stripped.
+_CODE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+_BACKTICK_RUN_RE = re.compile(r"`+")
+_LANGUAGE_RE = re.compile(_LANGUAGE_PATTERN)
+
+# The counterpart of app.models._MAX_CODE_CHARS's per-block budget: no single
+# Field(max_length=...) can see the *sum* across every code block in one
+# export (steps[].blocks and the top-level code_blocks together), so this is
+# enforced here, on normalised data, like every other cross-field check in
+# this module. ~400 KiB worst-case UTF-8 (4 bytes/code point), comfortably
+# inside MAX_NOTE_SIZE_BYTES's default 1 MiB.
+_MAX_TOTAL_CODE_CHARS = 100_000
+
+# Rendered only via _render_supplementary_sections, never through
+# _render_section/_HEADINGS: unlike every mode's own heading, "## コード" is
+# an *optional* supplementary section — omitted entirely when code_blocks is
+# empty, in every mode, rather than always emitted with a placeholder like
+# every entry in _HEADINGS is. See _render_supplementary_sections's docstring.
+_CODE_BLOCKS_HEADING = "コード"
+
+# Obsidian is the note's reader, not only a CommonMark renderer, so this set
+# covers CommonMark/GFM inline syntax (backslash, backtick, emphasis markers,
+# link/image brackets, autolink/HTML angle brackets, strikethrough tildes)
+# *and* Obsidian-specific inline semantics markdown-it-py cannot detect: "#"
+# (a bare hashtag becomes a live Obsidian tag), "^" (can start a block-ID
+# reference), "==" (highlight), "$" (math), "%%" (comment). A caption is the
+# only place this module emits client text as inline content that must
+# render literally — code content never needs it (a fence is verbatim), and
+# ordinary text is allowed to contain intentional inline Markdown. Excluded
+# on purpose: "|" (significant only inside a GFM table, which a caption never
+# is), "!" (only meaningful before "[", already escaped), and
+# ": ; , \" ' / ? @" (no CommonMark/GFM/Obsidian inline meaning).
+_INLINE_ESCAPE_CHARS = "\\`*_[]<>&~=$%#^"
+
 
 @dataclass(frozen=True)
 class RenderedExport:
     frontmatter: dict[str, FrontmatterValue]
     content: str
+
+
+@dataclass(frozen=True)
+class _NormalisedTextBlock:
+    content: str
+
+
+@dataclass(frozen=True)
+class _NormalisedCodeBlock:
+    language: str | None
+    label: str | None
+    content: str
+
+
+_NormalisedStepBlock = _NormalisedTextBlock | _NormalisedCodeBlock
+
+
+@dataclass(frozen=True)
+class _NormalisedStep:
+    blocks: tuple[_NormalisedStepBlock, ...]
 
 
 @dataclass(frozen=True)
@@ -187,6 +262,7 @@ class _Normalised:
     unresolved_issues: list[str]
     next_actions: list[str]
     sources: list[str]
+    code_blocks: list[_NormalisedCodeBlock]
     overview: list[str]
     key_points: list[str]
     context: list[str]
@@ -197,7 +273,7 @@ class _Normalised:
     turning_points: list[str]
     topics: list[tuple[str, list[str]]]
     prerequisites: list[str]
-    steps: list[str]
+    steps: list[_NormalisedStep]
     rollback: list[str]
     symptom: list[str]
     environment: list[str]
@@ -302,6 +378,107 @@ def _normalise_lines(values: list[str]) -> list[str]:
     return [line for value in values if (line := one_line(value))]
 
 
+def _canonicalise_code(content: str) -> str:
+    """Canonicalise ``content`` for verbatim/structure-preserving rendering
+    (docs/adr/0009-*.md) — the *only* transform code content goes through.
+
+    Unlike :func:`one_line`, this never touches internal whitespace, blank
+    lines, or leading whitespace: three canonicalisations only, each one
+    collapsing a difference that carries no information rather than
+    reshaping the content itself.
+
+    1. CRLF/CR -> LF, matching every other line-ending canonicalisation in
+       this codebase (app/services/inbox_service.py's ``_render_note``).
+    2. Control characters other than tab/newline are stripped — same
+       characters :data:`_CONTROL_RE` strips for single-line text, minus the
+       two this function must preserve.
+    3. At most one trailing newline is removed. A closing Markdown fence
+       already supplies the line break that ends the code's last line, so
+       ``"a"`` and ``"a\\n"`` must render identically; a second (or third)
+       trailing newline is a deliberate blank line at the end of the content
+       and is preserved, not collapsed.
+    """
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    content = _CODE_CONTROL_RE.sub("", content)
+    if content.endswith("\n"):
+        content = content[:-1]
+    return content
+
+
+def _is_safe_language(value: str) -> bool:
+    """Defensive re-check of a fence info string, mirroring
+    :func:`is_renderable_wikilink_target`'s own re-check of a value pydantic
+    already validated: this module's own render path must stay structurally
+    incapable of emitting an unsafe info string no matter what a future
+    caller's ``_NormalisedCodeBlock`` carries.
+    """
+    return bool(_LANGUAGE_RE.fullmatch(value))
+
+
+def _normalise_text_block(block: TextBlock) -> _NormalisedTextBlock | None:
+    content = one_line(block.content)
+    return _NormalisedTextBlock(content=content) if content else None
+
+
+def _normalise_code_block(block: CodeBlock) -> _NormalisedCodeBlock | None:
+    content = _canonicalise_code(block.content)
+    if not content.strip():
+        return None
+    label = one_line(block.label) if block.label is not None else ""
+    return _NormalisedCodeBlock(language=block.language, label=label or None, content=content)
+
+
+def _normalise_step_block(block: TextBlock | CodeBlock) -> _NormalisedStepBlock | None:
+    if isinstance(block, TextBlock):
+        return _normalise_text_block(block)
+    return _normalise_code_block(block)
+
+
+def _normalise_steps(steps: list[ProcedureStep], field_name: str) -> list[_NormalisedStep]:
+    """Normalise ``steps``, dropping a step entirely once every one of its
+    blocks has normalised away to nothing (matching :func:`_normalise_lines`'s
+    "empty after normalisation -> dropped" convention for a plain string
+    list). A step surviving with at least one block, but not starting with a
+    text block, is rejected outright rather than silently reordered or
+    dropped — CommonMark cannot represent a step whose first line is a bare
+    fence without a blank line that would split the numbered list and break
+    its numbering (verified against markdown-it-py during design).
+    """
+    result: list[_NormalisedStep] = []
+    for index, step in enumerate(steps):
+        blocks = tuple(
+            normalised
+            for block in step.blocks
+            if (normalised := _normalise_step_block(block)) is not None
+        )
+        if not blocks:
+            continue
+        if not isinstance(blocks[0], _NormalisedTextBlock):
+            raise ValidationError(
+                f"{field_name}[{index}] must start with a text block.",
+                log_detail=f"chat export: {field_name}[{index}] does not start with a text block",
+            )
+        result.append(_NormalisedStep(blocks=blocks))
+    return result
+
+
+def _normalise_code_blocks(blocks: list[CodeBlock]) -> list[_NormalisedCodeBlock]:
+    return [
+        normalised
+        for block in blocks
+        if (normalised := _normalise_code_block(block)) is not None
+    ]
+
+
+def _total_code_chars(steps: list[_NormalisedStep], code_blocks: list[_NormalisedCodeBlock]) -> int:
+    total = sum(len(block.content) for block in code_blocks)
+    for step in steps:
+        total += sum(
+            len(block.content) for block in step.blocks if isinstance(block, _NormalisedCodeBlock)
+        )
+    return total
+
+
 def _normalise_timeline(
     entries: list[TimelineEntry], field_name: str
 ) -> list[tuple[str | None, str]]:
@@ -388,6 +565,18 @@ def _normalise_export(export: ChatExport) -> _Normalised:
         one_line(export.conversation_type) if export.conversation_type is not None else ""
     )
 
+    steps = _normalise_steps(export.steps, "steps")
+    code_blocks = _normalise_code_blocks(export.code_blocks)
+    total_code_chars = _total_code_chars(steps, code_blocks)
+    if total_code_chars > _MAX_TOTAL_CODE_CHARS:
+        raise ValidationError(
+            f"Code content exceeds the total limit of {_MAX_TOTAL_CODE_CHARS} characters.",
+            log_detail=(
+                f"chat export: total code content {total_code_chars} exceeds "
+                f"{_MAX_TOTAL_CODE_CHARS}"
+            ),
+        )
+
     return _Normalised(
         mode=export.mode,
         tldr=tldr,
@@ -395,6 +584,7 @@ def _normalise_export(export: ChatExport) -> _Normalised:
         unresolved_issues=_normalise_lines(export.unresolved_issues),
         next_actions=_normalise_lines(export.next_actions),
         sources=_normalise_lines(export.sources),
+        code_blocks=code_blocks,
         overview=_normalise_lines(export.overview),
         key_points=_normalise_lines(export.key_points),
         context=_normalise_lines(export.context),
@@ -405,7 +595,7 @@ def _normalise_export(export: ChatExport) -> _Normalised:
         turning_points=_normalise_lines(export.turning_points),
         topics=_normalise_topics(export.topics, "topics"),
         prerequisites=_normalise_lines(export.prerequisites),
-        steps=_normalise_lines(export.steps),
+        steps=steps,
         rollback=_normalise_lines(export.rollback),
         symptom=_normalise_lines(export.symptom),
         environment=_normalise_lines(export.environment),
@@ -511,6 +701,110 @@ def _render_topic(heading: str, points: list[str]) -> str:
     return f"### {heading}\n\n{body}"
 
 
+def _escape_inline(value: str) -> str:
+    """Escape ``value`` so it renders as literal inline text — a code
+    block's ``label`` caption, the only inline (not block-start) content this
+    module ever escapes. See :data:`_INLINE_ESCAPE_CHARS` for what is covered
+    and why.
+    """
+    return "".join(f"\\{char}" if char in _INLINE_ESCAPE_CHARS else char for char in value)
+
+
+def _render_caption(label: str) -> str:
+    """Render a code block's ``label`` as a plain, literal line.
+
+    ``_escape_inline`` must run first: it escapes a bare backslash, so
+    running ``_escape_block_start`` afterwards on a label that starts with a
+    hazard character (e.g. ``"# note"`` -> ``"\\# note"``) never doubles the
+    escape — the leading ``\\`` already there makes
+    :data:`_BLOCK_HAZARD_RE`/:data:`_ORDERED_MARKER_RE` no longer match.
+    """
+    return _escape_block_start(_escape_inline(label))
+
+
+def _fence_for(content: str) -> str:
+    """The shortest backtick fence that cannot be closed by anything already
+    inside ``content`` (docs/adr/0009-*.md): three backticks, or one more
+    than the longest run of consecutive backticks the content itself
+    contains, whichever is longer.
+    """
+    longest_run = max((len(run) for run in _BACKTICK_RUN_RE.findall(content)), default=0)
+    return "`" * max(3, longest_run + 1)
+
+
+def _render_fenced_code(block: _NormalisedCodeBlock, *, indent: str) -> list[str]:
+    """Render one code block's lines (caption, opening fence, content,
+    closing fence), each prefixed with ``indent``. The caller decides
+    placement (a procedure step's continuation vs. a standalone top-level
+    block) and any separating blank line — this only builds the fence's own
+    lines, never the content itself, which is placed verbatim per line.
+    """
+    lines: list[str] = []
+    if block.label:
+        lines.append(f"{indent}{_render_caption(block.label)}")
+    info = block.language if block.language and _is_safe_language(block.language) else ""
+    fence = _fence_for(block.content)
+    lines.append(f"{indent}{fence}{info}")
+    lines.extend(f"{indent}{line}" if line else "" for line in block.content.split("\n"))
+    lines.append(f"{indent}{fence}")
+    return lines
+
+
+def _render_step(index: int, step: _NormalisedStep) -> str:
+    """Render one ``## 手順`` list item, preserving the order of its text/code
+    blocks (docs/adr/0009-*.md): a step with no code renders byte-identical
+    to the pre-existing "N. text" line.
+
+    ``indent`` is derived from the marker's own width, not a fixed constant:
+    ``_MAX_STEP_ITEMS`` allows up to 50 steps, so step 10 onward has a
+    4-character marker ("10. "). A fixed 3-space indent would let that
+    step's continuation lines fall short of the marker width, which
+    CommonMark treats as *outside* the list item — verified against
+    markdown-it-py during design: the code fence then closes the list
+    early and every following step renumbers from 1.
+    """
+    marker = f"{index}. "
+    indent = " " * len(marker)
+    lines: list[str] = []
+    for position, block in enumerate(step.blocks):
+        if isinstance(block, _NormalisedTextBlock):
+            escaped = _escape_block_start(block.content)
+            if position == 0:
+                lines.append(f"{marker}{escaped}")
+            else:
+                lines.append("")
+                lines.append(f"{indent}{escaped}")
+        else:
+            lines.append("")
+            lines.extend(_render_fenced_code(block, indent=indent))
+    return "\n".join(lines)
+
+
+def _render_top_level_code_block(block: _NormalisedCodeBlock) -> str:
+    return "\n".join(_render_fenced_code(block, indent=""))
+
+
+def _render_supplementary_sections(normalised: _Normalised) -> list[str]:
+    """Render every *optional* section that is not part of any mode's fixed
+    heading set (docs/adr/0009-*.md) — currently just ``code_blocks`` ->
+    ``## コード``. Unlike :func:`_render_section` (which always emits its
+    heading, with a placeholder when empty, for every field the selected
+    mode owns), a supplementary section is omitted entirely when it has
+    nothing to render: this list is empty whenever ``code_blocks`` is empty,
+    in every mode, so an export with no code renders exactly as before this
+    feature existed. This does not change what ``_MODE_SECTIONS`` guarantees
+    for a mode's own fields — it only adds a section that can appear, at a
+    fixed position, in addition to them.
+    """
+    sections: list[str] = []
+    if normalised.code_blocks:
+        body = "\n\n".join(
+            _render_top_level_code_block(block) for block in normalised.code_blocks
+        )
+        sections.append(f"## {_CODE_BLOCKS_HEADING}\n\n{body}")
+    return sections
+
+
 def _render_body(field_name: str, normalised: _Normalised) -> str:
     value = getattr(normalised, field_name)
     if not value:
@@ -519,9 +813,7 @@ def _render_body(field_name: str, normalised: _Normalised) -> str:
     if field_name == "tldr":
         return _escape_block_start(_join_sentences(value))
     if field_name == "steps":
-        return "\n".join(
-            f"{index}. {_escape_block_start(line)}" for index, line in enumerate(value, start=1)
-        )
+        return "\n".join(_render_step(index, step) for index, step in enumerate(value, start=1))
     if field_name == "timeline":
         return "\n".join(_render_timeline_line(when, event) for when, event in value)
     if field_name == "topics":
@@ -562,6 +854,7 @@ def _build_content(
     blocks.append(_render_section("decisions", normalised))
     for field_name in _MODE_SECTIONS[normalised.mode]:
         blocks.append(_render_section(field_name, normalised))
+    blocks.extend(_render_supplementary_sections(normalised))
     blocks.append(_render_section("unresolved_issues", normalised))
     blocks.append(_render_section("next_actions", normalised))
     blocks.append(_render_related_notes_section(verified_related_notes))

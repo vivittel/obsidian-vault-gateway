@@ -241,6 +241,110 @@ def test_create_note_with_structured_export(
     assert "- d1" in written
 
 
+# --- Verbatim/structure-preserving code content (docs/adr/0009-*.md) -----------
+
+
+def test_create_note_with_legacy_string_steps_still_writes_a_plain_numbered_list(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={
+            "title": "Legacy string steps REST test",
+            "export": {"mode": "procedure", "tldr": ["ok"], "steps": ["first", "second"]},
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    written = (inbox_root / "Legacy string steps REST test.md").read_text(encoding="utf-8")
+    assert "1. first\n2. second" in written
+    assert "```" not in written
+
+
+def test_create_note_with_rich_step_writes_a_code_fence(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={
+            "title": "Rich step REST test",
+            "export": {
+                "mode": "procedure",
+                "tldr": ["ok"],
+                "steps": [
+                    {
+                        "blocks": [
+                            {"type": "text", "content": "設定ファイルを開く。"},
+                            {"type": "code", "language": "yaml", "content": "a: b"},
+                        ]
+                    }
+                ],
+            },
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    written = (inbox_root / "Rich step REST test.md").read_text(encoding="utf-8")
+    assert "```yaml" in written
+    assert "a: b" in written
+
+
+def test_create_note_with_top_level_code_blocks(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={
+            "title": "Top-level code blocks REST test",
+            "export": {
+                "tldr": ["ok"],
+                "code_blocks": [
+                    {"type": "code", "label": "compose.yaml", "content": "a: b"},
+                ],
+            },
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    written = (inbox_root / "Top-level code blocks REST test.md").read_text(encoding="utf-8")
+    assert "## コード" in written
+    assert "compose.yaml" in written
+    assert "```\na: b\n```" in written
+
+
+def test_create_note_with_code_first_step_is_rejected(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={
+            "title": "Code-first step REST test",
+            "export": {
+                "mode": "procedure",
+                "tldr": ["ok"],
+                "steps": [{"blocks": [{"type": "code", "content": "x"}]}],
+            },
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert not (inbox_root / "Code-first step REST test.md").exists()
+
+
+def test_create_note_without_code_blocks_never_writes_a_code_heading(
+    client: TestClient, auth_headers: dict[str, str], inbox_root: Path
+) -> None:
+    response = client.post(
+        "/api/v1/inbox/notes",
+        json={"title": "No code section REST test", "export": {"tldr": ["ok"]}},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    written = (inbox_root / "No code section REST test.md").read_text(encoding="utf-8")
+    assert "## コード" not in written
+
+
 def test_create_note_with_related_notes(
     client: TestClient, auth_headers: dict[str, str], inbox_root: Path
 ) -> None:
