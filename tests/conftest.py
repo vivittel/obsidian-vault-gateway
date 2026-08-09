@@ -86,6 +86,21 @@ def client(env: None) -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
+@pytest.fixture
+def application(env: None):
+    """A :class:`~app.application.GatewayApplication` against the same
+    throwaway vault/inbox the ``client``/``env`` fixtures point at.
+
+    The single shared definition — most test modules used to build a
+    ``TestClient`` and drive REST instead; this is the direct,
+    transport-neutral equivalent.
+    """
+    from app.application import GatewayApplication
+    from app.config import get_settings
+
+    return GatewayApplication(get_settings())
+
+
 @pytest.fixture(scope="session")
 def mcp_client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[TestClient]:
     """A ``TestClient`` for the real, shared ``/mcp`` endpoint, with its

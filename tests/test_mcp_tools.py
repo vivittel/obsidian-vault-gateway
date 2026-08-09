@@ -27,7 +27,6 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
 
 from app.application import GatewayApplication
-from app.config import get_settings
 from app.mcp_server import SERVER_INSTRUCTIONS, mcp
 
 pytestmark = pytest.mark.anyio
@@ -36,11 +35,6 @@ pytestmark = pytest.mark.anyio
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
-
-
-@pytest.fixture
-def application(env: None) -> GatewayApplication:
-    return GatewayApplication(get_settings())
 
 
 # --- tools/list: presence, annotations, schemas ------------------------------

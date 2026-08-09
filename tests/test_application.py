@@ -12,27 +12,8 @@ from pathlib import Path
 import pytest
 
 from app.application import GatewayApplication
-from app.config import Settings, get_settings
 from app.exceptions import InvalidCursorError, ValidationError
 from app.models import ChatExport, CreatedNoteResponse, HealthResponse, NoteResponse, SearchResponse
-
-TEST_API_TOKEN = "test-token-0123456789abcdef"  # noqa: S105 - test fixture, not a real secret
-
-
-@pytest.fixture
-def application(vault_root: Path, inbox_root: Path) -> GatewayApplication:
-    settings = Settings(
-        api_token=TEST_API_TOKEN,
-        mcp_allowed_hosts="testserver,127.0.0.1:*,localhost:*",
-        vault_read_root=vault_root,
-        vault_inbox_root=inbox_root,
-        vault_inbox_relative_path="00_Inbox/ChatGPT",
-        max_search_results=50,
-        max_note_size_bytes=1_048_576,
-        max_request_bytes=2_097_152,
-        tz="Asia/Tokyo",
-    )
-    return GatewayApplication(settings)
 
 
 def test_health_returns_health_response(application: GatewayApplication) -> None:
@@ -313,12 +294,3 @@ def test_no_response_field_contains_an_absolute_path(
     ]
     for haystack in haystacks:
         assert str(vault_root) not in haystack
-
-
-@pytest.fixture(autouse=True)
-def _clear_settings_cache():
-    # This test module builds Settings directly rather than through the env
-    # fixture; still clear the process-wide cache so other test modules that
-    # rely on get_settings() never observe values left over from here.
-    yield
-    get_settings.cache_clear()
