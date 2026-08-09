@@ -18,7 +18,7 @@ from app.services.chat_export import (
     _ALL_MODE_FIELDS_IN_ORDER,
     _FIELD_OWNER_MODES,
     _INLINE_ESCAPE_CHARS,
-    _MAX_TOTAL_CODE_CHARS,
+    _MAX_TOTAL_BLOCK_CHARS,
     _MODE_SECTIONS,
     _canonicalise_code,
     _escape_inline,
@@ -32,6 +32,13 @@ from app.services.chat_export import (
 )
 
 _MD = MarkdownIt("commonmark")
+
+# GFM tables are off in the commonmark preset — _MD above deliberately keeps
+# them off, since every pre-existing test relies on a pipe line parsing as an
+# ordinary paragraph. A second instance with the table rule enabled is used
+# only by the docs/adr/0011-*.md tests below. No new dependency: `.enable`
+# only turns on a rule already bundled with markdown-it-py's core preset.
+_MD_TABLE = MarkdownIt("commonmark").enable("table")
 
 _NOW = datetime(2026, 8, 6, 14, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
 
@@ -1136,7 +1143,8 @@ def test_step_that_normalises_to_only_a_code_block_is_rejected() -> None:
     assert excinfo.value.message == "steps[0] must start with a text block."
 
 
-# --- Total code-size budget (docs/adr/0009-*.md; app/models._MAX_TOTAL_CODE_CHARS) --
+# --- Total block-size budget (docs/adr/0011-*.md, superseding docs/adr/
+# 0009-*.md's code-only budget; app/models._MAX_TOTAL_BLOCK_CHARS) ------------
 
 
 def test_total_code_content_within_the_budget_is_accepted() -> None:
@@ -1162,7 +1170,7 @@ def test_total_code_content_over_the_budget_is_rejected() -> None:
     with pytest.raises(ValidationError) as excinfo:
         render_chat_export(export, title="t", now=_NOW)
     assert excinfo.value.message == (
-        f"Code content exceeds the total limit of {_MAX_TOTAL_CODE_CHARS} characters."
+        f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
     )
 
 
@@ -1209,16 +1217,16 @@ def _build_export_with_total_code_chars(total: int) -> ChatExport:
 def test_total_code_content_at_exactly_the_budget_is_accepted() -> None:
     # Pins the implementation's `>` (not `>=`) comparison: the limit itself
     # is an accepted amount, not a rejected one.
-    export = _build_export_with_total_code_chars(_MAX_TOTAL_CODE_CHARS)
+    export = _build_export_with_total_code_chars(_MAX_TOTAL_BLOCK_CHARS)
     render_chat_export(export, title="t", now=_NOW)  # must not raise
 
 
 def test_total_code_content_one_char_over_the_budget_is_rejected() -> None:
-    export = _build_export_with_total_code_chars(_MAX_TOTAL_CODE_CHARS + 1)
+    export = _build_export_with_total_code_chars(_MAX_TOTAL_BLOCK_CHARS + 1)
     with pytest.raises(ValidationError) as excinfo:
         render_chat_export(export, title="t", now=_NOW)
     assert excinfo.value.message == (
-        f"Code content exceeds the total limit of {_MAX_TOTAL_CODE_CHARS} characters."
+        f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
     )
 
 
@@ -1566,3 +1574,421 @@ def test_procedure_with_plain_steps_still_renders_the_pre_existing_numbered_list
     export = _build("procedure", steps=["first", "second", "third"])
     rendered = render_chat_export(export, title="t", now=_NOW)
     assert "1. first\n2. second\n3. third" in rendered.content
+
+
+# === Rich body blocks (docs/adr/0011-*.md) ====================================
+
+# --- Backward compatibility: every body field still accepts plain strings -----
+
+
+@pytest.mark.parametrize("mode", list(_MODE_SECTIONS))
+def test_plain_string_body_fields_render_byte_identically_across_every_mode(
+    mode: str,
+) -> None:
+    # A dedicated, explicit pin alongside the pre-existing golden-output
+    # tests above (which already cover this implicitly): every mode-specific
+    # plain-list field still renders as ordinary "- " bullets with no
+    # rich-block artifact, whether or not this feature exists.
+    extra = {
+        field_name: ["a", "b"]
+        for field_name in _MODE_SECTIONS[mode]
+        if field_name not in ("steps", "timeline", "topics", "definitions")
+    }
+    export = _build(mode, **extra) if extra else _build(mode)
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    for field_name in extra:
+        heading = "## " + {
+            "overview": "概要", "key_points": "要点", "context": "背景", "design": "設計",
+            "implementation_notes": "実装メモ", "verification": "検証",
+            "turning_points": "転換点", "prerequisites": "前提条件", "rollback": "ロールバック",
+            "symptom": "症状", "environment": "環境", "investigation": "調査",
+            "root_cause": "原因", "workaround": "回避策", "facts": "事実", "examples": "例",
+        }[field_name]
+        assert f"{heading}\n\n- a\n- b" in rendered.content
+
+
+# --- Schema: TableBlock ---------------------------------------------------------
+
+
+def test_table_block_rejects_unknown_field() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            tldr=["ok"],
+            design=[{"type": "table", "headers": ["a"], "rows": [], "bogus": 1}],
+        )
+
+
+def test_table_headers_empty_list_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(tldr=["ok"], design=[{"type": "table", "headers": [], "rows": []}])
+
+
+def test_table_headers_over_max_columns_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            tldr=["ok"],
+            design=[{"type": "table", "headers": [f"h{i}" for i in range(13)], "rows": []}],
+        )
+
+
+def test_table_headers_at_max_columns_is_accepted() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": [f"h{i}" for i in range(12)], "rows": []}],
+    )
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+def test_table_row_over_max_columns_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            tldr=["ok"],
+            design=[
+                {
+                    "type": "table",
+                    "headers": ["a"],
+                    "rows": [[str(i) for i in range(13)]],
+                }
+            ],
+        )
+
+
+def test_table_invalid_alignment_value_is_rejected_at_schema_level() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            tldr=["ok"],
+            design=[
+                {"type": "table", "headers": ["a"], "alignments": ["diagonal"], "rows": []}
+            ],
+        )
+
+
+# --- Formatter: a table never silently degrades — it renders exactly or raises -
+
+
+def test_table_header_empty_after_normalisation_is_rejected() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["a", "   "], "rows": []}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "design[0]: table header 1 must not be empty."
+
+
+def test_table_alignments_length_mismatch_is_rejected() -> None:
+    export = ChatExport(
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["a", "b"], "alignments": ["left"], "rows": []}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        "design[0]: table alignments must match the number of headers."
+    )
+
+
+@pytest.mark.parametrize("row", [["1"], ["1", "2", "3"]])
+def test_table_row_length_mismatch_is_rejected(row: list[str]) -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["a", "b"], "rows": [row]}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"design[0]: table row 0 has {len(row)} cells, expected 2."
+    )
+
+
+def test_table_row_length_mismatch_error_never_echoes_client_cell_values() -> None:
+    export = ChatExport(
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["a"], "rows": [["SECRET_TOKEN", "extra"]]}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert "SECRET_TOKEN" not in excinfo.value.message
+    assert excinfo.value.log_detail is not None
+    assert "SECRET_TOKEN" not in excinfo.value.log_detail
+
+
+def test_table_with_zero_rows_is_accepted() -> None:
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "table", "headers": ["a", "b"], "rows": []}]
+    )
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+def test_table_row_with_empty_cell_is_accepted() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["a", "b"], "rows": [["1", ""]]}],
+    )
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+# --- Structure: bullets and tables as siblings, never nested -------------------
+
+
+def test_bullet_table_bullet_render_as_sibling_blocks_in_one_field() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            "a",
+            "b",
+            {"type": "table", "headers": ["x", "y"], "rows": [["1", "2"]]},
+            "c",
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD_TABLE.parse(rendered.content)
+    types = [t.type for t in tokens]
+    assert types.count("bullet_list_open") == 2
+    assert types.count("table_open") == 1
+
+
+def test_consecutive_tables_in_one_field_are_separated_by_a_blank_line() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "table", "headers": ["a"], "rows": [["1"]]},
+            {"type": "table", "headers": ["b"], "rows": [["2"]]},
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    design_section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert "\n\n" in design_section  # the two tables are not concatenated directly
+    tokens = _MD_TABLE.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "table_open") == 2
+
+
+def test_table_only_field_renders_directly_under_the_heading_with_no_stray_bullet() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["a"], "rows": [["1"]]}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    design_section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert design_section.startswith("| a |")
+    assert not any(line.startswith("- ") for line in design_section.splitlines())
+
+
+def test_topics_points_support_tables() -> None:
+    export = ChatExport(
+        mode="full",
+        tldr=["ok"],
+        topics=[
+            {
+                "heading": "h",
+                "points": ["a", {"type": "table", "headers": ["x"], "rows": [["1"]]}],
+            }
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD_TABLE.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "table_open") == 1
+
+
+# --- Cell escaping and inline formatting ---------------------------------------
+
+
+def test_table_cell_pipe_is_escaped_and_stays_within_one_column() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["a"], "rows": [["x|y"]]}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD_TABLE.parse(rendered.content)
+    th_opens = [t for t in tokens if t.type == "th_open"]
+    assert len(th_opens) == 1  # one header cell, not split by the unescaped pipe
+
+
+def test_table_cell_backslash_pipe_round_trips_without_escaping_the_table() -> None:
+    raw_cell = "x" + "\\" + "|" + "y"
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["a"], "rows": [[raw_cell]]}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD_TABLE.parse(rendered.content)
+    table_opens = [t for t in tokens if t.type == "table_open"]
+    assert len(table_opens) == 1
+    inline = [t for t in tokens if t.type == "inline"]
+    decoded = [
+        "".join(child.content for child in (t.children or []))
+        for t in inline
+        if "x" in "".join(c.content for c in (t.children or []))
+        and "y" in "".join(c.content for c in (t.children or []))
+    ]
+    assert raw_cell in decoded
+
+
+def test_table_cell_keeps_inline_markdown_live() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["h"], "rows": [["**bold** `code`"]]}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD_TABLE.parse(rendered.content)
+    cell_inline = [
+        t
+        for t in tokens
+        if t.type == "inline" and any(c.type == "strong_open" for c in (t.children or []))
+    ]
+    assert len(cell_inline) == 1
+    child_types = [c.type for c in cell_inline[0].children]
+    assert "strong_open" in child_types
+    assert "code_inline" in child_types
+
+
+# --- Alignment delimiter syntax --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("alignment", "delimiter"),
+    [("left", ":---"), ("center", ":---:"), ("right", "---:")],
+)
+def test_table_alignment_renders_the_correct_delimiter(alignment: str, delimiter: str) -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["a"], "alignments": [alignment], "rows": []}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert f"| {delimiter} |" in rendered.content
+
+
+def test_table_without_alignments_renders_the_unmarked_delimiter() -> None:
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "table", "headers": ["a", "b"], "rows": []}]
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "| --- | --- |" in rendered.content
+
+
+# --- Table inside a procedure step ----------------------------------------------
+
+
+def test_table_in_a_step_stays_within_that_step_and_preserves_numbering() -> None:
+    steps = [{"blocks": [{"type": "text", "content": f"step {i}"}]} for i in range(1, 11)]
+    steps[9] = {
+        "blocks": [
+            {"type": "text", "content": "step 10"},
+            {"type": "table", "headers": ["a"], "rows": [["1"]]},
+        ]
+    }
+    export = ChatExport(mode="procedure", tldr=["ok"], steps=steps)
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD_TABLE.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "ordered_list_open") == 1
+    assert sum(1 for t in tokens if t.type == "list_item_open") == 10
+
+    item_index = 0
+    table_item_index = None
+    for token in tokens:
+        if token.type == "list_item_open":
+            item_index += 1
+        elif token.type == "table_open":
+            table_item_index = item_index
+    assert table_item_index == 10
+
+
+def test_table_first_step_is_rejected() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[{"blocks": [{"type": "table", "headers": ["a"], "rows": []}]}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "steps[0] must start with a text block."
+
+
+def test_procedure_step_table_is_never_moved_into_the_top_level_code_section() -> None:
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=[
+            {
+                "blocks": [
+                    {"type": "text", "content": "a"},
+                    {"type": "table", "headers": ["x"], "rows": [["1"]]},
+                ]
+            }
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "## コード" not in rendered.content
+
+
+# --- Total block-size budget also counts table and code-label content ---------
+
+
+def test_table_content_counts_toward_the_total_block_budget() -> None:
+    # 100 rows (the schema's own _MAX_TABLE_ROWS ceiling) x one 1000-char
+    # cell (Line's own per-cell cap) is within every per-field schema bound
+    # yet sums to one more character than the total block budget.
+    rows = [["x" * 1000] for _ in range(100)]
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["h"], "rows": rows}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
+    )
+
+
+def test_table_label_counts_toward_the_total_block_budget() -> None:
+    # Same table (99 rows x 1000-char cell + a 999-char header = 99,999
+    # chars) is accepted on its own, but adding a 2-char label alone pushes
+    # the identical table over budget — isolating the label's contribution.
+    rows = [["x" * 1000] for _ in range(99)]
+    header = "h" * 999
+    at_budget = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": [header], "rows": rows}],
+    )
+    render_chat_export(at_budget, title="t", now=_NOW)  # 99_999 chars, must not raise
+
+    with_label = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "label": "xx", "headers": [header], "rows": rows}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(with_label, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
+    )
+
+
+def test_code_block_label_counts_toward_the_total_block_budget() -> None:
+    # docs/adr/0009-*.md's own budget test never counted a code block's
+    # label — only its content. docs/adr/0011-*.md widens the budget to
+    # every client-supplied string in a rich block, label included: the
+    # export built exactly at the budget by content alone (below) is
+    # accepted; adding a single-character label to it must push it over.
+    export = _build_export_with_total_code_chars(_MAX_TOTAL_BLOCK_CHARS)
+    payload = export.model_dump(mode="json")
+    payload["code_blocks"][0]["label"] = "x"
+    with_label = ChatExport(**payload)
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(with_label, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
+    )

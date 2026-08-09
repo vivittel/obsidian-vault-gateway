@@ -266,6 +266,39 @@ def test_create_note_without_code_blocks_never_writes_a_code_heading(
     assert "## コード" not in written
 
 
+def test_create_note_with_table_in_a_body_field(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    # docs/adr/0011-*.md end-to-end: a table inside a mode-specific body
+    # field renders as GFM Markdown under that field's own heading, not a
+    # separate section.
+    from app.models import ChatExport
+
+    application.create_chat_export_note(
+        title="Table body test",
+        export=ChatExport(
+            mode="technical",
+            tldr=["ok"],
+            design=[
+                "案Aを採用した",
+                {
+                    "type": "table",
+                    "label": "案の比較",
+                    "headers": ["案", "長所"],
+                    "rows": [["A", "速い"]],
+                },
+            ],
+        ),
+    )
+    written = (inbox_root / "Table body test.md").read_text(encoding="utf-8")
+    assert "## 設計" in written
+    assert "案の比較" in written
+    assert "| 案 | 長所 |" in written
+    assert "| --- | --- |" in written
+    assert "| A | 速い |" in written
+    assert "## 表" not in written
+
+
 def test_create_note_with_related_notes(
     application: GatewayApplication, inbox_root: Path
 ) -> None:

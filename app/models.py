@@ -160,16 +160,32 @@ _MAX_TAG_ITEMS = 20
 # _MAX_CODE_CHARS is 8x Line's own cap — enough for a compose.yaml/Dockerfile/
 # mid-sized script/CLI log excerpt; worst-case UTF-8 is 4 bytes per Unicode
 # code point (len() counts code points, not bytes), so 8_000 chars is at most
-# ~32 KiB. _MAX_TOTAL_CODE_CHARS bounds the sum across every code block in one
-# export (app/services/chat_export.py enforces this on normalised data, since
-# no single-field Field(max_length=...) can see the total) at ~400 KiB
-# worst-case, comfortably inside MAX_NOTE_SIZE_BYTES's default 1 MiB — the
-# note_service.read_note truncation limit a written note must still fit
-# under, not just MAX_REQUEST_BYTES's 2 MiB pre-parse backstop.
+# ~32 KiB.
 _MAX_CODE_CHARS = 8_000
 _MAX_BLOCKS_PER_STEP = 12
 _MAX_CODE_BLOCK_ITEMS = 10
-_MAX_TOTAL_CODE_CHARS = 100_000
+
+# Bounds for structured tables (docs/adr/0011-*.md). _MAX_TABLE_COLUMNS caps
+# both a header row and every data row at the schema layer (defense in
+# depth — the exact "every row has the same length as headers" check still
+# has to live in app/services/chat_export.py, since no single Field can see
+# two sibling fields at once). _MAX_TABLE_ROWS is a realistic ceiling for a
+# table pasted into a note, not a hard Markdown constraint.
+_MAX_TABLE_COLUMNS = 12
+_MAX_TABLE_ROWS = 100
+
+# _MAX_TOTAL_BLOCK_CHARS bounds the sum of every client-supplied string inside
+# every rich block in one export — code content/label, table label/headers/
+# rows, quote title/lines together (app/services/chat_export.py enforces this
+# on normalised data, since no single-field Field(max_length=...) can see a
+# cross-field/cross-block total). This is a conservative budget on *input*
+# payload, not a guarantee about the rendered Markdown's byte size — escaping
+# (table cells, code fences) can only grow the text further. The final
+# backstop stays Settings.max_note_size_bytes (default 1 MiB) — the
+# note_service.read_note truncation limit a written note must still fit
+# under, not just MAX_REQUEST_BYTES's 2 MiB pre-parse backstop. At ~400 KiB
+# worst-case UTF-8, 100_000 stays comfortably inside that.
+_MAX_TOTAL_BLOCK_CHARS = 100_000
 
 # Markdown fence info-string safety: no line breaks, no backtick, no control
 # characters, and non-empty when present. Deliberately permissive within that
@@ -271,7 +287,62 @@ class CodeBlock(BaseModel):
     )
 
 
-Block = Annotated[TextBlock | CodeBlock, Field(discriminator="type")]
+TableRow = Annotated[list[Line], Field(max_length=_MAX_TABLE_COLUMNS)]
+
+
+class TableBlock(BaseModel):
+    """One Markdown table: structured input, not a raw Markdown string
+    (docs/adr/0011-*.md). Unlike `CodeBlock.content`, a table is not a
+    self-closing construct — a missing delimiter row or a mismatched column
+    count degrades silently to a plain paragraph or drops cells rather than
+    raising, so the Gateway generates the table's Markdown itself from
+    `headers`/`rows` instead of accepting client-written GFM syntax.
+
+    `headers`/`rows` length-matching and `alignments` length-matching are
+    combination checks the schema cannot express (no `Field` sees two
+    sibling fields at once), so they are enforced in
+    app/services/chat_export.py on normalised data, like every other
+    cross-field check in that module.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["table"]
+    label: str | None = Field(
+        default=None,
+        max_length=_MAX_LABEL_CHARS,
+        description=(
+            "Optional caption shown directly above the table. Rendered as "
+            "plain text, never as a Markdown heading or emphasis."
+        ),
+    )
+    headers: list[Line] = Field(
+        min_length=1,
+        max_length=_MAX_TABLE_COLUMNS,
+        description=(
+            "Column headers, left to right. Each must be non-empty after "
+            "trimming — an unnamed column is not accepted."
+        ),
+    )
+    alignments: list[Literal["left", "center", "right"]] | None = Field(
+        default=None,
+        description=(
+            "Optional per-column alignment, same length and order as "
+            "headers. Omit for the Markdown default (no explicit alignment)."
+        ),
+    )
+    rows: list[TableRow] = Field(
+        default_factory=list,
+        max_length=_MAX_TABLE_ROWS,
+        description=(
+            "Data rows, each a list of cells in column order. Every row "
+            "must have exactly as many cells as headers — pad with an empty "
+            "string rather than omitting a cell. A cell may be empty."
+        ),
+    )
+
+
+StepBlock = Annotated[TextBlock | CodeBlock | TableBlock, Field(discriminator="type")]
 
 
 class ProcedureStep(BaseModel):
@@ -288,10 +359,10 @@ class ProcedureStep(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    blocks: list[Block] = Field(
+    blocks: list[StepBlock] = Field(
         min_length=1,
         max_length=_MAX_BLOCKS_PER_STEP,
-        description="Ordered text/code parts of this step, in the order they should appear.",
+        description="Ordered text/code/table parts of this step, in the order they should appear.",
     )
 
 
@@ -309,6 +380,51 @@ def _coerce_step(value: object) -> object:
 StepInput = Annotated[
     ProcedureStep,
     BeforeValidator(_coerce_step, json_schema_input_type=Line | ProcedureStep),
+]
+
+
+class BulletBlock(BaseModel):
+    """One bullet-list item inside a body field's rich block sequence
+    (docs/adr/0011-*.md) — the direct analogue of `TextBlock` for a body
+    field rather than a `ProcedureStep`.
+
+    `type` is `"bullet"`, not `"text"`: this model represents a list item,
+    not prose, and `ProcedureStep`'s own `TextBlock` (also `content: Line`,
+    but a continuation paragraph, never a bullet) already uses `"text"` for
+    a different rendering — reusing the same discriminator value for two
+    models with different meaning would be confusing, not merely redundant.
+
+    `content` reuses `Line` (no `min_length`) for exactly the reason
+    `TextBlock.content` does: the bare-string shorthand (`_coerce_body_item`)
+    must stay at least as permissive as the plain `list[Line]` shape it
+    replaces, and an empty/whitespace-only `content` is dropped by
+    app/services/chat_export.py's normalisation like every other plain
+    string list already is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["bullet"]
+    content: Line = Field(description="Text for this bullet.")
+
+
+BodyBlock = Annotated[BulletBlock | TableBlock, Field(discriminator="type")]
+
+
+def _coerce_body_item(value: object) -> object:
+    """Backward-compatible shorthand: a bare string becomes a `BulletBlock`
+    (docs/adr/0011-*.md) — the direct analogue of `_coerce_step` for a body
+    field's rich block sequence. Existing callers sending a plain
+    `list[str]` keep working unchanged.
+    """
+    if isinstance(value, str):
+        return {"type": "bullet", "content": value}
+    return value
+
+
+BodyItem = Annotated[
+    BodyBlock,
+    BeforeValidator(_coerce_body_item, json_schema_input_type=Line | BodyBlock),
 ]
 
 
@@ -337,7 +453,7 @@ class TopicSection(BaseModel):
     heading: Label = Field(
         description="Short label for this topic, rendered as a '###' subheading."
     )
-    points: list[Line] = Field(
+    points: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="What was covered under this topic, one point per item.",
@@ -396,7 +512,7 @@ class ChatExport(BaseModel):
             "joined into a single paragraph directly under the title."
         ),
     )
-    decisions: list[Line] = Field(
+    decisions: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description=(
@@ -406,7 +522,7 @@ class ChatExport(BaseModel):
             "next_actions, never here. Leave empty when nothing was decided."
         ),
     )
-    unresolved_issues: list[Line] = Field(
+    unresolved_issues: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description=(
@@ -415,7 +531,7 @@ class ChatExport(BaseModel):
             "and the two must never be merged. Leave empty when nothing is open."
         ),
     )
-    next_actions: list[Line] = Field(
+    next_actions: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description=(
@@ -438,7 +554,7 @@ class ChatExport(BaseModel):
             "input — is the record of what actually got linked."
         ),
     )
-    sources: list[Line] = Field(
+    sources: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description=(
@@ -461,29 +577,29 @@ class ChatExport(BaseModel):
     )
 
     # --- summary mode only -----------------------------------------------------
-    overview: list[Line] = Field(
+    overview: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="summary mode only. What the conversation was about, in a few points.",
     )
-    key_points: list[Line] = Field(
+    key_points: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="summary mode only. The points worth remembering, one per item.",
     )
 
     # --- technical mode only ---------------------------------------------------
-    context: list[Line] = Field(
+    context: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="technical mode only. The problem or constraints the design starts from.",
     )
-    design: list[Line] = Field(
+    design: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="technical mode only. The design or approach itself, one point per item.",
     )
-    implementation_notes: list[Line] = Field(
+    implementation_notes: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description=(
@@ -491,7 +607,7 @@ class ChatExport(BaseModel):
             "names, function names, gotchas."
         ),
     )
-    verification: list[Line] = Field(
+    verification: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description=(
@@ -509,7 +625,7 @@ class ChatExport(BaseModel):
             "happened, oldest first."
         ),
     )
-    turning_points: list[Line] = Field(
+    turning_points: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="history mode only. The moments where the direction actually changed.",
@@ -527,7 +643,7 @@ class ChatExport(BaseModel):
     )
 
     # --- procedure mode only ------------------------------------------------------
-    prerequisites: list[Line] = Field(
+    prerequisites: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="procedure mode only. What must already be true before starting.",
@@ -550,14 +666,14 @@ class ChatExport(BaseModel):
             "block."
         ),
     )
-    rollback: list[Line] = Field(
+    rollback: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="procedure mode only. How to undo it if it goes wrong.",
     )
 
     # --- issue mode only ------------------------------------------------------------
-    symptom: list[Line] = Field(
+    symptom: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description=(
@@ -565,17 +681,17 @@ class ChatExport(BaseModel):
             "— the behaviour, not the cause."
         ),
     )
-    environment: list[Line] = Field(
+    environment: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="issue mode only. Versions, hosts, configuration relevant to the problem.",
     )
-    investigation: list[Line] = Field(
+    investigation: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="issue mode only. What was checked and what it showed, in order.",
     )
-    root_cause: list[Line] = Field(
+    root_cause: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description=(
@@ -583,7 +699,7 @@ class ChatExport(BaseModel):
             "was not established — do not put a guess here."
         ),
     )
-    workaround: list[Line] = Field(
+    workaround: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="issue mode only. What makes it usable without a full fix.",
@@ -595,12 +711,12 @@ class ChatExport(BaseModel):
         max_length=_MAX_DEFINITION_ITEMS,
         description="reference mode only. Term and meaning pairs.",
     )
-    facts: list[Line] = Field(
+    facts: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="reference mode only. Standalone facts worth looking up later.",
     )
-    examples: list[Line] = Field(
+    examples: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description="reference mode only. Concrete examples, one per item.",
