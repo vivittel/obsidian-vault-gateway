@@ -38,6 +38,15 @@
         "additionalProperties": false,
         "description": "Structured summary of a conversation, ready to be formatted into a note.\n\nOne flat model rather than a discriminated union, because `mode` must\ndefault to \"summary\" when the client omits it and a pydantic discriminated\nunion requires the tag to be present. Fields that do not belong to the\nselected `mode` are rejected by app/services/chat_export.py — inside the\ntool body, so the rejection travels through _McpCall's GatewayError\nconversion instead of the SDK's raw ToolError path.\n\n`related_notes` carries only the client's candidate paths — it is not what\ngets rendered. app/services/related_notes.py re-verifies every path\nagainst the Vault (this model cannot: it has no filesystem access), and\napp/services/chat_export.render_chat_export takes the verified survivors\nthrough a separate `verified_related_notes` argument, never this field\ndirectly. See docs/adr/0006-verified-related-note-wikilinks.md.",
         "properties": {
+          "code_blocks": {
+            "description": "Standalone code that does not belong to any single procedure step: a finished config file, a complete script, reference code, an appendix log. Rendered as an optional '## コード' section, omitted entirely when empty — available in every mode, not only 'procedure'. Never move a procedure step's code here: code that belongs to a step goes in that step's own export.steps[].blocks, so the procedure keeps its order (text -> code -> text -> ...).",
+            "items": {
+              "$ref": "#/components/schemas/CodeBlock"
+            },
+            "maxItems": 10,
+            "title": "Code Blocks",
+            "type": "array"
+          },
           "context": {
             "description": "technical mode only. The problem or constraints the design starts from.",
             "items": {
@@ -248,10 +257,17 @@
             "type": "array"
           },
           "steps": {
-            "description": "procedure mode only, and required for it. One action per item, in the order they must be performed. Rendered as a numbered list; do not put your own numbering in the text.",
+            "description": "procedure mode only, and required for it. One step per item, in the order they must be performed. Rendered as a numbered list; do not put your own numbering in the text. For new exports, send a ProcedureStep object: {\"blocks\": [...]}, where blocks is an ordered mix of {\"type\": \"text\", \"content\": ...} and {\"type\": \"code\", \"language\": ..., \"label\": ..., \"content\": ...} — that ordering is what preserves the context of a procedure (e.g. text, then the command, then more text, then the next command). A bare string is a backward-compatible shorthand for a step with a single text block; do not use it when the step involves code. Each step must start with a text block.",
             "items": {
-              "maxLength": 1000,
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 1000,
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/ProcedureStep"
+                }
+              ]
             },
             "maxItems": 50,
             "title": "Steps",
@@ -351,6 +367,56 @@
           "tldr"
         ],
         "title": "ChatExport",
+        "type": "object"
+      },
+      "CodeBlock": {
+        "additionalProperties": false,
+        "description": "One fenced code block: a command, a config file, a log, CLI output —\nanything whose line breaks and indentation must survive verbatim.\n\nRendered as-is inside a dynamically-sized Markdown fence (docs/adr/\n0009-*.md): no line-breaking, no whitespace collapsing, no Markdown\nescaping is applied to `content`. Unlike `TextBlock.content`, `content`\nhere has `min_length=1` — a rich-object code block carries no meaning\nwhen empty, and (unlike a legacy plain-string step) there is no\nbackward-compatibility reason to accept one.",
+        "properties": {
+          "content": {
+            "description": "The code/config/log/output itself. Rendered verbatim/structure-preserving: indentation and blank lines are kept exactly, but this is not byte-level lossless — line endings are normalised to LF, non-tab/newline control characters are stripped, and at most one trailing newline is collapsed (a second one is kept as a deliberate blank line). See docs/adr/0009-*.md.",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional caption shown directly above the code, e.g. a file name ('compose.yaml') or a description ('起動コマンド'). Rendered as plain text, never as a Markdown heading or emphasis.",
+            "title": "Label"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9+#._-]{0,31}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional Markdown fence info string, e.g. 'bash', 'yaml', 'json'.",
+            "title": "Language"
+          },
+          "type": {
+            "const": "code",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "content"
+        ],
+        "title": "CodeBlock",
         "type": "object"
       },
       "CreatedNoteResponse": {
@@ -792,6 +858,41 @@
         "title": "NoteResponse",
         "type": "object"
       },
+      "ProcedureStep": {
+        "additionalProperties": false,
+        "description": "One step of a `procedure` export, as an ordered mix of text and code.\n\n`blocks` must start with a `TextBlock` (app/services/chat_export.py\nenforces this after normalisation — CommonMark cannot represent a step\nwhose first line is a bare fence without inserting a blank line that\nwould split the list and break its numbering). `min_length=1`: a step\nwith no blocks carries no meaning, unlike a legacy plain-string step\n(which the schema never lets become empty in this shape at all — see\n`_coerce_step`).",
+        "properties": {
+          "blocks": {
+            "description": "Ordered text/code parts of this step, in the order they should appear.",
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "code": "#/components/schemas/CodeBlock",
+                  "text": "#/components/schemas/TextBlock"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/TextBlock"
+                },
+                {
+                  "$ref": "#/components/schemas/CodeBlock"
+                }
+              ]
+            },
+            "maxItems": 12,
+            "minItems": 1,
+            "title": "Blocks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "blocks"
+        ],
+        "title": "ProcedureStep",
+        "type": "object"
+      },
       "SearchResponse": {
         "properties": {
           "next_cursor": {
@@ -898,6 +999,29 @@
           "description"
         ],
         "title": "TermDefinition",
+        "type": "object"
+      },
+      "TextBlock": {
+        "additionalProperties": false,
+        "description": "One paragraph of ordinary text inside a `ProcedureStep`.\n\n`content` reuses `Line` (no `min_length`) rather than a stricter type: a\nlegacy plain-string `steps` item is coerced into exactly one `TextBlock`\n(see `_coerce_step` below), and that coercion must not reject anything\nthe old `list[Line]` shape already accepted. An empty/whitespace-only\n`content` is dropped by app/services/chat_export.py's normalisation, the\nsame \"pydantic allows it, the formatter drops it\" convention every other\nplain-string field already follows.",
+        "properties": {
+          "content": {
+            "description": "Plain text for this part of the step.",
+            "maxLength": 1000,
+            "title": "Content",
+            "type": "string"
+          },
+          "type": {
+            "const": "text",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "content"
+        ],
+        "title": "TextBlock",
         "type": "object"
       },
       "TimelineEntry": {

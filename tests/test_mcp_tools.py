@@ -155,6 +155,29 @@ async def test_create_inbox_note_export_schema_describes_every_mode_specific_fie
             assert mode in description, f"{field_name}'s description omits '{mode}'"
 
 
+async def test_create_inbox_note_steps_description_documents_the_shorthand_rule() -> None:
+    # docs/adr/0009-*.md: steps accepts a ProcedureStep object *or* a bare
+    # string (a backward-compatible shorthand for a single text block) — the
+    # schema-level anyOf can't say which is preferred, so the description
+    # must, for a calling model deciding how to send a step with code in it.
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["create_inbox_note"].input_schema
+    steps_schema = schema["$defs"]["ChatExport"]["properties"]["steps"]
+    description = steps_schema["description"]
+    assert "backward-compatible shorthand" in description
+    assert "ProcedureStep" in description
+
+
+async def test_create_inbox_note_code_blocks_description_documents_the_ownership_split() -> None:
+    # docs/adr/0009-*.md: code that belongs to a procedure step must not be
+    # moved into the top-level code_blocks section, or the step's context is
+    # lost — the description is the only place a calling model sees this.
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["create_inbox_note"].input_schema
+    code_blocks_schema = schema["$defs"]["ChatExport"]["properties"]["code_blocks"]
+    assert "Never move a procedure step's code here" in code_blocks_schema["description"]
+
+
 async def test_append_inbox_note_has_write_annotations() -> None:
     tools = {t.name: t for t in await mcp.list_tools()}
     annotations = tools["append_inbox_note"].annotations
@@ -674,6 +697,60 @@ async def test_each_mode_writes_a_note_with_its_headings(
     written = (inbox_root / f"{title}.md").read_text(encoding="utf-8")
     assert f"export_mode: {mode}" in written
     assert heading in written
+
+
+# --- Verbatim/structure-preserving code content (docs/adr/0009-*.md) -----------
+
+
+async def test_create_inbox_note_rich_step_writes_a_code_fence(
+    env: None, inbox_root: Path
+) -> None:
+    title = "Rich step check"
+    export = {
+        "mode": "procedure",
+        "tldr": ["x"],
+        "steps": [
+            {
+                "blocks": [
+                    {"type": "text", "content": "設定ファイルを開く。"},
+                    {"type": "code", "language": "bash", "content": "vi compose.yaml"},
+                ]
+            }
+        ],
+    }
+    result = await mcp.call_tool("create_inbox_note", {"title": title, "export": export})
+    assert result.is_error is False
+    written = (inbox_root / f"{title}.md").read_text(encoding="utf-8")
+    assert "```bash" in written
+    assert "vi compose.yaml" in written
+
+
+async def test_create_inbox_note_legacy_string_steps_still_write_a_plain_numbered_list(
+    env: None, inbox_root: Path
+) -> None:
+    title = "Legacy string steps check"
+    export = {"mode": "procedure", "tldr": ["x"], "steps": ["first", "second"]}
+    result = await mcp.call_tool("create_inbox_note", {"title": title, "export": export})
+    assert result.is_error is False
+    written = (inbox_root / f"{title}.md").read_text(encoding="utf-8")
+    assert "1. first\n2. second" in written
+    assert "```" not in written
+
+
+async def test_create_inbox_note_code_first_step_is_rejected(
+    env: None, inbox_root: Path
+) -> None:
+    title = "Code-first step check"
+    export = {
+        "mode": "procedure",
+        "tldr": ["x"],
+        "steps": [{"blocks": [{"type": "code", "content": "y"}]}],
+    }
+    with pytest.raises(MCPError) as excinfo:
+        await mcp.call_tool("create_inbox_note", {"title": title, "export": export})
+    assert excinfo.value.data == {"code": "VALIDATION_ERROR"}
+    assert excinfo.value.message == "steps[0] must start with a text block."
+    assert not (inbox_root / f"{title}.md").exists()
 
 
 async def test_append_inbox_note_matches_application_layer(

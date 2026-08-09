@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from app.exceptions import ErrorCode
 
@@ -158,6 +158,27 @@ _MAX_TOPIC_ITEMS = 20
 _MAX_DEFINITION_ITEMS = 50
 _MAX_TAG_ITEMS = 20
 
+# Bounds for verbatim/structure-preserving code content (docs/adr/0009-*.md).
+# _MAX_CODE_CHARS is 8x Line's own cap — enough for a compose.yaml/Dockerfile/
+# mid-sized script/CLI log excerpt; worst-case UTF-8 is 4 bytes per Unicode
+# code point (len() counts code points, not bytes), so 8_000 chars is at most
+# ~32 KiB. _MAX_TOTAL_CODE_CHARS bounds the sum across every code block in one
+# export (app/services/chat_export.py enforces this on normalised data, since
+# no single-field Field(max_length=...) can see the total) at ~400 KiB
+# worst-case, comfortably inside MAX_NOTE_SIZE_BYTES's default 1 MiB — the
+# note_service.read_note truncation limit a written note must still fit
+# under, not just MAX_REQUEST_BYTES's 2 MiB pre-parse backstop.
+_MAX_CODE_CHARS = 8_000
+_MAX_BLOCKS_PER_STEP = 12
+_MAX_CODE_BLOCK_ITEMS = 10
+_MAX_TOTAL_CODE_CHARS = 100_000
+
+# Markdown fence info-string safety: no line breaks, no backtick, no control
+# characters, and non-empty when present. Deliberately permissive within that
+# (does not enumerate a language vocabulary) — Field(pattern=...) rejects
+# anything outside this set instead of silently mangling it.
+_LANGUAGE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9+#._-]{0,31}$"
+
 # Public (unlike the _MAX_* constants above): app/application.py reads this
 # too, as the max_links argument to app.services.related_notes.resolve_related_notes.
 MAX_RELATED_NOTES = 10
@@ -181,6 +202,116 @@ Tag = Annotated[str, Field(max_length=_MAX_LABEL_CHARS)]
 # is schema-enforced (ChatExport.related_notes's max_length=MAX_RELATED_NOTES
 # below); an individual item's shape never is.
 NotePath = str
+
+# Verbatim/structure-preserving code content (docs/adr/0009-*.md). Unlike
+# Line, no attempt is made to bound this to "one Markdown line" — a fenced
+# code block's whole point is to carry indentation and internal blank lines
+# untouched. min_length=1 rejects an empty code block at the schema layer
+# (issue reported in review: a rich-object CodeBlock carries no value at all
+# if empty, unlike a legacy plain-string step, which must stay permissive —
+# see TextBlock.content's own comment for why the two are deliberately not
+# symmetric).
+CodeContent = Annotated[str, Field(min_length=1, max_length=_MAX_CODE_CHARS)]
+
+
+class TextBlock(BaseModel):
+    """One paragraph of ordinary text inside a `ProcedureStep`.
+
+    `content` reuses `Line` (no `min_length`) rather than a stricter type: a
+    legacy plain-string `steps` item is coerced into exactly one `TextBlock`
+    (see `_coerce_step` below), and that coercion must not reject anything
+    the old `list[Line]` shape already accepted. An empty/whitespace-only
+    `content` is dropped by app/services/chat_export.py's normalisation, the
+    same "pydantic allows it, the formatter drops it" convention every other
+    plain-string field already follows.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text"]
+    content: Line = Field(description="Plain text for this part of the step.")
+
+
+class CodeBlock(BaseModel):
+    """One fenced code block: a command, a config file, a log, CLI output —
+    anything whose line breaks and indentation must survive verbatim.
+
+    Rendered as-is inside a dynamically-sized Markdown fence (docs/adr/
+    0009-*.md): no line-breaking, no whitespace collapsing, no Markdown
+    escaping is applied to `content`. Unlike `TextBlock.content`, `content`
+    here has `min_length=1` — a rich-object code block carries no meaning
+    when empty, and (unlike a legacy plain-string step) there is no
+    backward-compatibility reason to accept one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["code"]
+    language: str | None = Field(
+        default=None,
+        pattern=_LANGUAGE_PATTERN,
+        description="Optional Markdown fence info string, e.g. 'bash', 'yaml', 'json'.",
+    )
+    label: str | None = Field(
+        default=None,
+        max_length=_MAX_LABEL_CHARS,
+        description=(
+            "Optional caption shown directly above the code, e.g. a file name "
+            "('compose.yaml') or a description ('起動コマンド'). Rendered as "
+            "plain text, never as a Markdown heading or emphasis."
+        ),
+    )
+    content: CodeContent = Field(
+        description=(
+            "The code/config/log/output itself. Rendered verbatim/structure-"
+            "preserving: indentation and blank lines are kept exactly, but "
+            "this is not byte-level lossless — line endings are normalised "
+            "to LF, non-tab/newline control characters are stripped, and at "
+            "most one trailing newline is collapsed (a second one is kept "
+            "as a deliberate blank line). See docs/adr/0009-*.md."
+        )
+    )
+
+
+Block = Annotated[TextBlock | CodeBlock, Field(discriminator="type")]
+
+
+class ProcedureStep(BaseModel):
+    """One step of a `procedure` export, as an ordered mix of text and code.
+
+    `blocks` must start with a `TextBlock` (app/services/chat_export.py
+    enforces this after normalisation — CommonMark cannot represent a step
+    whose first line is a bare fence without inserting a blank line that
+    would split the list and break its numbering). `min_length=1`: a step
+    with no blocks carries no meaning, unlike a legacy plain-string step
+    (which the schema never lets become empty in this shape at all — see
+    `_coerce_step`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    blocks: list[Block] = Field(
+        min_length=1,
+        max_length=_MAX_BLOCKS_PER_STEP,
+        description="Ordered text/code parts of this step, in the order they should appear.",
+    )
+
+
+def _coerce_step(value: object) -> object:
+    """Backward-compatible shorthand: a bare string step becomes a
+    `ProcedureStep` with exactly one `TextBlock`. Existing callers sending
+    `steps: ["do it", ...]` (REST or MCP) keep working unchanged — this is
+    the only place that equivalence is expressed.
+    """
+    if isinstance(value, str):
+        return {"blocks": [{"type": "text", "content": value}]}
+    return value
+
+
+StepInput = Annotated[
+    ProcedureStep,
+    BeforeValidator(_coerce_step, json_schema_input_type=Line | ProcedureStep),
+]
 
 
 class TimelineEntry(BaseModel):
@@ -317,6 +448,19 @@ class ChatExport(BaseModel):
             "that was run. One per item."
         ),
     )
+    code_blocks: list[CodeBlock] = Field(
+        default_factory=list,
+        max_length=_MAX_CODE_BLOCK_ITEMS,
+        description=(
+            "Standalone code that does not belong to any single procedure step: "
+            "a finished config file, a complete script, reference code, an "
+            "appendix log. Rendered as an optional '## コード' section, omitted "
+            "entirely when empty — available in every mode, not only "
+            "'procedure'. Never move a procedure step's code here: code that "
+            "belongs to a step goes in that step's own export.steps[].blocks, "
+            "so the procedure keeps its order (text -> code -> text -> ...)."
+        ),
+    )
 
     # --- summary mode only -----------------------------------------------------
     overview: list[Line] = Field(
@@ -390,13 +534,22 @@ class ChatExport(BaseModel):
         max_length=_MAX_LIST_ITEMS,
         description="procedure mode only. What must already be true before starting.",
     )
-    steps: list[Line] = Field(
+    steps: list[StepInput] = Field(
         default_factory=list,
         max_length=_MAX_STEP_ITEMS,
         description=(
-            "procedure mode only, and required for it. One action per item, in "
+            "procedure mode only, and required for it. One step per item, in "
             "the order they must be performed. Rendered as a numbered list; do "
-            "not put your own numbering in the text."
+            "not put your own numbering in the text. For new exports, send a "
+            "ProcedureStep object: {\"blocks\": [...]}, where blocks is an "
+            "ordered mix of {\"type\": \"text\", \"content\": ...} and "
+            "{\"type\": \"code\", \"language\": ..., \"label\": ..., "
+            "\"content\": ...} — that ordering is what preserves the context "
+            "of a procedure (e.g. text, then the command, then more text, "
+            "then the next command). A bare string is a backward-compatible "
+            "shorthand for a step with a single text block; do not use it "
+            "when the step involves code. Each step must start with a text "
+            "block."
         ),
     )
     rollback: list[Line] = Field(
