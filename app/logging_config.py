@@ -134,7 +134,7 @@ class PlainLogFormatter(logging.Formatter):
     ``$4`` method, ``$5`` target, ``$6`` status, ``$7`` duration, then the
     tail::
 
-        2026-08-02T21:14:03.412+0900  INFO  rest    GET        /api/v1/health
+        2026-08-02T21:14:03.412+0900  DEBUG rest    GET        /api/v1/health
         2026-08-02T21:14:07.883+0900  INFO  mcp     tools/call search_notes
 
     Everything else — uvicorn's startup lines, the MCP SDK's own messages, and

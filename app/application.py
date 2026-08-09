@@ -1,12 +1,11 @@
 """Transport-neutral application layer (MCP_IMPLEMENTATION_PLAN section 7).
 
-:class:`GatewayApplication` is the one place both the health REST route and
-the MCP tools call into. It depends on nothing HTTP-specific and nothing
+:class:`GatewayApplication` depends on nothing HTTP-specific and nothing
 MCP-specific — only on :class:`~app.config.Settings` and the existing
-services — so the two transports can never observe different behaviour for
-the same operation. Anything transport-specific (setting ``request.state``
-for the access log, MCP tool annotations) stays in the adapter that calls in
-here.
+services. REST's own health route and the MCP tools both call into it
+directly; neither transport calls the other. Anything transport-specific
+(setting ``request.state`` for the access log, MCP tool annotations) stays
+in the adapter that calls in here.
 """
 
 from __future__ import annotations

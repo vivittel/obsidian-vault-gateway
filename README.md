@@ -66,10 +66,10 @@ These hold regardless of what future phases add (see `AGENTS.md`):
   `docs/adr/0004-allow-disabling-bearer-authentication.md` for the decision
   and accepted boundary conditions.
 
-MCP and REST's own health route both call `app/application.py`
-(`GatewayApplication`) and the service functions it wraps (`app/services/`);
-neither transport calls the other over HTTP, so behaviour for a given
-operation can never diverge by transport.
+`app/application.py` (`GatewayApplication`) is transport-neutral. REST's own
+health route and the MCP tools both call it and the service functions it
+wraps (`app/services/`) directly; neither transport calls the other over
+HTTP.
 
 ## MCP (primary interface)
 
@@ -370,15 +370,15 @@ plugin all show it.
 
 ```text
 2026-08-02T21:13:58.001+0900  INFO  uvicorn Started server process [1]
-2026-08-02T21:14:03.412+0900  INFO  rest    GET        /api/v1/health             200          1.1ms
+2026-08-02T21:14:03.412+0900  DEBUG rest    GET        /api/v1/health             200          1.1ms
 2026-08-02T21:14:07.883+0900  INFO  mcp     tools/call search_notes               success      31.7ms   results=5
 2026-08-02T21:14:12.004+0900  INFO  mcp     tools/call read_note                  error        3.1ms    code=NOTE_NOT_FOUND
 2026-08-02T21:14:19.002+0900  INFO  mcp     -          mcp_auth_failed            unauthorized -        reason=bearer_token_mismatch
 ```
 
-REST's own line is logged at `DEBUG`, not `INFO` (see below) — shown here at
-`INFO` only to illustrate the column layout; in practice you will only see
-it with `LOG_LEVEL=DEBUG`.
+REST's own line is logged at `DEBUG`, not `INFO` (see below) — with the
+default `LOG_LEVEL=INFO` you will not see it at all; `LOG_LEVEL=DEBUG`
+surfaces it exactly as shown above, still at level `DEBUG`.
 
 | Field | Meaning |
 |---|---|
