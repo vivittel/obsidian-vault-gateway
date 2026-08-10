@@ -603,6 +603,24 @@ continuation indent・Obsidian固有inline構文（`#`タグ/`^`ブロックID�
 escapeするcaption描画の詳細はADR-0009参照。手順に直接属さないコードは
 全モード共通の任意フィールド`export.code_blocks`に置ける。
 
+**本文フィールドのrich block化（ADR-0011）**: `decisions`/`design`/
+`topics[].points`等の既存`list[Line]`フィールド20個を`list[BodyItem]`へ
+一般化。`BodyItem`はbare stringまたは`{"type": "bullet"|"code"|"table"|"quote", ...}`。
+`code`はADR-0009の`CodeBlock`を再利用（新規モデルではない）——`procedure.steps`・
+`code_blocks`と同じ型が本文フィールドでも使えるようになった。
+`bullet`は`depth`（ネスト深さ、直前bulletの深さ+1を超えるjumpは拒否——clampはしない）
+と`checked`（GFM task list）を持つ。`table`はheaders/rows/alignmentsの構造化入力
+（生Markdown文字列は受理しない——tableはfenceと異なり自己閉鎖しないため、列数不一致は
+明示的にエラーとし、静かな劣化を防ぐ）。`quote`は`callout`（パターン検証のみ、
+語彙固定なし）と`title`（`callout`必須）、各`lines`に`_escape_block_start`を適用。
+code/table/quoteはbulletリストを終了させ、セクション直下の兄弟blockとしてその場に
+レンダリングされる（`## 表`/`## 引用`という別セクションへは集約しない——ADR-0009が
+コードの集約を避けた理由と同じ。本文フィールド内のcodeも同様に`## コード`へは
+移動しない）。前後は空行で区切る（区切らないと直前のbulletリストのlazy continuation
+に吸収され消失する）。`ProcedureStep.blocks`も`table`/`quote`を受理するが`bullet`は
+受理しない。`_MAX_TOTAL_CODE_CHARS`は`_MAX_TOTAL_BLOCK_CHARS`へ改名し、table/quoteの
+文字列とcode blockの`label`も合算対象に加える（値は100,000のまま）。詳細はADR-0011参照。
+
 **frontmatterキー順**: `title` → `created` → `updated` → `source`（常に`chatgpt`）
 → `export_mode` → `project`（任意、省略可）→ `conversation_type`（任意、省略可）
 → `tags`。
@@ -878,6 +896,35 @@ follow-up、ADR-0009）**: 依存として`markdown-it-py`をdev extrasに追加
 - code-firstなstep（先頭がcode block）の拒否
 - `## コード`が空なら省略されること、全モードで利用できること、procedure
   step内のコードが`## コード`へ集約されないこと
+
+**本文フィールドのrich block化（ADR-0011）**: 既存の`_MD`（table無効の
+commonmark preset）に加え、`_MD_TABLE = MarkdownIt("commonmark").enable("table")`
+を追加してtable構造を検証する（新規依存なし）。
+
+- schema: `TableBlock`/`QuoteBlock`/`BulletBlock`のフィールド検証、未知フィールド
+  拒否、`headers`/`lines`の空リスト拒否、`callout`パターン、`depth`の範囲（0〜3）、
+  `TextBlock`が`depth`/`checked`を持たないこと（`extra="forbid"`）、`BodyBlock`が
+  ADR-0009の`CodeBlock`を再利用すること（新規`$defs`が増えないこと）
+- table: 列数不一致・alignments長不一致・空headerの拒否（クライアント値を
+  含まないエラーメッセージ）、0行tableの許容、空セルの許容、`\`→`|`の順で
+  escapeすることでセル内`\|`が列を分割しないこと、セル内inline Markdownが
+  生きたまま残ること（code captionの`_escape_inline`は使わない）
+- quote: `callout`なしの`title`拒否、空白のみの行がすべて正規化後に空になった
+  quoteのdrop、`_escape_block_start`が対象とする全hazard class（`#`/`>`/`<`/
+  `[`/`-`・`*`・`+`/fence/thematic break/`N.`・`N)`）がquote行でも防御されること、
+  header行の`title`はinline Markdownが生きたまま残ること
+- bullet: depth 0/1/2のネスト、depthの逆転（jumpの拒否、clampしないこと）、
+  先頭depthが0以外の拒否、正規化で空bulletが脱落した後もsource_indexで
+  クライアント入力のindexを報告すること、table/quote後にdepthが0から再開する
+  ことの成功・失敗両ケース、checked true/falseのtask list checkbox描画
+- 構造: bullet/code/table/quoteが兄弟blockとしてネストせず並ぶこと、連続する
+  section-level block間にも空行が入ること、rich blockのみのfieldに余計な
+  bulletが出ないこと、`topics[].points`でもtableが使えること、本文フィールド内の
+  codeが`## コード`へ移動しないこと
+- 予算: `_MAX_TOTAL_CODE_CHARS`改名後の`_MAX_TOTAL_BLOCK_CHARS`に本文フィールド内の
+  code/table/quoteの文字列とcode blockの`label`が算入されること（境界値テスト）
+- 後方互換: 全モードでbare stringのみのexportがバイト一致で不変であること
+  （既存golden outputを含む）
 
 ### 検証済み関連ノートwikilink（`tests/test_related_notes.py`、issue #13）
 

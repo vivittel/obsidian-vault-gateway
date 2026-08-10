@@ -266,6 +266,121 @@ def test_create_note_without_code_blocks_never_writes_a_code_heading(
     assert "## コード" not in written
 
 
+def test_create_note_with_table_in_a_body_field(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    # docs/adr/0011-*.md end-to-end: a table inside a mode-specific body
+    # field renders as GFM Markdown under that field's own heading, not a
+    # separate section.
+    from app.models import ChatExport
+
+    application.create_chat_export_note(
+        title="Table body test",
+        export=ChatExport(
+            mode="technical",
+            tldr=["ok"],
+            design=[
+                "案Aを採用した",
+                {
+                    "type": "table",
+                    "label": "案の比較",
+                    "headers": ["案", "長所"],
+                    "rows": [["A", "速い"]],
+                },
+            ],
+        ),
+    )
+    written = (inbox_root / "Table body test.md").read_text(encoding="utf-8")
+    assert "## 設計" in written
+    assert "案の比較" in written
+    assert "| 案 | 長所 |" in written
+    assert "| --- | --- |" in written
+    assert "| A | 速い |" in written
+    assert "## 表" not in written
+
+
+def test_create_note_with_code_in_a_body_field(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    # docs/adr/0011-*.md end-to-end: CodeBlock (ADR-0009) is reused as a
+    # BodyBlock option — a body field's code fence stays in that field's
+    # own heading, never moved into the top-level "## コード" section.
+    from app.models import ChatExport
+
+    application.create_chat_export_note(
+        title="Code body test",
+        export=ChatExport(
+            mode="technical",
+            tldr=["ok"],
+            design=[
+                "設定を変更する",
+                {"type": "code", "language": "yaml", "label": "compose.yaml", "content": "a: b"},
+            ],
+        ),
+    )
+    written = (inbox_root / "Code body test.md").read_text(encoding="utf-8")
+    assert "## 設計" in written
+    assert "compose.yaml" in written
+    assert "```yaml\na: b\n```" in written
+    assert "## コード" not in written
+
+
+def test_create_note_with_quote_callout_in_a_body_field(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    # docs/adr/0011-*.md end-to-end: an Obsidian callout inside a
+    # mode-specific body field renders as "> [!type] title" plus quoted
+    # lines, not a separate section.
+    from app.models import ChatExport
+
+    application.create_chat_export_note(
+        title="Quote body test",
+        export=ChatExport(
+            mode="technical",
+            tldr=["ok"],
+            design=[
+                "案Aを採用した",
+                {
+                    "type": "quote",
+                    "callout": "warning",
+                    "title": "注意",
+                    "lines": ["本番では実行しない"],
+                },
+            ],
+        ),
+    )
+    written = (inbox_root / "Quote body test.md").read_text(encoding="utf-8")
+    assert "## 設計" in written
+    assert "> [!warning] 注意" in written
+    assert "> 本番では実行しない" in written
+
+
+def test_create_note_with_nested_bullets_and_task_list(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    # docs/adr/0011-*.md end-to-end: nesting depth and task-list checkboxes
+    # inside a mode-specific body field.
+    from app.models import ChatExport
+
+    application.create_chat_export_note(
+        title="Nested bullets test",
+        export=ChatExport(
+            mode="technical",
+            tldr=["ok"],
+            design=[
+                "設定手順",
+                {"type": "bullet", "content": "compose.yaml を編集する", "depth": 1},
+                {"type": "bullet", "content": "テストを実行する", "checked": False},
+                {"type": "bullet", "content": "レビューを依頼する", "checked": True},
+            ],
+        ),
+    )
+    written = (inbox_root / "Nested bullets test.md").read_text(encoding="utf-8")
+    assert "- 設定手順\n  - compose.yaml を編集する" in written
+    assert "- [ ] テストを実行する" in written
+    assert "- [x] レビューを依頼する" in written
+
+
 def test_create_note_with_related_notes(
     application: GatewayApplication, inbox_root: Path
 ) -> None:

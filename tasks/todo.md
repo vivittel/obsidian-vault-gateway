@@ -1304,3 +1304,116 @@ REST は 8 エンドポイントから `GET /api/v1/health`（認証なし）1 �
   `MAX_NOTE_SIZE_BYTES` が実効的な bound として変わらず機能する。
 - 将来 REST に body を受けるルートを追加する場合、`RequestSizeLimitMiddleware`
   相当と `require_token` 相当の復活が必須（自動的には戻らない）。
+
+# 本文フィールドのrich block化: 表・引用/コールアウト・ネスト箇条書き（ADR-0011）
+
+## 背景
+
+構造化export（ADR-0005）の本文フィールドは`list[Line]`のみで、`one_line`が
+改行をすべて空白化するため、表・引用/コールアウト・タスクリスト・ネスト箇条書き
+のいずれも保存できなかった。ADR-0009は`procedure.steps`にコードブロックだけを
+通したが、その根拠（fenceは自己閉鎖するので無加工でも安全）は表や引用には
+転用できない。ADR-0009自身の`tasks/todo.md`エントリが「他モードの本文フィールド
+へのrich block化の拡張」を対象外・将来対応として明記していた。本エントリは
+その将来対応の実行にあたる。
+
+## 変更内容
+
+3コミットに分割（`32adc0b`・`e4df326`・`43c76d8`、`git log --oneline`で確認可能）。
+
+1. **`BodyItem`一般化 + `TableBlock`**（`32adc0b`）: `app.models`に
+   `BulletBlock`（discriminator `"bullet"` — `ProcedureStep.TextBlock`の
+   `"text"`とは意味が異なるため別値にした）・`TableBlock`・`BodyBlock`・
+   `BodyItem`（`_coerce_body_item`によるbare string後方互換）を新設し、
+   `decisions`/`design`/`topics[].points`等20フィールドを`list[Line]`から
+   `list[BodyItem]`へ変更。`TableBlock`は生Markdown文字列ではなく
+   `headers`/`rows`/`alignments`の構造化入力（表は自己閉鎖しないため、
+   列数不一致・空headerは`ValidationError`で明示的に拒否——静かな劣化を
+   起こさない）。`app/services/chat_export.py`に`_normalise_body_items`
+   （grouping normaliser）・`_normalise_table`・`_render_body_items`
+   （grouping renderer：連続bulletを1つのリストにまとめ、table/quoteは
+   セクション直下の兄弟blockとして空行で区切る——区切らないと直前のbullet
+   リストのlazy continuationに吸収されて消失することをmarkdown-it-pyで
+   確認済み）を追加。`_MAX_TOTAL_CODE_CHARS`を`_MAX_TOTAL_BLOCK_CHARS`へ
+   改名し、table/code labelも算入対象に追加（値は100,000のまま）。
+2. **`QuoteBlock`**（`e4df326`）: 引用/Obsidianコールアウト。`callout`は
+   `CodeBlock.language`と同じ方針でパターン検証のみ（語彙固定なし）。
+   `title`は`callout`必須。各`lines`に`_escape_block_start`を適用
+   （`> # forged`が引用内で本物の見出しになることをmarkdown-it-pyで確認
+   済み）。header行の`title`自体は`[!callout] `の後ろで行頭になり得ないため
+   `_escape_block_start`不要、かつcode captionと異なりinline Markdownを
+   活かすため`_escape_inline`も不要。
+3. **`depth`/`checked`**（`43c76d8`）: `BulletBlock`にネスト深さと
+   task-list checkboxを追加。深さの逆転（jump）はclampせず`ValidationError`
+   で拒否——文字列は残っても要求された構造が黙って書き換わるのは、tableの
+   fail-closed方針と不整合になるため。検証は正規化後の列に対して行うが
+   （空bulletが脱落した後でないと実際の構造がわからない）、エラーは
+   `_NormalisedBullet.source_index`により**クライアント入力側**のindexを
+   報告する（正規化後のindexだと、脱落した空bulletの分だけずれて誤った
+   項目を指してしまうため）。
+
+主な変更ファイル: `app/models.py`・`app/services/chat_export.py`（3コミット共通）。
+テスト: `tests/test_chat_export.py`（schema・formatter・構造・escape・予算の
+各層、`_MD_TABLE = MarkdownIt("commonmark").enable("table")`を追加——新規
+依存なし）、`tests/test_mcp_tools.py`（schema `$defs`記述）、`tests/test_inbox.py`
+（end-to-end書き込み）。`app/mcp_server.py`・`app/application.py`・
+`app/services/inbox_service.py`は変更不要（ADR-0009と同じ理由——
+`_CREATE_INBOX_NOTE_ALLOWED_ARGUMENTS`は`{"title", "export"}`のままで足りる）。
+
+詳細な設計判断（配置をセクション内の兄弟blockとした理由、tableを構造化入力に
+限定した理由、bulletのdepth検証をclampでなくrejectとした理由と`source_index`
+の必要性、予算の算入範囲、数式ブロック等を対象外とした理由）は
+`docs/adr/0011-*.md`を参照。
+
+## 実装しないもの（対象外、別issueへ）
+
+- 数式ブロック（`$$…$$`）・脚注・水平線・見出しブロック・画像/埋め込み構文
+  への対応。`BodyBlock`/`StepBlock`のdiscriminated unionパターンで拡張可能な
+  設計にはしたが、本ADRの対象外。
+- ADR-0009が記録した将来対応のうち、「他モードの本文フィールドへのrich block化」
+  は本エントリで解消した。ただし「対象は今回導入した4種（bullet/code/table/quote）
+  のみで、それ以外のblock型は残課題」という限定は変わらない。
+
+## 検証結果
+
+`.venv/bin/pytest -q` → 965 passed。
+`.venv/bin/ruff check .` → All checks passed。
+`.venv/bin/python scripts/export_openapi.py --check` → up to date
+（`ChatExport`はOpenAPIに現れないため`openapi.json`自体は無変更）。
+`docker compose config` → この開発環境にdockerが無いため未実行
+（`compose.yaml`自体は本変更で触っていない）。
+
+手動確認: 固定`now`での2回レンダリングがbyte一致すること、bullet→table→bullet
+がmarkdown-it-pyで`bullet_list_open`/`table_open`/`bullet_list_open`の兄弟列に
+なること、列数不一致・空header・depthのjump（0→2）・callout無しのtitleが
+それぞれ`ValidationError`で拒否されること、`tempfile.TemporaryDirectory`上の
+テスト用Inbox（実Vault・本番`obsidian-api.tokonemore.com`は使用せず）に
+table/quote/nested bulletを含むノートを書き込み、生成された`.md`の該当行を
+目視確認した。
+
+### PR #22 レビューでの追加修正
+
+1. **P1（機能欠落）**: 承認済み設計（決定1の`BodyItem`図）では section-level
+   block として`bullet`/`code`/`table`/`quote`の4種を想定していたが、コミット1
+   実装時に`app.models.BodyBlock`を`BulletBlock | TableBlock | QuoteBlock`と
+   書いてしまい、`CodeBlock`が本文フィールドで使えなくなっていた
+   （`ProcedureStep.blocks`側の`StepBlock`には正しく残っていた）。
+   `BodyBlock`に`CodeBlock`を追加（既存モデルの再利用、新規`$defs`は増えない）。
+   `app/services/chat_export.py`の`_normalise_body_items`・`_render_body_items`・
+   `_body_items_chars`にcodeのdispatchを追加（既存の`_normalise_code_block`/
+   `_render_top_level_code_block`/`_code_chars`をそのまま再利用）。
+   `tests/test_chat_export.py`に`bullet→code→bullet`・code-onlyフィールド・
+   `## コード`へ集約されないこと・予算算入（境界値）・code後の`depth`再開規則の
+   テストを追加、`tests/test_inbox.py`にend-to-endテストを追加、
+   `tests/test_mcp_tools.py`のdiscriminatorマッピング検証に`"code"`を追加。
+2. **P3（ADR記述の誤り）**: `docs/adr/0011-*.md`のNegativeが「`BulletBlock`は
+   ADR-0009由来」と誤記していた（`BulletBlock`はADR-0011で新規導入、
+   ADR-0009由来なのは`CodeBlock`）。新規`$defs`は`BulletBlock`/`TableBlock`/
+   `QuoteBlock`の3つ（`CodeBlock`は再利用で新規ではない）と修正。ADR本文の
+   Scope・決定1・決定7・決定8・Positive・Referencesも、`BodyItem`が`code`を
+   含むことを反映するよう修正。README.md・Usage.md・
+   `docs/IMPLEMENTATION_PLAN.md`にも同様の記述漏れがあったため修正。
+
+修正後の検証結果: `.venv/bin/pytest -q` → 973 passed。
+`.venv/bin/ruff check .` → All checks passed。
+`.venv/bin/python scripts/export_openapi.py --check` → up to date。

@@ -49,6 +49,34 @@ optional ``label`` is the one exception: it renders as plain inline text
 above the fence, so it is escaped by ``_escape_inline`` (covering both
 CommonMark/GFM inline syntax and Obsidian-specific inline semantics —
 ``#`` tags, ``^`` block IDs, ``==``/``$``/``%%``) before ``_escape_block_start``.
+
+Rich body blocks (docs/adr/0011-rich-body-blocks-in-structured-exports.md)
+generalise every plain ``list[Line]`` body field (``decisions``, ``design``,
+``topics[].points``, etc.) into an ordered sequence of bullets and
+section-level blocks — ``CodeBlock`` (reused from ADR-0009, not new),
+``TableBlock``, and ``QuoteBlock``; ``ProcedureStep.blocks`` gains the two
+new types (``TableBlock``/``QuoteBlock``) alongside the ``TextBlock``/
+``CodeBlock`` it already had. Unlike code content, a
+table is *not* self-closing — a missing delimiter row or a mismatched column
+count degrades silently to a paragraph or drops a cell rather than raising in
+a Markdown parser — so ``render_chat_export`` never accepts a client-written
+table as text: ``_normalise_table`` generates the table's Markdown itself
+from structured ``headers``/``rows``/``alignments``, and a structural
+problem (empty header, wrong cell count) raises a ``ValidationError`` instead
+of silently degrading. A cell keeps its inline Markdown live (unlike a code
+caption): it is escaped only for the one character that would otherwise be
+misread as a column separator (``_escape_table_cell``), never by
+``_escape_inline``'s full hazard set. A quote's ``lines`` are ordinary body
+text too — each gets ``_escape_block_start`` (a bare ``> # forged`` really
+does render a heading inside the blockquote) but never ``_escape_inline``;
+its optional callout header's ``title`` needs neither, since it always
+follows the ``[!callout] `` prefix and can never sit at the true start of its
+own line. ``_render_body_items`` is the grouping renderer that turns a mixed
+bullet/table/quote sequence into consecutive Markdown bullets interrupted by
+section-level blocks, each surrounded by blank lines — without them, a table
+or quote immediately after a bullet list is swallowed into the list item's
+lazy continuation and silently disappears (verified against markdown-it-py
+during design).
 """
 
 from __future__ import annotations
@@ -63,12 +91,15 @@ from itertools import chain
 from app.exceptions import ValidationError
 from app.models import (
     _LANGUAGE_PATTERN,
-    _MAX_TOTAL_CODE_CHARS,
+    _MAX_TOTAL_BLOCK_CHARS,
+    BulletBlock,
     ChatExport,
     CodeBlock,
     ExportMode,
     FrontmatterValue,
     ProcedureStep,
+    QuoteBlock,
+    TableBlock,
     TermDefinition,
     TextBlock,
     TimelineEntry,
@@ -199,15 +230,19 @@ _CODE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _BACKTICK_RUN_RE = re.compile(r"`+")
 _LANGUAGE_RE = re.compile(_LANGUAGE_PATTERN)
 
-# _MAX_TOTAL_CODE_CHARS (imported above) is the counterpart of
-# app.models._MAX_CODE_CHARS's per-block budget: no single
-# Field(max_length=...) can see the *sum* across every code block in one
-# export (steps[].blocks and the top-level code_blocks together), so this is
-# enforced here, on normalised data, like every other cross-field check in
-# this module. Defined once on app.models (single source of truth, alongside
-# the other size constants schema/docs already reference) rather than
-# re-declared here, so a future change to the budget can't drift between the
-# schema-facing constant and the value runtime validation actually enforces.
+# _MAX_TOTAL_BLOCK_CHARS (imported above) is the shared budget across every
+# rich block's client-supplied strings in one export — code content/label
+# (steps[].blocks and the top-level code_blocks) plus table label/headers/
+# rows, wherever a table appears (a body field, topics[].points, or a step).
+# No single Field(max_length=...) can see that cross-field/cross-block sum,
+# so it is enforced here, on normalised data, like every other cross-field
+# check in this module. Defined once on app.models (single source of truth,
+# alongside the other size constants schema/docs already reference) rather
+# than re-declared here, so a future change to the budget can't drift
+# between the schema-facing constant and the value runtime validation
+# actually enforces. This bounds *input* payload, not the rendered
+# Markdown's byte size — escaping (table cells, code fences) only grows the
+# text further; the final backstop is still Settings.max_note_size_bytes.
 
 # Rendered only via _render_supplementary_sections, never through
 # _render_section/_HEADINGS: unlike every mode's own heading, "## コード" is
@@ -249,7 +284,24 @@ class _NormalisedCodeBlock:
     content: str
 
 
-_NormalisedStepBlock = _NormalisedTextBlock | _NormalisedCodeBlock
+@dataclass(frozen=True)
+class _NormalisedTable:
+    label: str | None
+    headers: tuple[str, ...]
+    alignments: tuple[str, ...] | None
+    rows: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True)
+class _NormalisedQuote:
+    callout: str | None
+    title: str | None
+    lines: tuple[str, ...]
+
+
+_NormalisedStepBlock = (
+    _NormalisedTextBlock | _NormalisedCodeBlock | _NormalisedTable | _NormalisedQuote
+)
 
 
 @dataclass(frozen=True)
@@ -258,34 +310,62 @@ class _NormalisedStep:
 
 
 @dataclass(frozen=True)
+class _NormalisedBullet:
+    content: str
+    depth: int
+    checked: bool | None
+    # source_index is not used for rendering (rendering walks the
+    # normalised sequence in order) — carried so _check_bullet_depth's
+    # error message can report the *client's* item index after an empty
+    # bullet has already been dropped, rather than the index of whatever
+    # now sits in that position in the normalised sequence.
+    source_index: int
+
+
+# A table never carries a source_index: unlike a bullet, it never drops out
+# of the normalised sequence (a structural problem raises instead of
+# silently degrading — see _normalise_table), so its position in the
+# normalised sequence and its position in the client's input are the same.
+# A quote or a code block can drop out (an all-whitespace quote, or a code
+# block whose content is whitespace-only, both normalise to nothing — the
+# same "min_length=1 at the schema layer, still droppable" precedent
+# _normalise_code_block already sets for a step's own CodeBlock), but a
+# dropped item is never the target of a later sequence check the way a
+# bullet's depth is, so neither needs a source_index either.
+_NormalisedBodyItem = (
+    _NormalisedBullet | _NormalisedCodeBlock | _NormalisedTable | _NormalisedQuote
+)
+
+
+@dataclass(frozen=True)
 class _Normalised:
     mode: ExportMode
     tldr: list[str]
-    decisions: list[str]
-    unresolved_issues: list[str]
-    next_actions: list[str]
-    sources: list[str]
+    decisions: list[_NormalisedBodyItem]
+    unresolved_issues: list[_NormalisedBodyItem]
+    next_actions: list[_NormalisedBodyItem]
+    sources: list[_NormalisedBodyItem]
     code_blocks: list[_NormalisedCodeBlock]
-    overview: list[str]
-    key_points: list[str]
-    context: list[str]
-    design: list[str]
-    implementation_notes: list[str]
-    verification: list[str]
+    overview: list[_NormalisedBodyItem]
+    key_points: list[_NormalisedBodyItem]
+    context: list[_NormalisedBodyItem]
+    design: list[_NormalisedBodyItem]
+    implementation_notes: list[_NormalisedBodyItem]
+    verification: list[_NormalisedBodyItem]
     timeline: list[tuple[str | None, str]]
-    turning_points: list[str]
-    topics: list[tuple[str, list[str]]]
-    prerequisites: list[str]
+    turning_points: list[_NormalisedBodyItem]
+    topics: list[tuple[str, list[_NormalisedBodyItem]]]
+    prerequisites: list[_NormalisedBodyItem]
     steps: list[_NormalisedStep]
-    rollback: list[str]
-    symptom: list[str]
-    environment: list[str]
-    investigation: list[str]
-    root_cause: list[str]
-    workaround: list[str]
+    rollback: list[_NormalisedBodyItem]
+    symptom: list[_NormalisedBodyItem]
+    environment: list[_NormalisedBodyItem]
+    investigation: list[_NormalisedBodyItem]
+    root_cause: list[_NormalisedBodyItem]
+    workaround: list[_NormalisedBodyItem]
     definitions: list[tuple[str, str]]
-    facts: list[str]
-    examples: list[str]
+    facts: list[_NormalisedBodyItem]
+    examples: list[_NormalisedBodyItem]
     project: str | None
     conversation_type: str | None
     tags: list[str]
@@ -381,6 +461,177 @@ def _normalise_lines(values: list[str]) -> list[str]:
     return [line for value in values if (line := one_line(value))]
 
 
+def _normalise_table(table: TableBlock, *, field_name: str, index: int) -> _NormalisedTable:
+    """Normalise one ``TableBlock`` (docs/adr/0011-*.md).
+
+    Never returns ``None``: unlike a bullet/text block, a table has no
+    "normalised away to nothing" state that is safe to drop silently — an
+    empty header or a row whose cell count does not match ``headers`` is a
+    structural problem the client needs to fix, not something the Gateway
+    can render some other way. It either renders exactly as specified or it
+    raises.
+    """
+    headers = tuple(one_line(header) for header in table.headers)
+    for column, header in enumerate(headers):
+        if not header:
+            raise ValidationError(
+                f"{field_name}[{index}]: table header {column} must not be empty.",
+                log_detail=(
+                    f"chat export: {field_name}[{index}] table header {column} "
+                    "empty after normalisation"
+                ),
+            )
+    if table.alignments is not None and len(table.alignments) != len(headers):
+        raise ValidationError(
+            f"{field_name}[{index}]: table alignments must match the number of headers.",
+            log_detail=(
+                f"chat export: {field_name}[{index}] table alignments length "
+                f"{len(table.alignments)} != headers length {len(headers)}"
+            ),
+        )
+    rows: list[tuple[str, ...]] = []
+    for row_index, row in enumerate(table.rows):
+        if len(row) != len(headers):
+            raise ValidationError(
+                f"{field_name}[{index}]: table row {row_index} has {len(row)} cells, "
+                f"expected {len(headers)}.",
+                log_detail=(
+                    f"chat export: {field_name}[{index}] table row {row_index} length "
+                    f"{len(row)} != headers length {len(headers)}"
+                ),
+            )
+        rows.append(tuple(one_line(cell) for cell in row))
+    label = one_line(table.label) if table.label is not None else ""
+    return _NormalisedTable(
+        label=label or None,
+        headers=headers,
+        alignments=tuple(table.alignments) if table.alignments is not None else None,
+        rows=tuple(rows),
+    )
+
+
+def _normalise_quote(
+    quote: QuoteBlock, *, field_name: str, index: int
+) -> _NormalisedQuote | None:
+    """Normalise one ``QuoteBlock`` (docs/adr/0011-*.md).
+
+    Dropped (returns ``None``) once every line has normalised away to
+    nothing — the same "``min_length=1`` at the schema layer, still
+    droppable once whitespace-only" precedent :func:`_normalise_code_block`
+    already sets for ``CodeBlock``: an empty blockquote carries no meaning,
+    and (unlike a legacy plain-string bullet) there is no backward-
+    compatibility reason to keep one.
+
+    ``title`` is normalised with :func:`one_line` only — not
+    :func:`_escape_block_start` — because it always renders after the
+    ``[!callout] `` prefix on the header line, never at the true start of
+    that line, so it cannot itself open a nested block the way a body
+    ``line`` can (``> # forged`` really does render a heading inside the
+    quote; verified against markdown-it-py during design). It is also not
+    run through ``_escape_inline``: unlike a code block's caption, a
+    callout's title is ordinary prose, and its formatting should render
+    live, matching a table cell's own treatment (decision 3).
+    """
+    if quote.title is not None and quote.callout is None:
+        raise ValidationError(
+            f"{field_name}[{index}]: quote title requires callout.",
+            log_detail=f"chat export: {field_name}[{index}] quote title without callout",
+        )
+    lines = tuple(line for raw in quote.lines if (line := one_line(raw)))
+    if not lines:
+        return None
+    title = one_line(quote.title) if quote.title is not None else ""
+    return _NormalisedQuote(callout=quote.callout, title=title or None, lines=lines)
+
+
+def _check_bullet_depth(
+    depth: int, *, previous_depth: int | None, field_name: str, index: int
+) -> None:
+    """Reject a nesting-depth jump a rendered Markdown bullet list cannot
+    represent (docs/adr/0011-*.md).
+
+    ``previous_depth`` is ``None`` at the start of a bullet run — the very
+    first bullet in the field, or the first bullet after a table/quote
+    that actually rendered (see :func:`_normalise_body_items`) — in which
+    case ``depth`` must be 0. Otherwise ``depth`` may be at most one more
+    than ``previous_depth``: never clamped to the nearest valid depth,
+    since a client-requested depth that cannot be honoured is a structural
+    problem the client needs to fix, the same fail-closed rule already
+    applied to a mismatched table row.
+    """
+    if previous_depth is None:
+        if depth != 0:
+            raise ValidationError(
+                f"{field_name}[{index}]: bullet depth must start at 0.",
+                log_detail=f"chat export: {field_name}[{index}] bullet depth starts at {depth}",
+            )
+        return
+    if depth > previous_depth + 1:
+        raise ValidationError(
+            f"{field_name}[{index}]: bullet depth jumps from {previous_depth} to {depth}.",
+            log_detail=(
+                f"chat export: {field_name}[{index}] bullet depth jumps from "
+                f"{previous_depth} to {depth}"
+            ),
+        )
+
+
+def _normalise_body_items(
+    items: list[BulletBlock | CodeBlock | TableBlock | QuoteBlock], field_name: str
+) -> list[_NormalisedBodyItem]:
+    """Normalise a body field's rich block sequence (docs/adr/0011-*.md).
+
+    A bullet that normalises to empty content is dropped, matching
+    :func:`_normalise_lines`'s "empty after normalisation -> dropped"
+    convention for the plain string list this generalises. A code block can
+    drop the same way (see :func:`_normalise_code_block`); so can a quote
+    (see :func:`_normalise_quote`). A table is never dropped (see
+    :func:`_normalise_table`). ``index`` is the *client's* item index, taken
+    before any drop — this is what makes :func:`_check_bullet_depth`'s error
+    message point at the item the client actually sent, not at whatever now
+    sits in that position once empty bullets have been removed.
+
+    ``previous_depth`` only resets to ``None`` when a table/quote/code block
+    actually survives into the result: a section-level block that itself
+    normalises away to nothing never breaks the rendered list, so the
+    depth-jump check must not treat it as one either — the surrounding
+    bullets are adjacent in what actually gets rendered.
+    """
+    result: list[_NormalisedBodyItem] = []
+    previous_depth: int | None = None
+    for index, item in enumerate(items):
+        if isinstance(item, BulletBlock):
+            content = one_line(item.content)
+            if not content:
+                continue
+            _check_bullet_depth(
+                item.depth, previous_depth=previous_depth, field_name=field_name, index=index
+            )
+            result.append(
+                _NormalisedBullet(
+                    content=content,
+                    depth=item.depth,
+                    checked=item.checked,
+                    source_index=index,
+                )
+            )
+            previous_depth = item.depth
+        elif isinstance(item, CodeBlock):
+            code = _normalise_code_block(item)
+            if code is not None:
+                result.append(code)
+                previous_depth = None
+        elif isinstance(item, TableBlock):
+            result.append(_normalise_table(item, field_name=field_name, index=index))
+            previous_depth = None
+        else:
+            quote = _normalise_quote(item, field_name=field_name, index=index)
+            if quote is not None:
+                result.append(quote)
+                previous_depth = None
+    return result
+
+
 def _canonicalise_code(content: str) -> str:
     """Canonicalise ``content`` for verbatim/structure-preserving rendering
     (docs/adr/0009-*.md) — the *only* transform code content goes through.
@@ -431,10 +682,19 @@ def _normalise_code_block(block: CodeBlock) -> _NormalisedCodeBlock | None:
     return _NormalisedCodeBlock(language=block.language, label=label or None, content=content)
 
 
-def _normalise_step_block(block: TextBlock | CodeBlock) -> _NormalisedStepBlock | None:
+def _normalise_step_block(
+    block: TextBlock | CodeBlock | TableBlock | QuoteBlock,
+    *,
+    field_name: str,
+    step_index: int,
+) -> _NormalisedStepBlock | None:
     if isinstance(block, TextBlock):
         return _normalise_text_block(block)
-    return _normalise_code_block(block)
+    if isinstance(block, CodeBlock):
+        return _normalise_code_block(block)
+    if isinstance(block, TableBlock):
+        return _normalise_table(block, field_name=field_name, index=step_index)
+    return _normalise_quote(block, field_name=field_name, index=step_index)
 
 
 def _normalise_steps(steps: list[ProcedureStep], field_name: str) -> list[_NormalisedStep]:
@@ -444,15 +704,21 @@ def _normalise_steps(steps: list[ProcedureStep], field_name: str) -> list[_Norma
     list). A step surviving with at least one block, but not starting with a
     text block, is rejected outright rather than silently reordered or
     dropped — CommonMark cannot represent a step whose first line is a bare
-    fence without a blank line that would split the numbered list and break
-    its numbering (verified against markdown-it-py during design).
+    fence/table without a blank line that would split the numbered list and
+    break its numbering (verified against markdown-it-py during design;
+    docs/adr/0009-*.md, extended to tables by docs/adr/0011-*.md).
     """
     result: list[_NormalisedStep] = []
     for index, step in enumerate(steps):
         blocks = tuple(
             normalised
             for block in step.blocks
-            if (normalised := _normalise_step_block(block)) is not None
+            if (
+                normalised := _normalise_step_block(
+                    block, field_name=field_name, step_index=index
+                )
+            )
+            is not None
         )
         if not blocks:
             continue
@@ -473,12 +739,62 @@ def _normalise_code_blocks(blocks: list[CodeBlock]) -> list[_NormalisedCodeBlock
     ]
 
 
-def _total_code_chars(steps: list[_NormalisedStep], code_blocks: list[_NormalisedCodeBlock]) -> int:
-    total = sum(len(block.content) for block in code_blocks)
+def _code_chars(block: _NormalisedCodeBlock) -> int:
+    return len(block.content) + (len(block.label) if block.label else 0)
+
+
+def _table_chars(table: _NormalisedTable) -> int:
+    total = len(table.label) if table.label else 0
+    total += sum(len(header) for header in table.headers)
+    total += sum(len(cell) for row in table.rows for cell in row)
+    return total
+
+
+def _quote_chars(quote: _NormalisedQuote) -> int:
+    total = len(quote.title) if quote.title else 0
+    total += sum(len(line) for line in quote.lines)
+    return total
+
+
+def _body_items_chars(items: list[_NormalisedBodyItem]) -> int:
+    total = 0
+    for item in items:
+        if isinstance(item, _NormalisedCodeBlock):
+            total += _code_chars(item)
+        elif isinstance(item, _NormalisedTable):
+            total += _table_chars(item)
+        elif isinstance(item, _NormalisedQuote):
+            total += _quote_chars(item)
+    return total
+
+
+def _total_block_chars(
+    *,
+    body_item_lists: list[list[_NormalisedBodyItem]],
+    steps: list[_NormalisedStep],
+    code_blocks: list[_NormalisedCodeBlock],
+) -> int:
+    """Sum every client-supplied string inside every rich block in one
+    export (docs/adr/0011-*.md, superseding docs/adr/0009-*.md's
+    code-only ``_total_code_chars``): code content/label wherever a
+    ``CodeBlock`` appears (steps, top-level ``code_blocks``), table
+    label/headers/rows wherever a table appears, and quote title/lines
+    wherever a quote appears — a body field, ``topics[].points``, or a
+    step, in every case. A plain bullet's ``content`` is not counted — it
+    was never budgeted before this change either, being already bounded by
+    ``Line``'s own per-item cap and the field's own item-count cap.
+    """
+    total = sum(_code_chars(block) for block in code_blocks)
     for step in steps:
-        total += sum(
-            len(block.content) for block in step.blocks if isinstance(block, _NormalisedCodeBlock)
-        )
+        for block in step.blocks:
+            if isinstance(block, _NormalisedCodeBlock):
+                total += _code_chars(block)
+            elif isinstance(block, _NormalisedTable):
+                total += _table_chars(block)
+            elif isinstance(block, _NormalisedQuote):
+                total += _quote_chars(block)
+    for items in body_item_lists:
+        total += _body_items_chars(items)
     return total
 
 
@@ -498,8 +814,10 @@ def _normalise_timeline(
     return result
 
 
-def _normalise_topics(topics: list[TopicSection], field_name: str) -> list[tuple[str, list[str]]]:
-    result: list[tuple[str, list[str]]] = []
+def _normalise_topics(
+    topics: list[TopicSection], field_name: str
+) -> list[tuple[str, list[_NormalisedBodyItem]]]:
+    result: list[tuple[str, list[_NormalisedBodyItem]]] = []
     for index, topic in enumerate(topics):
         heading = one_line(topic.heading)
         if not heading:
@@ -507,7 +825,8 @@ def _normalise_topics(topics: list[TopicSection], field_name: str) -> list[tuple
                 f"{field_name}[{index}].heading must not be empty.",
                 log_detail=f"chat export: {field_name}[{index}].heading empty after normalisation",
             )
-        result.append((heading, _normalise_lines(topic.points)))
+        points = _normalise_body_items(topic.points, f"{field_name}[{index}].points")
+        result.append((heading, points))
     return result
 
 
@@ -568,46 +887,98 @@ def _normalise_export(export: ChatExport) -> _Normalised:
         one_line(export.conversation_type) if export.conversation_type is not None else ""
     )
 
+    decisions = _normalise_body_items(export.decisions, "decisions")
+    unresolved_issues = _normalise_body_items(export.unresolved_issues, "unresolved_issues")
+    next_actions = _normalise_body_items(export.next_actions, "next_actions")
+    sources = _normalise_body_items(export.sources, "sources")
+    overview = _normalise_body_items(export.overview, "overview")
+    key_points = _normalise_body_items(export.key_points, "key_points")
+    context = _normalise_body_items(export.context, "context")
+    design = _normalise_body_items(export.design, "design")
+    implementation_notes = _normalise_body_items(
+        export.implementation_notes, "implementation_notes"
+    )
+    verification = _normalise_body_items(export.verification, "verification")
+    turning_points = _normalise_body_items(export.turning_points, "turning_points")
+    prerequisites = _normalise_body_items(export.prerequisites, "prerequisites")
+    rollback = _normalise_body_items(export.rollback, "rollback")
+    symptom = _normalise_body_items(export.symptom, "symptom")
+    environment = _normalise_body_items(export.environment, "environment")
+    investigation = _normalise_body_items(export.investigation, "investigation")
+    root_cause = _normalise_body_items(export.root_cause, "root_cause")
+    workaround = _normalise_body_items(export.workaround, "workaround")
+    facts = _normalise_body_items(export.facts, "facts")
+    examples = _normalise_body_items(export.examples, "examples")
+
     steps = _normalise_steps(export.steps, "steps")
     code_blocks = _normalise_code_blocks(export.code_blocks)
-    total_code_chars = _total_code_chars(steps, code_blocks)
-    if total_code_chars > _MAX_TOTAL_CODE_CHARS:
+    timeline = _normalise_timeline(export.timeline, "timeline")
+    topics = _normalise_topics(export.topics, "topics")
+    definitions = _normalise_definitions(export.definitions, "definitions")
+
+    body_item_lists = [
+        decisions,
+        unresolved_issues,
+        next_actions,
+        sources,
+        overview,
+        key_points,
+        context,
+        design,
+        implementation_notes,
+        verification,
+        turning_points,
+        prerequisites,
+        rollback,
+        symptom,
+        environment,
+        investigation,
+        root_cause,
+        workaround,
+        facts,
+        examples,
+        *(points for _heading, points in topics),
+    ]
+    total_block_chars = _total_block_chars(
+        body_item_lists=body_item_lists, steps=steps, code_blocks=code_blocks
+    )
+    if total_block_chars > _MAX_TOTAL_BLOCK_CHARS:
         raise ValidationError(
-            f"Code content exceeds the total limit of {_MAX_TOTAL_CODE_CHARS} characters.",
+            f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters.",
             log_detail=(
-                f"chat export: total code content {total_code_chars} exceeds "
-                f"{_MAX_TOTAL_CODE_CHARS}"
+                f"chat export: total block content {total_block_chars} exceeds "
+                f"{_MAX_TOTAL_BLOCK_CHARS}"
             ),
         )
 
     return _Normalised(
         mode=export.mode,
         tldr=tldr,
-        decisions=_normalise_lines(export.decisions),
-        unresolved_issues=_normalise_lines(export.unresolved_issues),
-        next_actions=_normalise_lines(export.next_actions),
-        sources=_normalise_lines(export.sources),
+        decisions=decisions,
+        unresolved_issues=unresolved_issues,
+        next_actions=next_actions,
+        sources=sources,
         code_blocks=code_blocks,
-        overview=_normalise_lines(export.overview),
-        key_points=_normalise_lines(export.key_points),
-        context=_normalise_lines(export.context),
-        design=_normalise_lines(export.design),
-        implementation_notes=_normalise_lines(export.implementation_notes),
-        verification=_normalise_lines(export.verification),
-        timeline=_normalise_timeline(export.timeline, "timeline"),
-        turning_points=_normalise_lines(export.turning_points),
-        topics=_normalise_topics(export.topics, "topics"),
-        prerequisites=_normalise_lines(export.prerequisites),
+        overview=overview,
+        key_points=key_points,
+        context=context,
+        design=design,
+        implementation_notes=implementation_notes,
+        verification=verification,
+        timeline=timeline,
+        turning_points=turning_points,
+        topics=topics,
+        prerequisites=prerequisites,
         steps=steps,
-        rollback=_normalise_lines(export.rollback),
-        symptom=_normalise_lines(export.symptom),
-        environment=_normalise_lines(export.environment),
-        investigation=_normalise_lines(export.investigation),
-        root_cause=_normalise_lines(export.root_cause),
-        workaround=_normalise_lines(export.workaround),
-        definitions=_normalise_definitions(export.definitions, "definitions"),
-        facts=_normalise_lines(export.facts),
-        examples=_normalise_lines(export.examples),
+        rollback=rollback,
+        symptom=symptom,
+        environment=environment,
+        investigation=investigation,
+        root_cause=root_cause,
+        workaround=workaround,
+        definitions=definitions,
+        facts=facts,
+        examples=examples,
         project=project or None,
         conversation_type=conversation_type or None,
         tags=_normalise_tags(export.tags),
@@ -696,11 +1067,8 @@ def _render_timeline_line(when: str | None, event: str) -> str:
     return f"- {_escape_block_start(text)}"
 
 
-def _render_topic(heading: str, points: list[str]) -> str:
-    if points:
-        body = "\n".join(f"- {_escape_block_start(point)}" for point in points)
-    else:
-        body = _PLACEHOLDER_NOT_RECORDED
+def _render_topic(heading: str, points: list[_NormalisedBodyItem]) -> str:
+    body = _render_body_items(points) if points else _PLACEHOLDER_NOT_RECORDED
     return f"### {heading}\n\n{body}"
 
 
@@ -753,10 +1121,144 @@ def _render_fenced_code(block: _NormalisedCodeBlock, *, indent: str) -> list[str
     return lines
 
 
+_ALIGNMENT_DELIMITERS: dict[str, str] = {"left": ":---", "center": ":---:", "right": "---:"}
+
+
+def _escape_table_cell(value: str) -> str:
+    """Escape a table cell so ``|`` cannot be misread as a column separator
+    (docs/adr/0011-*.md). Order matters: escaping a literal backslash first,
+    then the pipe, is what keeps a client-supplied ``\\|`` from being read as
+    "an escaped backslash followed by a live column separator" once the
+    pipe-escaping backslash is added — running the two replacements in the
+    opposite order would let the escape the client already had and the one
+    this function adds interact instead of composing.
+
+    Unlike a code caption (:func:`_escape_inline`), a cell keeps every other
+    character — including Markdown emphasis/link syntax — live: a cell is
+    ordinary body text, not a literal caption, and its whole point is that
+    the conversation's formatting inside it still renders.
+    """
+    return value.replace("\\", "\\\\").replace("|", "\\|")
+
+
+def _render_table_row(cells: Sequence[str]) -> str:
+    return "| " + " | ".join(_escape_table_cell(cell) for cell in cells) + " |"
+
+
+def _render_table_delimiter(alignments: tuple[str, ...] | None, column_count: int) -> str:
+    if alignments is None:
+        cells = ["---"] * column_count
+    else:
+        cells = [_ALIGNMENT_DELIMITERS[alignment] for alignment in alignments]
+    return "| " + " | ".join(cells) + " |"
+
+
+def _render_table(table: _NormalisedTable) -> str:
+    """Render one table as GFM Markdown (docs/adr/0011-*.md): a caption line
+    (if any), the header row, the alignment delimiter row, then every data
+    row — always exactly this shape, since :func:`_normalise_table` never
+    lets a structurally inconsistent table reach this function.
+    """
+    lines: list[str] = []
+    if table.label:
+        lines.append(_render_caption(table.label))
+    lines.append(_render_table_row(table.headers))
+    lines.append(_render_table_delimiter(table.alignments, len(table.headers)))
+    lines.extend(_render_table_row(row) for row in table.rows)
+    return "\n".join(lines)
+
+
+def _render_indented_table(table: _NormalisedTable, *, indent: str) -> list[str]:
+    """Render one table's lines prefixed with ``indent`` — the table
+    analogue of :func:`_render_fenced_code`'s own indent handling, used when
+    a table sits inside a ``ProcedureStep`` rather than at section level.
+    """
+    return [f"{indent}{line}" if line else "" for line in _render_table(table).split("\n")]
+
+
+def _render_quote(quote: _NormalisedQuote) -> str:
+    """Render one blockquote/Obsidian callout (docs/adr/0011-*.md): a
+    ``> [!callout] title`` header line when ``callout`` is set, then
+    ``> line`` for each of ``lines``. Each ``line`` gets
+    :func:`_escape_block_start` — it becomes its own leading paragraph
+    inside the blockquote and can otherwise open a nested block
+    (``> # forged`` really does render a heading inside the quote); the
+    header's own ``title`` does not need it (see :func:`_normalise_quote`).
+    """
+    lines: list[str] = []
+    if quote.callout:
+        header = f"> [!{quote.callout}]"
+        if quote.title:
+            header += f" {quote.title}"
+        lines.append(header)
+    lines.extend(f"> {_escape_block_start(line)}" for line in quote.lines)
+    return "\n".join(lines)
+
+
+def _render_indented_quote(quote: _NormalisedQuote, *, indent: str) -> list[str]:
+    """Render one quote's lines prefixed with ``indent`` — the quote
+    analogue of :func:`_render_indented_table`, used when a quote sits
+    inside a ``ProcedureStep`` rather than at section level.
+    """
+    return [f"{indent}{line}" if line else "" for line in _render_quote(quote).split("\n")]
+
+
+def _render_bullet(bullet: _NormalisedBullet) -> str:
+    """Render one bullet line, indented two spaces per ``depth`` level —
+    verified against markdown-it-py during design as the indent CommonMark
+    requires for a nested bullet list under an unordered (not ordered)
+    parent marker — with an optional GFM task-list checkbox before the
+    text.
+    """
+    indent = "  " * bullet.depth
+    marker = "- "
+    if bullet.checked is not None:
+        marker += "[x] " if bullet.checked else "[ ] "
+    return f"{indent}{marker}{_escape_block_start(bullet.content)}"
+
+
+def _render_body_items(items: list[_NormalisedBodyItem]) -> str:
+    """Render a body field's rich block sequence (docs/adr/0011-*.md):
+    consecutive bullets become one Markdown bullet list (nested per
+    ``depth``, marked as a task item when ``checked`` is set); a code
+    block, table, or quote breaks the list and becomes a section-level
+    sibling block. Every block — the bullet run as a whole, and each code
+    block/table/quote — is joined with a blank line on both sides: without
+    one, a table or quote immediately following a bullet list is swallowed
+    into the preceding list item's lazy continuation and silently
+    disappears (verified against markdown-it-py during design); a fenced
+    code block always interrupts a paragraph on its own (CommonMark core),
+    but the blank line is added for it too, for the same one-shape-fits-
+    every-section-level-block simplicity the grouping logic below relies on.
+    """
+    blocks: list[str] = []
+    bullet_run: list[str] = []
+
+    def _flush_bullet_run() -> None:
+        if bullet_run:
+            blocks.append("\n".join(bullet_run))
+            bullet_run.clear()
+
+    for item in items:
+        if isinstance(item, _NormalisedBullet):
+            bullet_run.append(_render_bullet(item))
+        else:
+            _flush_bullet_run()
+            if isinstance(item, _NormalisedCodeBlock):
+                blocks.append(_render_top_level_code_block(item))
+            elif isinstance(item, _NormalisedTable):
+                blocks.append(_render_table(item))
+            else:
+                blocks.append(_render_quote(item))
+    _flush_bullet_run()
+    return "\n\n".join(blocks)
+
+
 def _render_step(index: int, step: _NormalisedStep) -> str:
-    """Render one ``## 手順`` list item, preserving the order of its text/code
-    blocks (docs/adr/0009-*.md): a step with no code renders byte-identical
-    to the pre-existing "N. text" line.
+    """Render one ``## 手順`` list item, preserving the order of its text/
+    code/table blocks (docs/adr/0009-*.md; tables added by docs/adr/0011-*.md):
+    a step with no code/table renders byte-identical to the pre-existing
+    "N. text" line.
 
     ``indent`` is derived from the marker's own width, not a fixed constant:
     ``_MAX_STEP_ITEMS`` allows up to 50 steps, so step 10 onward has a
@@ -777,9 +1279,15 @@ def _render_step(index: int, step: _NormalisedStep) -> str:
             else:
                 lines.append("")
                 lines.append(f"{indent}{escaped}")
-        else:
+        elif isinstance(block, _NormalisedCodeBlock):
             lines.append("")
             lines.extend(_render_fenced_code(block, indent=indent))
+        elif isinstance(block, _NormalisedTable):
+            lines.append("")
+            lines.extend(_render_indented_table(block, indent=indent))
+        else:
+            lines.append("")
+            lines.extend(_render_indented_quote(block, indent=indent))
     return "\n".join(lines)
 
 
@@ -825,7 +1333,7 @@ def _render_body(field_name: str, normalised: _Normalised) -> str:
         return "\n".join(
             f"- {_escape_block_start(f'{term}: {description}')}" for term, description in value
         )
-    return "\n".join(f"- {_escape_block_start(line)}" for line in value)
+    return _render_body_items(value)
 
 
 def _render_section(field_name: str, normalised: _Normalised) -> str:
