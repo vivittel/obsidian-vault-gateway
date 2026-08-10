@@ -299,6 +299,32 @@ def test_create_note_with_table_in_a_body_field(
     assert "## 表" not in written
 
 
+def test_create_note_with_code_in_a_body_field(
+    application: GatewayApplication, inbox_root: Path
+) -> None:
+    # docs/adr/0011-*.md end-to-end: CodeBlock (ADR-0009) is reused as a
+    # BodyBlock option — a body field's code fence stays in that field's
+    # own heading, never moved into the top-level "## コード" section.
+    from app.models import ChatExport
+
+    application.create_chat_export_note(
+        title="Code body test",
+        export=ChatExport(
+            mode="technical",
+            tldr=["ok"],
+            design=[
+                "設定を変更する",
+                {"type": "code", "language": "yaml", "label": "compose.yaml", "content": "a: b"},
+            ],
+        ),
+    )
+    written = (inbox_root / "Code body test.md").read_text(encoding="utf-8")
+    assert "## 設計" in written
+    assert "compose.yaml" in written
+    assert "```yaml\na: b\n```" in written
+    assert "## コード" not in written
+
+
 def test_create_note_with_quote_callout_in_a_body_field(
     application: GatewayApplication, inbox_root: Path
 ) -> None:

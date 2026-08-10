@@ -53,8 +53,10 @@ CommonMark/GFM inline syntax and Obsidian-specific inline semantics —
 Rich body blocks (docs/adr/0011-rich-body-blocks-in-structured-exports.md)
 generalise every plain ``list[Line]`` body field (``decisions``, ``design``,
 ``topics[].points``, etc.) into an ordered sequence of bullets and
-section-level blocks — currently ``TableBlock`` and ``QuoteBlock``;
-``ProcedureStep.blocks`` gains the same two options. Unlike code content, a
+section-level blocks — ``CodeBlock`` (reused from ADR-0009, not new),
+``TableBlock``, and ``QuoteBlock``; ``ProcedureStep.blocks`` gains the two
+new types (``TableBlock``/``QuoteBlock``) alongside the ``TextBlock``/
+``CodeBlock`` it already had. Unlike code content, a
 table is *not* self-closing — a missing delimiter row or a mismatched column
 count degrades silently to a paragraph or drops a cell rather than raising in
 a Markdown parser — so ``render_chat_export`` never accepts a client-written
@@ -324,12 +326,15 @@ class _NormalisedBullet:
 # of the normalised sequence (a structural problem raises instead of
 # silently degrading — see _normalise_table), so its position in the
 # normalised sequence and its position in the client's input are the same.
-# A quote can drop out (an all-whitespace quote normalises to nothing, the
+# A quote or a code block can drop out (an all-whitespace quote, or a code
+# block whose content is whitespace-only, both normalise to nothing — the
 # same "min_length=1 at the schema layer, still droppable" precedent
-# _normalise_code_block already sets), but a dropped quote is never the
-# target of a later sequence check the way a bullet's depth is, so it does
-# not need one either.
-_NormalisedBodyItem = _NormalisedBullet | _NormalisedTable | _NormalisedQuote
+# _normalise_code_block already sets for a step's own CodeBlock), but a
+# dropped item is never the target of a later sequence check the way a
+# bullet's depth is, so neither needs a source_index either.
+_NormalisedBodyItem = (
+    _NormalisedBullet | _NormalisedCodeBlock | _NormalisedTable | _NormalisedQuote
+)
 
 
 @dataclass(frozen=True)
@@ -572,24 +577,25 @@ def _check_bullet_depth(
 
 
 def _normalise_body_items(
-    items: list[BulletBlock | TableBlock | QuoteBlock], field_name: str
+    items: list[BulletBlock | CodeBlock | TableBlock | QuoteBlock], field_name: str
 ) -> list[_NormalisedBodyItem]:
     """Normalise a body field's rich block sequence (docs/adr/0011-*.md).
 
     A bullet that normalises to empty content is dropped, matching
     :func:`_normalise_lines`'s "empty after normalisation -> dropped"
-    convention for the plain string list this generalises. A table is never
-    dropped (see :func:`_normalise_table`); a quote can be (see
-    :func:`_normalise_quote`). ``index`` is the *client's* item index, taken
+    convention for the plain string list this generalises. A code block can
+    drop the same way (see :func:`_normalise_code_block`); so can a quote
+    (see :func:`_normalise_quote`). A table is never dropped (see
+    :func:`_normalise_table`). ``index`` is the *client's* item index, taken
     before any drop — this is what makes :func:`_check_bullet_depth`'s error
     message point at the item the client actually sent, not at whatever now
     sits in that position once empty bullets have been removed.
 
-    ``previous_depth`` only resets to ``None`` when a table/quote actually
-    survives into the result: a table/quote that itself normalises away to
-    nothing never breaks the rendered list, so the depth-jump check must not
-    treat it as one either — the surrounding bullets are adjacent in what
-    actually gets rendered.
+    ``previous_depth`` only resets to ``None`` when a table/quote/code block
+    actually survives into the result: a section-level block that itself
+    normalises away to nothing never breaks the rendered list, so the
+    depth-jump check must not treat it as one either — the surrounding
+    bullets are adjacent in what actually gets rendered.
     """
     result: list[_NormalisedBodyItem] = []
     previous_depth: int | None = None
@@ -610,6 +616,11 @@ def _normalise_body_items(
                 )
             )
             previous_depth = item.depth
+        elif isinstance(item, CodeBlock):
+            code = _normalise_code_block(item)
+            if code is not None:
+                result.append(code)
+                previous_depth = None
         elif isinstance(item, TableBlock):
             result.append(_normalise_table(item, field_name=field_name, index=index))
             previous_depth = None
@@ -748,7 +759,9 @@ def _quote_chars(quote: _NormalisedQuote) -> int:
 def _body_items_chars(items: list[_NormalisedBodyItem]) -> int:
     total = 0
     for item in items:
-        if isinstance(item, _NormalisedTable):
+        if isinstance(item, _NormalisedCodeBlock):
+            total += _code_chars(item)
+        elif isinstance(item, _NormalisedTable):
             total += _table_chars(item)
         elif isinstance(item, _NormalisedQuote):
             total += _quote_chars(item)
@@ -1207,16 +1220,16 @@ def _render_bullet(bullet: _NormalisedBullet) -> str:
 def _render_body_items(items: list[_NormalisedBodyItem]) -> str:
     """Render a body field's rich block sequence (docs/adr/0011-*.md):
     consecutive bullets become one Markdown bullet list (nested per
-    ``depth``, marked as a task item when ``checked`` is set); a table or
-    quote breaks the list and becomes a section-level sibling block. Every
-    block — the bullet run as a whole, and each table/quote — is joined
-    with a blank line on both sides: without one, a table or quote
-    immediately following a bullet list is swallowed into the preceding
-    list item's lazy continuation and silently disappears (verified against
-    markdown-it-py during design), and neither construct's own
-    paragraph-interrupting behaviour is something to rely on, being GFM/
-    Obsidian extensions rather than CommonMark core (unlike a fenced code
-    block).
+    ``depth``, marked as a task item when ``checked`` is set); a code
+    block, table, or quote breaks the list and becomes a section-level
+    sibling block. Every block — the bullet run as a whole, and each code
+    block/table/quote — is joined with a blank line on both sides: without
+    one, a table or quote immediately following a bullet list is swallowed
+    into the preceding list item's lazy continuation and silently
+    disappears (verified against markdown-it-py during design); a fenced
+    code block always interrupts a paragraph on its own (CommonMark core),
+    but the blank line is added for it too, for the same one-shape-fits-
+    every-section-level-block simplicity the grouping logic below relies on.
     """
     blocks: list[str] = []
     bullet_run: list[str] = []
@@ -1231,7 +1244,9 @@ def _render_body_items(items: list[_NormalisedBodyItem]) -> str:
             bullet_run.append(_render_bullet(item))
         else:
             _flush_bullet_run()
-            if isinstance(item, _NormalisedTable):
+            if isinstance(item, _NormalisedCodeBlock):
+                blocks.append(_render_top_level_code_block(item))
+            elif isinstance(item, _NormalisedTable):
                 blocks.append(_render_table(item))
             else:
                 blocks.append(_render_quote(item))

@@ -476,9 +476,10 @@ class BulletBlock(BaseModel):
         description=(
             "Nesting depth: 0 for a top-level bullet, 1 for a bullet nested "
             "one level under the previous one, and so on. The first bullet "
-            "after the start of a list (or after a table/quote) must be 0; "
-            "every later bullet may be at most one deeper than the bullet "
-            "immediately before it — never deeper, and never negative."
+            "after the start of a list (or after a table/quote/code block) "
+            "must be 0; every later bullet may be at most one deeper than "
+            "the bullet immediately before it — never deeper, and never "
+            "negative."
         ),
     )
     checked: bool | None = Field(
@@ -492,7 +493,7 @@ class BulletBlock(BaseModel):
 
 
 BodyBlock = Annotated[
-    BulletBlock | TableBlock | QuoteBlock, Field(discriminator="type")
+    BulletBlock | CodeBlock | TableBlock | QuoteBlock, Field(discriminator="type")
 ]
 
 

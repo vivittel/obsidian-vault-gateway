@@ -1390,3 +1390,30 @@ REST は 8 エンドポイントから `GET /api/v1/health`（認証なし）1 �
 テスト用Inbox（実Vault・本番`obsidian-api.tokonemore.com`は使用せず）に
 table/quote/nested bulletを含むノートを書き込み、生成された`.md`の該当行を
 目視確認した。
+
+### PR #22 レビューでの追加修正
+
+1. **P1（機能欠落）**: 承認済み設計（決定1の`BodyItem`図）では section-level
+   block として`bullet`/`code`/`table`/`quote`の4種を想定していたが、コミット1
+   実装時に`app.models.BodyBlock`を`BulletBlock | TableBlock | QuoteBlock`と
+   書いてしまい、`CodeBlock`が本文フィールドで使えなくなっていた
+   （`ProcedureStep.blocks`側の`StepBlock`には正しく残っていた）。
+   `BodyBlock`に`CodeBlock`を追加（既存モデルの再利用、新規`$defs`は増えない）。
+   `app/services/chat_export.py`の`_normalise_body_items`・`_render_body_items`・
+   `_body_items_chars`にcodeのdispatchを追加（既存の`_normalise_code_block`/
+   `_render_top_level_code_block`/`_code_chars`をそのまま再利用）。
+   `tests/test_chat_export.py`に`bullet→code→bullet`・code-onlyフィールド・
+   `## コード`へ集約されないこと・予算算入（境界値）・code後の`depth`再開規則の
+   テストを追加、`tests/test_inbox.py`にend-to-endテストを追加、
+   `tests/test_mcp_tools.py`のdiscriminatorマッピング検証に`"code"`を追加。
+2. **P3（ADR記述の誤り）**: `docs/adr/0011-*.md`のNegativeが「`BulletBlock`は
+   ADR-0009由来」と誤記していた（`BulletBlock`はADR-0011で新規導入、
+   ADR-0009由来なのは`CodeBlock`）。新規`$defs`は`BulletBlock`/`TableBlock`/
+   `QuoteBlock`の3つ（`CodeBlock`は再利用で新規ではない）と修正。ADR本文の
+   Scope・決定1・決定7・決定8・Positive・Referencesも、`BodyItem`が`code`を
+   含むことを反映するよう修正。README.md・Usage.md・
+   `docs/IMPLEMENTATION_PLAN.md`にも同様の記述漏れがあったため修正。
+
+修正後の検証結果: `.venv/bin/pytest -q` → 973 passed。
+`.venv/bin/ruff check .` → All checks passed。
+`.venv/bin/python scripts/export_openapi.py --check` → up to date。

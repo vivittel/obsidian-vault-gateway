@@ -168,12 +168,17 @@ the top-level `export.code_blocks`, available in every mode, rendered as the
 optional `## コード` section above — never both: code that belongs to a step
 stays in that step, so the procedure keeps its order.
 
-**Every body field can carry a table, a blockquote/Obsidian callout, or a
-nested/task-list bullet, in the order the client sent them** (`docs/adr/
-0011-*.md`). A bare string is still an ordinary bullet (backward-compatible,
-byte-identical to before this feature existed), but any item in a list such
-as `decisions`, `design`, or `topics[].points` can instead be:
+**Every body field can carry a code block, a table, a blockquote/Obsidian
+callout, or a nested/task-list bullet, in the order the client sent them**
+(`docs/adr/0011-*.md`). A bare string is still an ordinary bullet
+(backward-compatible, byte-identical to before this feature existed), but
+any item in a list such as `decisions`, `design`, or `topics[].points` can
+instead be:
 
+- `{"type": "code", "language": ..., "label": ..., "content": ...}` — the
+  same `CodeBlock` `procedure.steps` and `code_blocks` already use
+  (`docs/adr/0009-*.md`), now usable in any body field too, rendered as its
+  own fence in place rather than moved into `code_blocks`.
 - `{"type": "table", "label": ..., "headers": [...], "alignments": [...], "rows": [[...], ...]}`
   — the Gateway generates the table's Markdown itself from structured
   `headers`/`rows` rather than accepting client-written GFM syntax, and
@@ -189,12 +194,13 @@ as `decisions`, `design`, or `topics[].points` can instead be:
   silently flattened), and `checked` (`true`/`false`) renders a GFM
   task-list checkbox instead of a plain marker.
 
-A table or blockquote/callout ends the current bullet list and renders as
-its own block, directly under the field's heading, at the point the client
-placed it — never collected into a separate section the way `code_blocks`
-is. `ProcedureStep.blocks` accepts the same table/quote options alongside
-`text`/`code`, but not `bullet` — a step's own numbered-list structure
-already has its own indent rules.
+A code block, table, or blockquote/callout ends the current bullet list and
+renders as its own block, directly under the field's heading, at the point
+the client placed it — a body field's own code never gets collected into
+the top-level `## コード` section either, the same rule that already
+applies to a procedure step's code. `ProcedureStep.blocks` accepts the same
+table/quote options alongside `text`/`code`, but not `bullet` — a step's
+own numbered-list structure already has its own indent rules.
 
 **Related notes are client-selected, Gateway-verified** (issue #13 /
 `docs/adr/0006-*.md`). The client calls `search_notes`, picks relevant

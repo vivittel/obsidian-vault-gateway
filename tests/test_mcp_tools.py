@@ -198,8 +198,8 @@ async def test_create_inbox_note_schema_defines_table_block() -> None:
 async def test_create_inbox_note_body_field_accepts_a_bare_string_or_a_rich_block() -> None:
     # docs/adr/0011-*.md generalises every list[Line] body field into a
     # mixed sequence — the schema-level anyOf is [string, discriminated
-    # BulletBlock|TableBlock union], the same shape as steps' own
-    # string-or-ProcedureStep anyOf (docs/adr/0009-*.md).
+    # BulletBlock|CodeBlock|TableBlock|QuoteBlock union], the same shape as
+    # steps' own string-or-ProcedureStep anyOf (docs/adr/0009-*.md).
     tools = {t.name: t for t in await mcp.list_tools()}
     schema = tools["create_inbox_note"].input_schema
     design_items_schema = schema["$defs"]["ChatExport"]["properties"]["design"]["items"]
@@ -208,6 +208,7 @@ async def test_create_inbox_note_body_field_accepts_a_bare_string_or_a_rich_bloc
     discriminated = next(v for v in variants if "discriminator" in v)
     assert discriminated["discriminator"]["mapping"] == {
         "bullet": "#/$defs/BulletBlock",
+        "code": "#/$defs/CodeBlock",
         "table": "#/$defs/TableBlock",
         "quote": "#/$defs/QuoteBlock",
     }

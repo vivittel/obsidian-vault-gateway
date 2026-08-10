@@ -2422,3 +2422,112 @@ def test_plain_string_bullets_default_to_depth_zero_and_no_checkbox() -> None:
     rendered = render_chat_export(export, title="t", now=_NOW)
     section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
     assert section == "- a"
+
+
+# === Code blocks reused in body fields (docs/adr/0011-*.md) ====================
+#
+# CodeBlock already existed (ADR-0009, for ProcedureStep.blocks and the
+# top-level code_blocks) — this section covers its addition to BodyBlock,
+# not a new block type.
+
+
+def test_bullet_code_bullet_render_as_sibling_blocks_in_one_field() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=["a", {"type": "code", "language": "yaml", "content": "x: y"}, "b"],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 2
+    fences = [t for t in tokens if t.type == "fence"]
+    assert [(f.content, f.info) for f in fences] == [("x: y\n", "yaml")]
+
+
+def test_code_only_field_renders_directly_under_the_heading_with_no_stray_bullet() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "code", "label": "compose.yaml", "content": "a: b"}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "compose.yaml\n```\na: b\n```"
+    assert not any(line.startswith("- ") for line in section.splitlines())
+
+
+def test_body_field_code_is_never_moved_into_the_top_level_code_section() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "code", "content": "body-field-code"}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "## コード" not in rendered.content
+    assert "body-field-code" in rendered.content
+
+
+def test_body_field_code_that_normalises_to_empty_is_dropped() -> None:
+    # The same "min_length=1 at the schema layer, still droppable once
+    # whitespace-only" precedent _normalise_code_block already sets.
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=["a", {"type": "code", "content": "   \n\t "}, "b"]
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "```" not in rendered.content
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "- a\n- b"
+
+
+def test_bullet_after_body_field_code_must_restart_at_depth_zero() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "a", "depth": 0},
+            {"type": "code", "content": "x"},
+            {"type": "bullet", "content": "b", "depth": 1},
+        ],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "design[2]: bullet depth must start at 0."
+
+
+def test_body_field_code_content_counts_toward_the_total_block_budget() -> None:
+    # 12 code blocks at the per-block max (_MAX_CODE_CHARS = 8_000) plus a
+    # 13th at 4,000 chars sit exactly at the total budget — still within
+    # design's own item-count cap (_MAX_LIST_ITEMS = 30); one more
+    # character in the 13th block alone pushes the identical export over.
+    full_blocks = [{"type": "code", "content": "x" * 8_000} for _ in range(12)]  # 96,000 chars
+    at_budget = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[*full_blocks, {"type": "code", "content": "y" * 4_000}],
+    )
+    render_chat_export(at_budget, title="t", now=_NOW)  # 100_000 chars, must not raise
+
+    over_budget = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[*full_blocks, {"type": "code", "content": "y" * 4_001}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(over_budget, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
+    )
+
+
+def test_procedure_mode_design_field_is_still_rejected_as_mode_mismatched() -> None:
+    # A body field's own mode ownership (ADR-0005 decision 4/_MODE_SECTIONS)
+    # is unaffected by CodeBlock now being a valid item inside it.
+    export = ChatExport(
+        mode="procedure",
+        tldr=["ok"],
+        steps=["do it"],
+        design=[{"type": "code", "content": "x"}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "Fields not valid for export_mode 'procedure': design."

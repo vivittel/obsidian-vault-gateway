@@ -30,14 +30,15 @@ literal `|`/`>`/`[ ]` characters.
 out-of-scope future work at the time: "他モードの本文フィールドへの rich
 block化の拡張 — 今回は procedure.steps のみ". This ADR is that follow-up.
 
-**Scope**: this ADR adds exactly four block types — `BulletBlock` (with
-nesting `depth` and an optional task-list `checked`), `CodeBlock`
-(pre-existing, ADR-0009), `TableBlock`, and `QuoteBlock`. Blockquotes/
-callouts, GFM tables, task lists, and nested bullets are the constructs
-addressed; math blocks (`$$…$$`), footnotes, horizontal rules, heading
-blocks, and image/embed syntax are deliberately **not** addressed here and
-remain future work, extensible through the same `BodyBlock`/`StepBlock`
-discriminated-union pattern this ADR establishes.
+**Scope**: this ADR makes exactly four block types available as a body
+field's rich block sequence — `BulletBlock` (with nesting `depth` and an
+optional task-list `checked`, new), `CodeBlock` (pre-existing, ADR-0009,
+newly usable in a body field), `TableBlock` (new), and `QuoteBlock` (new).
+Blockquotes/callouts, GFM tables, task lists, and nested bullets are the
+constructs addressed; math blocks (`$$…$$`), footnotes, horizontal rules,
+heading blocks, and image/embed syntax are deliberately **not** addressed
+here and remain future work, extensible through the same
+`BodyBlock`/`StepBlock` discriminated-union pattern this ADR establishes.
 
 ADR-0009's justification for leaving code content unescaped — "a fence is
 already structurally closed by its own opening/closing markers, so the
@@ -56,18 +57,24 @@ continuation and disappears from the rendered output entirely.
    section-level blocks — never nested inside each other, and never routed
    through a `## 表`/`## 引用`-style supplementary section.**
    `app.models.BodyItem` (a bare string, or a discriminated
-   `BulletBlock | TableBlock | QuoteBlock`) replaces `Line` as the item type
-   for twenty existing `list[Line]` fields plus `TopicSection.points`.
+   `BulletBlock | CodeBlock | TableBlock | QuoteBlock`) replaces `Line` as
+   the item type for twenty existing `list[Line]` fields plus
+   `TopicSection.points`. `CodeBlock` is reused from ADR-0009 unchanged —
+   the same model `ProcedureStep.blocks` and the top-level `code_blocks`
+   already use — not a new type introduced here.
    `app.services.chat_export._render_body_items` is the grouping renderer:
-   consecutive bullets become one Markdown bullet list; a table or quote
-   ends that list and becomes a section-level sibling block, rendered
-   directly under the field's own heading, in the position the client
-   actually placed it. A separate `## 表`/`## 引用` appendix — the ADR-0009
-   pattern for `code_blocks` — was considered and rejected: ADR-0009's own
-   Context calls collecting a procedure's code into one section "the exact
-   design this ADR exists to avoid", because it discards the order and
-   surrounding context that make the content meaningful; the same objection
-   applies to a table that illustrates the point immediately before it.
+   consecutive bullets become one Markdown bullet list; a code block,
+   table, or quote ends that list and becomes a section-level sibling
+   block, rendered directly under the field's own heading, in the position
+   the client actually placed it. A separate `## 表`/`## 引用` appendix —
+   the ADR-0009 pattern for `code_blocks` — was considered and rejected for
+   the new block types on the same grounds ADR-0009 already rejected it for
+   code: ADR-0009's own Context calls collecting a procedure's code into
+   one section "the exact design this ADR exists to avoid", because it
+   discards the order and surrounding context that make the content
+   meaningful; the same objection applies to a table that illustrates the
+   point immediately before it, and is why a body field's own `CodeBlock`
+   stays in that field rather than moving to `code_blocks` too.
    Nesting a table/quote *inside* a bullet (an indented continuation, the
    way `CodeBlock` nests inside a `ProcedureStep`) was also considered and
    rejected: a table has no continuation-indent requirement of its own to
@@ -210,34 +217,39 @@ continuation and disappears from the rendered output entirely.
    rather than the pre-parse `max_request_bytes` backstop that rejects a
    request outright.
 
-8. **A section-level block (table or quote) is always separated from
-   adjacent content by a blank line, on both sides, including from another
-   section-level block immediately following it.** Verified against
-   markdown-it-py during design: a table with no blank line before it,
-   immediately after a bullet list, is swallowed into the preceding list
-   item's lazy continuation and disappears from the rendered output
-   entirely — data loss, not a cosmetic difference. Unlike a fenced code
-   block (CommonMark core, which always interrupts a paragraph on its own),
-   a GFM table's or an Obsidian callout's paragraph-interrupting behaviour
-   is a renderer-specific extension, not something to rely on without the
-   blank line regardless. A caption directly above a table or the callout
+8. **A section-level block (code, table, or quote) is always separated
+   from adjacent content by a blank line, on both sides, including from
+   another section-level block immediately following it.** Verified
+   against markdown-it-py during design: a table with no blank line before
+   it, immediately after a bullet list, is swallowed into the preceding
+   list item's lazy continuation and disappears from the rendered output
+   entirely — data loss, not a cosmetic difference. A fenced code block is
+   CommonMark core and always interrupts a paragraph on its own even
+   without one, but the blank line is added around it too, for the same
+   one-shape-fits-every-section-level-block simplicity in
+   `_render_body_items` — a GFM table's or an Obsidian callout's own
+   paragraph-interrupting behaviour is a renderer-specific extension, not
+   something to rely on without the blank line regardless. A caption
+   directly above a table, a caption above a code fence, or the callout
    header line directly above quote lines needs no blank line of its own —
    verified as producing an identical token stream either way, matching the
    existing code-caption precedent (ADR-0009 decision 6) — so
-   `_render_table`/`_render_quote` place a caption/header immediately above
-   their own content, and `_render_body_items` is what inserts the blank
-   line between one rendered block (a bullet run, a table, or a quote) and
+   `_render_table`/`_render_quote`/`_render_top_level_code_block` place a
+   caption/header immediately above their own content, and
+   `_render_body_items` is what inserts the blank line between one
+   rendered block (a bullet run, a code block, a table, or a quote) and
    the next.
 
 ## Consequences
 
 ### Positive
 
-- A comparison table, a warning callout, a checklist, or a hierarchical
-  breakdown that appears in a conversation can now be saved exactly where
-  it appeared, inside the body field it belongs to, instead of being
-  flattened into a line of literal `|`/`>`/`[ ]` characters or omitted
-  entirely.
+- A comparison table, a warning callout, a checklist, a hierarchical
+  breakdown, or a short code snippet that illustrates a point in a
+  `design`/`decisions`/-style field — not only inside `procedure.steps` —
+  can now be saved exactly where it appeared, inside the body field it
+  belongs to, instead of being flattened into a line of literal
+  `|`/`>`/`[ ]` characters or omitted entirely.
 - No existing export changes its rendered Markdown: every pre-existing test
   in `tests/test_chat_export.py`, `tests/test_mcp_tools.py`, and
   `tests/test_inbox.py` passes unchanged, including the byte-exact golden
@@ -254,14 +266,17 @@ continuation and disappears from the rendered output entirely.
 
 ### Negative
 
-- `app.models`'s generated MCP schema grows by two more `$defs`
-  (`TableBlock`, `QuoteBlock`, alongside ADR-0009's `BulletBlock`
-  companion), adding further to the `tools/list` token cost ADR-0005's own
-  "Negative" section first flagged and ADR-0009 already added to.
-- Twenty existing field descriptions do not mention tables or quotes by
-  name (only the field's own mode-specific guidance): a calling model
-  discovers rich-block support for a given field from the shared
-  `BodyBlock`/`BulletBlock`/`TableBlock`/`QuoteBlock` schema `$defs`
+- `app.models`'s generated MCP schema grows by three new `$defs`
+  (`BulletBlock`, `TableBlock`, `QuoteBlock` — all introduced by this ADR,
+  not ADR-0009), adding further to the `tools/list` token cost ADR-0005's
+  own "Negative" section first flagged and ADR-0009 already added to.
+  `CodeBlock` (ADR-0009) is reused, not duplicated, now that `BodyBlock`
+  references it too.
+- Twenty existing field descriptions do not mention tables, quotes, or code
+  blocks by name (only the field's own mode-specific guidance): a calling
+  model discovers rich-block support for a given field from the shared
+  `BodyBlock`/`BulletBlock`/`CodeBlock`/`TableBlock`/`QuoteBlock` schema
+  `$defs`
   rather than from each field's own prose, the same trade-off ADR-0005's
   "Negative" section already accepted for `steps`' code-block support.
 - `_MAX_TOTAL_BLOCK_CHARS`'s widened scope is a real (if narrow) behaviour
@@ -325,13 +340,16 @@ continuation and disappears from the rendered output entirely.
 
 - `tasks/todo.md`'s ADR-0009 entry — the recorded future-work note this ADR
   follows up on
-- `app/models.py`'s `BulletBlock`, `TableBlock`, `QuoteBlock`, `BodyBlock`,
-  `BodyItem`, `_coerce_body_item`, `StepBlock`, `_MAX_TABLE_COLUMNS`,
-  `_MAX_TABLE_ROWS`, `_MAX_QUOTE_LINES`, `_MAX_BULLET_DEPTH`
+- `app/models.py`'s `BulletBlock`, `TableBlock`, `QuoteBlock`, `BodyBlock`
+  (which also references ADR-0009's `CodeBlock`), `BodyItem`,
+  `_coerce_body_item`, `StepBlock`, `_MAX_TABLE_COLUMNS`, `_MAX_TABLE_ROWS`,
+  `_MAX_QUOTE_LINES`, `_MAX_BULLET_DEPTH`
 - `app/services/chat_export.py`'s `_normalise_body_items`,
   `_normalise_table`, `_normalise_quote`, `_check_bullet_depth`,
   `_render_body_items`, `_render_table`, `_render_quote`, `_render_bullet`,
-  `_escape_table_cell`, `_total_block_chars`
+  `_escape_table_cell`, `_total_block_chars` — plus ADR-0009's
+  `_normalise_code_block`/`_render_top_level_code_block`, both reused
+  as-is for a body field's own `CodeBlock`
 - `tests/test_chat_export.py`, `tests/test_mcp_tools.py`,
   `tests/test_inbox.py`
 - ADR-0005 (`docs/adr/0005-*.md`) decisions 4, 6, 7, 10, 12 — the contracts
