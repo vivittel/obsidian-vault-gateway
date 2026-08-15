@@ -993,12 +993,30 @@ def _total_block_chars(
 
     A plain bullet's ``content`` is not counted — it was never budgeted
     before this change either, being already bounded by ``Line``'s own
-    per-item cap and the field's own item-count cap. A paragraph's content
-    is NOT analogous: ``ParagraphContent``'s own cap is 8x ``Line``'s (see
-    ``_MAX_PARAGRAPH_CHARS``), so leaving it uncounted would let a single
-    body field carry far more prose than code/table/quote content ever
-    could under the same per-item cap — this is the bypass decision 8
-    exists to close, not a gap this budget already tolerated.
+    per-item cap and the field's own item-count cap. That per-field cap is
+    weaker than it used to be for ``topics[].points`` specifically
+    (``_MAX_TOPIC_POINT_ITEMS`` = 100, up from the shared ``_MAX_LIST_ITEMS``
+    = 30, docs/adr/0013-*.md): ``topics[].points``' own bullet-content
+    contribution to a ``full`` export's schema-level ceiling is now
+    ``_MAX_TOPIC_ITEMS`` (50) x ``_MAX_TOPIC_POINT_ITEMS`` (100) x
+    ``_MAX_LINE_CHARS`` (1,000) = 5,000,000 chars, up from 600,000 — this is
+    ``topics[].points``' own contribution only, not the whole export's
+    ceiling (the common ``list[BodyItem]`` fields every mode shares —
+    ``decisions``, ``unresolved_issues``, ``next_actions``, ``sources`` —
+    can add up to 4 x 30 x 1,000 = 120,000 more bullet-content chars on top
+    of it, unaffected by this change). That figure is still a hard, finite
+    ceiling regardless of ``Settings.max_request_bytes`` — it is not itself
+    unbounded — but at that setting's *default* (2 MiB, ``app/config.py``)
+    the transport-level body-size backstop is what actually rejects a
+    bullet-only payload this large before it reaches this budget at all;
+    ``max_request_bytes`` has no configured upper bound, so raising it
+    enough would make this per-field schema ceiling the binding one again.
+    A paragraph's content is NOT analogous to a bullet's: ``ParagraphContent``'s
+    own cap is 8x ``Line``'s (see ``_MAX_PARAGRAPH_CHARS``), so leaving it
+    uncounted would let a single body field carry far more prose than
+    code/table/quote content ever could under the same per-item cap — this is the
+    bypass decision 8 exists to close, not a gap this budget already
+    tolerated.
     """
     total = sum(_code_chars(block) for block in code_blocks)
     for step in steps:

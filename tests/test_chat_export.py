@@ -795,6 +795,73 @@ def test_related_notes_over_the_maximum_is_rejected() -> None:
         ChatExport(tldr=["ok"], related_notes=[f"Knowledge/{i}.md" for i in range(11)])
 
 
+# --- Structured full-export item limits (docs/adr/0013-*.md, issue #23) -------
+#
+# _MAX_TOPIC_ITEMS (20 -> 50) and _MAX_TOPIC_POINT_ITEMS (new, split off the
+# shared _MAX_LIST_ITEMS = 30) were raised from production reports of a
+# single `full` export hitting both old caps (29 topics, 37 points in one
+# topic). The boundary tests below exercise both the raised caps and prove
+# the shared _MAX_LIST_ITEMS = 30 is unaffected for fields that still use it.
+
+
+def test_topics_accepts_up_to_the_maximum() -> None:
+    export = _build(
+        "full", topics=[{"heading": f"h{i}", "points": ["p"]} for i in range(50)]
+    )
+    assert len(export.topics) == 50
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+def test_topics_over_the_maximum_is_rejected() -> None:
+    with pytest.raises(PydanticValidationError):
+        _build("full", topics=[{"heading": f"h{i}", "points": ["p"]} for i in range(51)])
+
+
+def test_topic_points_accepts_up_to_the_maximum() -> None:
+    export = _build(
+        "full", topics=[{"heading": "h", "points": [f"p{i}" for i in range(100)]}]
+    )
+    assert len(export.topics[0].points) == 100
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+def test_topic_points_over_the_maximum_is_rejected() -> None:
+    with pytest.raises(PydanticValidationError):
+        _build("full", topics=[{"heading": "h", "points": [f"p{i}" for i in range(101)]}])
+
+
+def test_decisions_still_capped_at_the_shared_max_list_items() -> None:
+    # decisions is a _COMMON_NONE_FIELDS member (any mode), unaffected by the
+    # topics[].points split.
+    export = _build("summary", decisions=[f"d{i}" for i in range(30)])
+    assert len(export.decisions) == 30
+    with pytest.raises(PydanticValidationError):
+        _build("summary", decisions=[f"d{i}" for i in range(31)])
+
+
+def test_next_actions_still_capped_at_the_shared_max_list_items() -> None:
+    export = _build("summary", next_actions=[f"n{i}" for i in range(30)])
+    assert len(export.next_actions) == 30
+    with pytest.raises(PydanticValidationError):
+        _build("summary", next_actions=[f"n{i}" for i in range(31)])
+
+
+def test_overview_still_capped_at_the_shared_max_list_items() -> None:
+    # overview belongs to summary mode only.
+    export = _build("summary", overview=[f"o{i}" for i in range(30)])
+    assert len(export.overview) == 30
+    with pytest.raises(PydanticValidationError):
+        _build("summary", overview=[f"o{i}" for i in range(31)])
+
+
+def test_facts_still_capped_at_the_shared_max_list_items() -> None:
+    # facts belongs to reference mode only.
+    export = _build("reference", facts=[f"f{i}" for i in range(30)])
+    assert len(export.facts) == 30
+    with pytest.raises(PydanticValidationError):
+        _build("reference", facts=[f"f{i}" for i in range(31)])
+
+
 # --- Field-owner-mode consistency (drives the MCP schema description test) ----
 
 
