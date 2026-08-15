@@ -10,8 +10,8 @@
     — the `ChatExport`/`TopicSection` shapes this ADR only re-tunes, not replaces
   - [`docs/adr/0011-rich-body-blocks-in-structured-exports.md`](0011-rich-body-blocks-in-structured-exports.md),
     [`docs/adr/0012-paragraph-first-body-blocks-in-structured-exports.md`](0012-paragraph-first-body-blocks-in-structured-exports.md)
-    — why `topics[].points` (a `list[BodyItem]`) grows faster per item than
-    the plain `list[Line]` fields `_MAX_LIST_ITEMS` still bounds
+    — generalised every `_MAX_LIST_ITEMS`-bounded field, `topics[].points`
+    included, into `list[BodyItem]`; this ADR does not revisit that shape
   - `app/models.py`'s `_MAX_TOPIC_ITEMS`, `_MAX_TOPIC_POINT_ITEMS`,
     `TopicSection.points`; `app/services/chat_export.py`'s
     `_total_block_chars`
@@ -27,13 +27,15 @@ only workaround was to merge topics/points together until the count fit —
 distorting the conversation's actual structure to satisfy an unrelated
 Gateway constant, not a real capacity problem.
 
-`TopicSection.points` sharing `_MAX_LIST_ITEMS` with `decisions`,
-`next_actions`, `overview`, and eighteen other fields was already a latent
-mismatch after ADR-0011/0012: those fields hold `Line`-shaped bullets one
-line each, while `points` holds full `BodyItem`s — paragraph, bullet, code,
-table, or quote — the same per-item shape a `full` export's entire topic
-body is made of. `points` was always going to accumulate items faster than
-its 20 siblings; it just had not yet been exercised hard enough to show it.
+`TopicSection.points` shares `_MAX_LIST_ITEMS` with 20 other fields
+(`decisions`, `next_actions`, `overview`, and the rest) — all of them,
+`points` included, are `list[BodyItem]` since ADR-0011/0012 generalised
+every one of them from a plain `list[Line]`. The shape is not what singles
+`points` out: what does is that `points` is where a `full`-mode export's
+actual topic content accumulates, one entry per point covered under a
+topic, so it is the field this report's 37-item conversation actually hit —
+none of the other 20 were reported as too tight, and there is no reason
+tied to the reported problem to widen them too.
 
 Every `Field(max_length=...)` here also defines a `maxItems` in
 `create_inbox_note`'s published MCP tool argument schema (verified via
@@ -48,10 +50,14 @@ an internal tuning knob — hence an ADR rather than a bare constant edit.
    that is over-splitting topics rather than under-provisioned by the cap.
 
 2. **`TopicSection.points` gets its own `_MAX_TOPIC_POINT_ITEMS = 100`,
-   split off `_MAX_LIST_ITEMS` (30, unchanged).** `points` is a
-   `list[BodyItem]`; every other `_MAX_LIST_ITEMS`-bounded field (18 of
-   them — `decisions`, `design`, `context`, `verification`, `facts`, and
-   the rest) is untouched. 100 covers the reported 37 with headroom, sized
+   split off `_MAX_LIST_ITEMS` (30, unchanged).** Every other
+   `_MAX_LIST_ITEMS`-bounded field (20 of them — `decisions`, `design`,
+   `context`, `verification`, `facts`, and the rest; all `list[BodyItem]`
+   since ADR-0011/0012, the same shape `points` itself has) is untouched:
+   `points` is the field the production report actually hit, not the only
+   one with this shape, so scoping the increase to it — rather than raising
+   the shared constant — avoids loosening 20 fields that were never
+   reported as too tight. 100 covers the reported 37 with headroom, sized
    the same way as `_MAX_TOPIC_ITEMS`: enough for real usage, not
    unbounded.
 
@@ -76,10 +82,10 @@ an internal tuning knob — hence an ADR rather than a bare constant edit.
 
 - The reported failure (29 topics, 37 points) succeeds without the client
   needing to merge content to fit an arbitrary count.
-- `topics[].points`'s cap now reflects what it actually holds (rich
-  `BodyItem`s, the same shape a topic's body is made of) instead of
-  borrowing a cap sized for one-line bullet fields.
-- The 18 other `_MAX_LIST_ITEMS` fields are untouched — this is a targeted
+- `topics[].points`'s cap now reflects the field's own reported usage
+  instead of borrowing a cap sized for 20 other, differently-used fields
+  that happen to share its `list[BodyItem]` shape.
+- The 20 other `_MAX_LIST_ITEMS` fields are untouched — this is a targeted
   widening of the two constants the production report actually hit, not a
   blanket increase.
 
@@ -88,14 +94,23 @@ an internal tuning knob — hence an ADR rather than a bare constant edit.
 - **`app/services/chat_export._total_block_chars`'s existing rationale for
   not budgeting a plain bullet's `content`** — "already bounded by `Line`'s
   per-item cap and the field's own item-count cap" — describes a weaker
-  bound than before. A bullet-only `full` export's schema-level ceiling
+  bound than before, specifically for `topics[].points`. Its own
+  bullet-content contribution to a `full` export's schema-level ceiling
   rises from `_MAX_TOPIC_ITEMS` (20) × old `_MAX_LIST_ITEMS` (30) × `Line`
   (1,000) = 600,000 characters to `_MAX_TOPIC_ITEMS` (50) ×
-  `_MAX_TOPIC_POINT_ITEMS` (100) × `Line` (1,000) = 5,000,000 characters.
-  This remains a hard, finite ceiling on its own — it does not make the
-  bullet path unbounded — but it is five times what it was, and the
-  docstring's reasoning needed the concrete numbers restated so a future
-  reader does not assume the old 600,000 figure still holds.
+  `_MAX_TOPIC_POINT_ITEMS` (100) × `Line` (1,000) = 5,000,000 characters —
+  an ~8.3x increase (both `_MAX_TOPIC_ITEMS` and `_MAX_TOPIC_POINT_ITEMS`
+  rose, so the two factors compound). This is `topics[].points`' own
+  contribution only, not the whole export's ceiling: the common
+  `list[BodyItem]` fields every mode shares (`decisions`,
+  `unresolved_issues`, `next_actions`, `sources`) can add up to
+  4 × 30 × 1,000 = 120,000 more bullet-content characters on top of it,
+  unaffected by this change. The combined figure remains a hard, finite
+  ceiling on its own — it does not make the bullet path unbounded — but it
+  is markedly larger than before, and the docstring's reasoning needed the
+  concrete numbers restated, scoped correctly, so a future reader does not
+  assume the old 600,000 figure still holds or mistake it for the whole
+  export's ceiling.
 - A client already relying on the previous, lower caps to reject an
   oversized export early sees that rejection point move later (or not
   happen at all, for a payload between the old and new caps) — the same
@@ -106,18 +121,18 @@ an internal tuning knob — hence an ADR rather than a bare constant edit.
 - **`MAX_REQUEST_BYTES` is not a substitute cap this ADR is relying on.**
   `Settings.max_request_bytes` (`app/config.py`) defaults to 2 MiB and has
   a floor (`ge=1024`) but no configured ceiling, so whether it or the
-  schema-level item-count ceiling above binds first on a bullet-only
-  payload depends on the deployment's own setting: at the 2 MiB default,
-  the transport-level `MAX_REQUEST_BYTES` check (enforced pre-parse by
-  `/mcp`'s own SDK middleware) rejects a 5,000,000-character bullet-only
-  payload before it reaches `ChatExport` validation at all; a deployment
-  that raises `MAX_REQUEST_BYTES` enough makes the schema-level ceiling
-  above the binding one again. Either way the payload stays finite — this
-  ADR does not depend on `MAX_REQUEST_BYTES`'s value to keep the export
-  bounded, and does not change `MAX_REQUEST_BYTES` itself.
+  schema-level item-count ceiling above binds first on a `topics[].points`
+  bullet-only payload depends on the deployment's own setting: at the
+  2 MiB default, the transport-level `MAX_REQUEST_BYTES` check (enforced
+  pre-parse by `/mcp`'s own SDK middleware) rejects a 5,000,000-character
+  payload of that shape before it reaches `ChatExport` validation at all; a
+  deployment that raises `MAX_REQUEST_BYTES` enough makes the schema-level
+  ceiling above the binding one again. Either way the payload stays finite
+  — this ADR does not depend on `MAX_REQUEST_BYTES`'s value to keep the
+  export bounded, and does not change `MAX_REQUEST_BYTES` itself.
 - `_MAX_TOTAL_BLOCK_CHARS` (100,000) continues to bind before either new
   cap for any export that actually uses paragraph/code/table/quote content
-  in its points, exactly as it already did for the other 18
+  in its points, exactly as it already did for the other 20
   `_MAX_LIST_ITEMS` fields (`app/models.py`'s comment above
   `_MAX_PARAGRAPH_CHARS`) — this ADR does not change that relationship,
   only the arithmetic's inputs.
@@ -131,14 +146,14 @@ an internal tuning knob — hence an ADR rather than a bare constant edit.
    property of the export shape rather than a deployment resource policy.
 2. **Raise `_MAX_LIST_ITEMS` itself instead of splitting off
    `_MAX_TOPIC_POINT_ITEMS`.** Rejected — the production report only hit
-   `topics`/`topics[].points`; raising the shared constant would loosen 18
+   `topics`/`topics[].points`; raising the shared constant would loosen 20
    unrelated fields (`decisions`, `design`, `facts`, ...) that were never
    reported as too tight, for no benefit tied to the actual problem.
 3. **Remove the cap on `topics[].points` entirely.** Rejected — the issue
    itself asks for a bounded increase, not unbounded input; an unbounded
-   per-topic item count would also make the bullet-only ceiling discussed
-   in Consequences → Negative genuinely unbounded rather than merely
-   larger.
+   per-topic item count would also make `topics[].points`' own
+   bullet-content contribution, discussed in Consequences → Negative,
+   genuinely unbounded rather than merely larger.
 4. **Leave the caps as-is and document the merge-topics-to-fit workaround.**
    Rejected — this keeps distorting a client's own conversation structure
    to satisfy a Gateway constant that has no relationship to the content

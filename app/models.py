@@ -153,12 +153,15 @@ _MAX_TLDR_ITEMS = 8
 _MAX_TIMELINE_ITEMS = 50
 _MAX_STEP_ITEMS = 50
 
-# `full` mode's own pair (docs/adr/0013-*.md), deliberately not shared with
-# _MAX_LIST_ITEMS: `topics[].points` is a list[BodyItem] — paragraph/bullet/
-# code/table/quote — so it grows faster per topic than the plain list[Line]
-# fields that _MAX_LIST_ITEMS still bounds (decisions, next_actions, etc.).
-# Both were raised from production reports of a single `full` export hitting
-# the old 20/30 caps (29 topics, 37 points in one topic).
+# `full` mode's own pair (docs/adr/0013-*.md), raised from production
+# reports of a single `full` export hitting the old 20/30 caps (29 topics,
+# 37 points in one topic). `topics[].points` is deliberately split off the
+# shared _MAX_LIST_ITEMS rather than raising it directly: `points` is the
+# field that was actually reported too tight, and every other
+# _MAX_LIST_ITEMS field (decisions, next_actions, ... — 20 of them, all
+# list[BodyItem] since ADR-0011/0012, the same shape as `points` itself) was
+# never reported as such, so widening the shared constant would loosen 20
+# unrelated fields for no reason tied to the actual problem.
 _MAX_TOPIC_ITEMS = 50
 _MAX_TOPIC_POINT_ITEMS = 100
 
