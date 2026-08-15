@@ -22,7 +22,7 @@
 `create_inbox_note`'s `full`-mode export failed for a real conversation: 29
 `topics` against `_MAX_TOPIC_ITEMS` = 20, and 37 `points` in one topic
 against the shared `_MAX_LIST_ITEMS` = 30 that `TopicSection.points`
-(`app/models.py`) borrowed from every other plain body field. The client's
+(`app/models.py`) borrowed from the 20 other body fields sharing it. The client's
 only workaround was to merge topics/points together until the count fit —
 distorting the conversation's actual structure to satisfy an unrelated
 Gateway constant, not a real capacity problem.
@@ -130,12 +130,19 @@ an internal tuning knob — hence an ADR rather than a bare constant edit.
   ceiling above the binding one again. Either way the payload stays finite
   — this ADR does not depend on `MAX_REQUEST_BYTES`'s value to keep the
   export bounded, and does not change `MAX_REQUEST_BYTES` itself.
-- `_MAX_TOTAL_BLOCK_CHARS` (100,000) continues to bind before either new
-  cap for any export that actually uses paragraph/code/table/quote content
-  in its points, exactly as it already did for the other 20
-  `_MAX_LIST_ITEMS` fields (`app/models.py`'s comment above
-  `_MAX_PARAGRAPH_CHARS`) — this ADR does not change that relationship,
-  only the arithmetic's inputs.
+- `_MAX_TOTAL_BLOCK_CHARS` (100,000) remains an independent cross-block
+  budget, exactly as it already was for the other 20 `_MAX_LIST_ITEMS`
+  fields — this ADR does not change that relationship, only the item-count
+  arithmetic's inputs. It **can** bind before either new item-count cap
+  when the counted paragraph/code/table/quote content is sufficiently
+  large (`app/models.py`'s comment above `_MAX_PARAGRAPH_CHARS` gives the
+  worst-case arithmetic for a per-item-at-the-cap export), but the
+  item-count caps can still bind first for many short blocks: 100
+  one-character `ParagraphBlock`s in one topic's `points` total a few
+  hundred counted characters, nowhere near 100,000, so the 101st item hits
+  `_MAX_TOPIC_POINT_ITEMS` before `_MAX_TOTAL_BLOCK_CHARS` is ever
+  approached. Which cap binds depends on the export's own content, not a
+  fixed ordering.
 
 ## Alternatives considered
 
