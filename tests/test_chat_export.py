@@ -2259,6 +2259,31 @@ def test_two_line_quote_hazard_classes_are_all_escaped(hazard_line: str) -> None
     assert sum(1 for t in table_tokens if t.type == "table_open") == 0
 
 
+def test_multiline_quote_cannot_forge_a_gfm_table() -> None:
+    # docs/adr/0012-*.md: the actually-vulnerable shape needs a header row
+    # and delimiter row with MATCHING column counts — unlike
+    # _TWO_LINE_QUOTE_HAZARD_LINES's "| --- | --- |" case (paired with a
+    # plain "safe first line" header, which never forms a table regardless
+    # of escaping, since a 1-column header can't match a 2-column
+    # delimiter). This is the shape that was actually live before the fix:
+    # "> | h | i |\n> | --- | --- |\n> | a | b |" renders a real GFM table
+    # inside the blockquote.
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {
+                "type": "quote",
+                "lines": ["| h | i |", "| --- | --- |", "| a | b |"],
+            }
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD_TABLE.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "blockquote_open") == 1
+    assert sum(1 for t in tokens if t.type == "table_open") == 0
+
+
 def test_gateway_generated_table_delimiter_row_is_not_escaped() -> None:
     # The new hazard (docs/adr/0012-*.md) must apply only to client-supplied
     # text, never to _render_table_delimiter's own output — a real TableBlock
@@ -2728,10 +2753,15 @@ def test_procedure_mode_design_field_is_still_rejected_as_mode_mismatched() -> N
 
 # === Paragraph-first body blocks (docs/adr/0012-*.md) ==========================
 #
-# This section covers ParagraphBlock as an explicit {"type": "paragraph", ...}
-# item only — the bare-string shorthand still means bullet until Slice 3's
-# _coerce_body_item flip (see the "bare string -> paragraph" tests near the
-# top-level rich-block sections there instead).
+# This section covers ParagraphBlock mostly via an explicit
+# {"type": "paragraph", ...} item, to keep canonicalisation/rendering/
+# structure tests independent of the bare-string shorthand's own coercion
+# target. The shorthand itself (a bare string -> {"type": "paragraph", ...})
+# is pinned separately, near the top-level rich-block sections:
+# test_plain_string_body_fields_render_as_paragraphs_across_every_mode
+# (above) and test_plain_string_body_item_renders_as_a_paragraph_not_a_bullet
+# (below, alongside the explicit-bullet tests it is deliberately contrasted
+# with).
 
 # --- Schema: ParagraphBlock -----------------------------------------------------
 

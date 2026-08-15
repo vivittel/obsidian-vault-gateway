@@ -187,15 +187,19 @@ _MAX_BULLET_DEPTH = 3
 
 # _MAX_TOTAL_BLOCK_CHARS bounds the sum of every client-supplied string inside
 # every rich block in one export — code content/label, table label/headers/
-# rows, quote title/lines together (app/services/chat_export.py enforces this
+# rows, quote title/lines, and a paragraph's lines plus its line-break
+# separators (docs/adr/0012-*.md; app/services/chat_export.py enforces this
 # on normalised data, since no single-field Field(max_length=...) can see a
 # cross-field/cross-block total). This is a conservative budget on *input*
 # payload, not a guarantee about the rendered Markdown's byte size — escaping
-# (table cells, code fences) can only grow the text further. The final
-# backstop stays Settings.max_note_size_bytes (default 1 MiB) — the
-# note_service.read_note truncation limit a written note must still fit
-# under, not just MAX_REQUEST_BYTES's 2 MiB pre-parse backstop. At ~400 KiB
-# worst-case UTF-8, 100_000 stays comfortably inside that.
+# (table cells, code fences) can only grow the text further, and it is not a
+# guarantee about the created note's final byte size either:
+# Settings.max_note_size_bytes is enforced only by search_notes, read_note,
+# and append_inbox_note (app/application.py) — the create_inbox_note/
+# create_chat_export_note write path has no byte cap of its own (an accepted
+# gap, not something this budget closes). Creation's actual outer limits
+# remain MAX_REQUEST_BYTES (the MCP transport's pre-parse backstop) and the
+# per-field/per-item schema caps.
 _MAX_TOTAL_BLOCK_CHARS = 100_000
 
 # Markdown fence info-string safety: no line breaks, no backtick, no control

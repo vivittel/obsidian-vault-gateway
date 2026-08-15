@@ -292,7 +292,7 @@ _LANGUAGE_RE = re.compile(_LANGUAGE_PATTERN)
 # "\n" instead, which is what puts the text after it on its own line and
 # therefore through _escape_block_start. "\r\n" is matched first so a CRLF
 # becomes one newline, not two.
-_PARAGRAPH_LINE_BREAK_RE = re.compile(r"\r\n|[\r\v\f\x1c-\x1e\x85  ]")
+_PARAGRAPH_LINE_BREAK_RE = re.compile(r"\r\n|[\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 # CommonMark indentation is ASCII space/tab only — verified against
 # markdown-it-py during design: a leading U+3000/U+00A0 is NOT indentation
@@ -306,17 +306,22 @@ _LEADING_INDENT_RE = re.compile(r"^[ \t]*")
 
 # _MAX_TOTAL_BLOCK_CHARS (imported above) is the shared budget across every
 # rich block's client-supplied strings in one export — code content/label
-# (steps[].blocks and the top-level code_blocks) plus table label/headers/
-# rows, wherever a table appears (a body field, topics[].points, or a step).
-# No single Field(max_length=...) can see that cross-field/cross-block sum,
-# so it is enforced here, on normalised data, like every other cross-field
-# check in this module. Defined once on app.models (single source of truth,
-# alongside the other size constants schema/docs already reference) rather
-# than re-declared here, so a future change to the budget can't drift
-# between the schema-facing constant and the value runtime validation
-# actually enforces. This bounds *input* payload, not the rendered
-# Markdown's byte size — escaping (table cells, code fences) only grows the
-# text further; the final backstop is still Settings.max_note_size_bytes.
+# (steps[].blocks and the top-level code_blocks), table label/headers/rows,
+# quote title/lines, and a paragraph's lines plus its line-break separators
+# (docs/adr/0012-*.md; see _paragraph_chars), wherever any of these appears
+# (a body field, topics[].points, or a step). No single Field(max_length=...)
+# can see that cross-field/cross-block sum, so it is enforced here, on
+# normalised data, like every other cross-field check in this module.
+# Defined once on app.models (single source of truth, alongside the other
+# size constants schema/docs already reference) rather than re-declared
+# here, so a future change to the budget can't drift between the
+# schema-facing constant and the value runtime validation actually
+# enforces. This bounds *input* payload, not the rendered Markdown's byte
+# size — escaping (table cells, code fences) only grows the text further —
+# and not the created note's final byte size either: Settings.
+# max_note_size_bytes is enforced only by search_notes/read_note/
+# append_inbox_note, never by the create_inbox_note/create_chat_export_note
+# write path (see app.models's own comment above _MAX_TOTAL_BLOCK_CHARS).
 
 # Rendered only via _render_supplementary_sections, never through
 # _render_section/_HEADINGS: unlike every mode's own heading, "## コード" is
