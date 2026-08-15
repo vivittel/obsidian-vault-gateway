@@ -1417,3 +1417,115 @@ table/quote/nested bulletを含むノートを書き込み、生成された`.md
 修正後の検証結果: `.venv/bin/pytest -q` → 973 passed。
 `.venv/bin/ruff check .` → All checks passed。
 `.venv/bin/python scripts/export_openapi.py --check` → up to date。
+
+# 本文フィールドのbare stringをParagraph-firstへ変更（ADR-0012）
+
+## 背景
+
+ADR-0011は本文フィールドをrich block化したが、bare stringのcoerce先を
+`BulletBlock`とした（`_coerce_body_item`）ため、`context`/`design`/`verification`等へ
+渡した普通の説明文が必ず`- `箇条書きになり、さらに`one_line()`が改行をすべて空白へ
+潰すため段落構造を保持できなかった。Gatewayが固定すべきはexport mode/章の種類/章名/
+章順/frontmatterまでであり、章本文の通常文章までbulletへ強制変換することではない。
+本エントリはbare stringの意味を`ParagraphBlock`へ変更し、複数行・空行を保持する
+段落を本文フィールドの既定表現にする。意図した破壊的変更であり、既存Vaultノートの
+migrationは行わない。
+
+設計段階の実測（markdown-it-py）で、`_escape_block_start`の`_BLOCK_HAZARD_RE`に
+既存の穴が3つ見つかった。setext見出し下線（`--`/`=`/`==`等）とGFM表区切り行は
+2行以上のプレーンテキストが隣接する場合のみ成立し、複数行`ParagraphBlock`が
+初めてその経路を作るため放置すると確実に踏む。加えてthematic break
+（`***`/`_ _ _`等）は`BulletBlock`・`tldr`で**既に稼働中**（`- ***`が list item内で
+`<hr>`になりテキストが消失、`tldr=["***"]`も同様）で、setextも多行`QuoteBlock`で
+既に稼働中（`> a`/`> ==`が引用内に本物の見出しを生成）だった。既存テストが
+これらを見逃していた理由は、`_QUOTE_HAZARD_LINES`が1行引用でのみ検証しており、
+setextの成立に必要な「直前のテキスト行」が存在しなかったため。同じ
+`_escape_block_start`に依存する変更のため、この3つの穴はSlice 1として同PRで
+修正した（別PRへの分割も検討したが、段落実装の正しさの議論自体がこの修正に
+依存するため一体で扱った）。
+
+## 変更内容
+
+5スライスに分割。
+
+1. **`_escape_block_start`のhazard集合完成**（先行スライス、独立して正しい）:
+   `_SETEXT_UNDERLINE_RE`（全て`=`か全て`-`の下線）・`_THEMATIC_BREAK_RE`
+   （同一文字3個以上、空白区切り可）・`_TABLE_DELIMITER_RE`（GFM区切り行の
+   保守的superset——Obsidianのtable parserはmarkdown-itではないため厳密な
+   文法転写は避けた）を追加し、`_BLOCK_HAZARD_RE`の旧`-{3,}$|={3,}$|_{3,}$`
+   （いずれも新regexの真部分集合）を削除。既存テストのピン値は一切変わらない
+   （実測で確認済み）。
+2. **`ParagraphBlock`追加**（加算のみ、shorthandはまだbullet）: `app/models.py`に
+   `_MAX_PARAGRAPH_CHARS = 8_000`（`Line`の1,000ではなく`CodeContent`と同じ——
+   段落は「1フィールド=1行」という`Line`の前提を持たないため）・
+   `ParagraphContent`・`ParagraphBlock`（`min_length`なし——bare string shorthandの
+   受け皿として旧`list[Line]`と同等以上に permissive でなければならない）を新設し、
+   `BodyBlock`へ追加。`app/services/chat_export.py`に専用の`_canonicalise_paragraph`
+   （`one_line`は使わない）を新設: 改行・空行を保持（内部空行数も畳まない——
+   要求する決定性は「同じ入力→同じ出力」のみ）、行末空白は除去、ブロック先頭行
+   （先頭行・内部空行の直後）のみASCII空白/タブを除去し継続行のインデントは保持
+   （`expandtabs`はしない——継続行のインデントはCommonMarkが破棄するため安全かつ
+   無害、タブ展開は入力内容そのものを書き換えてしまう）。`_render_paragraph`は
+   各行のインデントを分離した本文へ`_escape_block_start`を無条件適用してから
+   継続行のみ元インデントを再結合する（ブロック先頭判定の正しさに依存しない
+   fail-closed設計）。`_paragraph_chars`は改行separatorも文字数へ算入する
+   （`_quote_chars`とは異なる——`QuoteBlock.lines`は`list[Line]`で改行が入力に
+   含まれないが`ParagraphContent`は1つの文字列で改行も入力の一部。算入しないと
+   改行主体の段落で予算を実質2倍迂回できることを実測で確認した）。
+3. **shorthandを反転**（breaking change本体）: `_coerce_body_item`が
+   `{"type": "paragraph", ...}`を返すよう変更、`json_schema_input_type`も
+   `ParagraphContent | BodyBlock`へ。この1スライスの差分が「意味的に何が変わったか」
+   そのものになる。
+4. **MCP schema/description**: `create_inbox_note`のdescriptionへ
+   「plain string = paragraph、実際のリストのときだけ`type: bullet`」等の短い
+   段落とJSON例を1つ追加。`app/models.py`の7フィールドのdescriptionから
+   bullet示唆語句（"one point per item"等）を削除（`<mode> mode only.`の
+   接頭辞は維持——`_FIELD_OWNER_MODES`駆動テストが依存するため）。
+5. **文書**: `docs/adr/0012-*.md`新規（ADR-0011決定1・決定5の該当部分を
+   supersede、決定2-4・6-8は無変更と明記）。README.md/Usage.md/
+   `docs/IMPLEMENTATION_PLAN.md`§12・§17/本エントリを更新。
+
+主な変更ファイル: `app/models.py`・`app/services/chat_export.py`・
+`app/mcp_server.py`（3スライス共通）。テスト: `tests/test_chat_export.py`
+（新規セクション「Paragraph-first body blocks」+ 既存19テストの期待値更新+
+hazard集合完成のための新規テスト）、`tests/test_mcp_tools.py`
+（discriminator mapping・`ParagraphBlock`schema・description）、
+`tests/test_inbox.py`（2箇所——1つは期待値更新、1つはbare stringの直後に
+`depth:1`bulletが続く構成が新仕様下で`ValidationError`になるため明示bulletへ
+変更。breaking changeの最も分かりやすい実例）。
+
+## 実装しないもの（対象外、別issueへ）
+
+- raw Markdown作成API・`content`/`frontmatter`の`create_inbox_note`復活・
+  クライアント指定frontmatter・既存Vaultノートのmigration・REST再拡大・
+  クライアントによる見出し自由指定・任意のネストしたMarkdown AST・
+  `ProcedureStep`の全面再設計・`ParagraphBlock`を`StepBlock`へ追加すること・
+  数式ブロック/脚注/水平線/見出しブロック/画像埋め込み（ADR-0011の非目標を継承）
+- `create_inbox_note`のwrite pathに`Settings.max_note_size_bytes`相当のbyte capが
+  無いという既存ギャップ（`models.py:145-148`が既に記録済み）の解消
+- bullet・`Line`フィールドまで`_MAX_TOTAL_BLOCK_CHARS`へ統合すること
+
+## 検証結果
+
+`.venv/bin/pytest -q` → 1146 passed（既存973 + 新規173）。
+`.venv/bin/ruff check .` → All checks passed。
+`.venv/bin/python scripts/export_openapi.py --check` → up to date
+（`ChatExport`はOpenAPIに現れないため`openapi.json`自体は無変更）。
+`docker compose config` → この開発環境にdockerが無いため未実行
+（`compose.yaml`自体は本変更で触っていない）。
+
+各スライスの境界で上記3コマンドを実行し全て通過を確認。Slice 1・Slice 3では、
+新規テストが修正前のコードに対して実際に失敗することを該当行の一時差し戻しで
+確認した（setext/thematic breakの6テスト、shorthand反転前のbare string→paragraph
+テスト）。
+
+手動確認: `markdown-it-py`で
+`paragraph→bullet→bullet→code→paragraph→table→quote→paragraph`が
+`level==0`の兄弟トークン列になること（ネストしたbulletがloose listとなり
+list item内にも`paragraph_open`が出ることを`level`属性で除外して確認）、
+段落+YAML+段落のgolden testでコードのインデント・内部空行・fence前後の
+blank lineが完全一致すること、setext（`--`/`=`/`==`）・thematic break
+（`***`/`_ _ _`）・GFM区切り行（`--- | ---`等）のいずれも先頭バックスラッシュ1つで
+無効化でき表示が変わらないこと、`tempfile.TemporaryDirectory`上のテスト用Inbox
+（実Vault・本番`obsidian-api.tokonemore.com`は使用せず）へ段落+YAMLを含むノートを
+書き込み生成された`.md`を目視確認した。

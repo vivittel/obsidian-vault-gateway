@@ -195,10 +195,39 @@ async def test_create_inbox_note_schema_defines_table_block() -> None:
     assert table_schema["headers"]["minItems"] == 1
 
 
+async def test_create_inbox_note_schema_defines_paragraph_block() -> None:
+    # docs/adr/0012-*.md: ParagraphBlock's content has no minLength (the
+    # bare-string shorthand's target must accept "" like every other
+    # plain-string field) and a maxLength 8x Line's own — the same cap as
+    # CodeContent, not Line's, since a paragraph is deliberately not one
+    # Markdown line.
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["create_inbox_note"].input_schema
+    paragraph_schema = schema["$defs"]["ParagraphBlock"]
+    properties = paragraph_schema["properties"]
+    assert set(properties) == {"type", "content"}
+    assert "minLength" not in properties["content"]
+    assert properties["content"]["maxLength"] == 8_000
+    assert "paragraph" in paragraph_schema["description"]
+
+
+async def test_create_inbox_note_body_field_string_variant_allows_paragraph_length() -> None:
+    # docs/adr/0012-*.md: the bare-string shorthand's published maxLength
+    # widens from Line's 1_000 to ParagraphContent's 8_000 — a permissive,
+    # schema-visible consequence of the shorthand now targeting
+    # ParagraphBlock instead of BulletBlock.
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["create_inbox_note"].input_schema
+    design_items_schema = schema["$defs"]["ChatExport"]["properties"]["design"]["items"]
+    string_variant = next(v for v in design_items_schema["anyOf"] if v.get("type") == "string")
+    assert string_variant["maxLength"] == 8_000
+
+
 async def test_create_inbox_note_body_field_accepts_a_bare_string_or_a_rich_block() -> None:
     # docs/adr/0011-*.md generalises every list[Line] body field into a
     # mixed sequence — the schema-level anyOf is [string, discriminated
-    # BulletBlock|CodeBlock|TableBlock|QuoteBlock union], the same shape as
+    # ParagraphBlock|BulletBlock|CodeBlock|TableBlock|QuoteBlock union
+    # (ParagraphBlock added by docs/adr/0012-*.md)], the same shape as
     # steps' own string-or-ProcedureStep anyOf (docs/adr/0009-*.md).
     tools = {t.name: t for t in await mcp.list_tools()}
     schema = tools["create_inbox_note"].input_schema
@@ -207,6 +236,7 @@ async def test_create_inbox_note_body_field_accepts_a_bare_string_or_a_rich_bloc
     assert any(variant.get("type") == "string" for variant in variants)
     discriminated = next(v for v in variants if "discriminator" in v)
     assert discriminated["discriminator"]["mapping"] == {
+        "paragraph": "#/$defs/ParagraphBlock",
         "bullet": "#/$defs/BulletBlock",
         "code": "#/$defs/CodeBlock",
         "table": "#/$defs/TableBlock",
@@ -321,6 +351,17 @@ async def test_create_inbox_note_description_documents_the_scan_failure_fallback
     assert "find_duplicate_candidates" in create_description
     assert "fails" in create_description
     assert "strict" in create_description
+
+
+async def test_create_inbox_note_description_documents_the_paragraph_default() -> None:
+    # docs/adr/0012-*.md: the description must tell a calling model that a
+    # plain string means paragraph (not bullet), and that an explicit
+    # {"type": "bullet", ...} is required for a real list — otherwise a
+    # model can only discover this from the $defs schema shapes.
+    tools = {t.name: t for t in await mcp.list_tools()}
+    create_description = tools["create_inbox_note"].description
+    assert "PARAGRAPH" in create_description
+    assert '"type": "bullet"' in create_description
 
 
 async def test_find_duplicate_candidates_returned_path_is_accepted_by_append_inbox_note(

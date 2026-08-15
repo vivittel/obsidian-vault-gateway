@@ -21,6 +21,7 @@ from app.services.chat_export import (
     _MAX_TOTAL_BLOCK_CHARS,
     _MODE_SECTIONS,
     _canonicalise_code,
+    _canonicalise_paragraph,
     _escape_inline,
     _fence_for,
     _NormalisedCodeBlock,
@@ -130,17 +131,19 @@ def test_summary_mode_worked_example_renders_exactly() -> None:
         "\n"
         "## 決定事項\n"
         "\n"
-        "- エクスポート専用ツールは追加しない。\n"
+        "エクスポート専用ツールは追加しない。\n"
         "\n"
         "## 概要\n"
         "\n"
-        "- 既存のcreate_inbox_noteを置き換えず拡張する。\n"
-        "- REST側は後方互換のためcontentを残す。\n"
+        "既存のcreate_inbox_noteを置き換えず拡張する。\n"
+        "\n"
+        "REST側は後方互換のためcontentを残す。\n"
         "\n"
         "## 要点\n"
         "\n"
-        "- MCPは構造化入力のみを受け付ける。\n"
-        "- 見出しの順序はGatewayが固定する。\n"
+        "MCPは構造化入力のみを受け付ける。\n"
+        "\n"
+        "見出しの順序はGatewayが固定する。\n"
         "\n"
         "## 未解決の論点\n"
         "\n"
@@ -148,7 +151,7 @@ def test_summary_mode_worked_example_renders_exactly() -> None:
         "\n"
         "## 次のアクション\n"
         "\n"
-        "- ADR-0005を起草する。\n"
+        "ADR-0005を起草する。\n"
         "\n"
         "## 関連ノート\n"
         "\n"
@@ -594,9 +597,10 @@ def test_paragraph_starting_with_hash_is_escaped() -> None:
 
 
 def test_decisions_item_starting_with_hash_cannot_forge_a_nested_heading() -> None:
+    # docs/adr/0012-*.md: a bare string is a paragraph, not a bullet.
     export = _build("summary", decisions=["# forged"])
     rendered = render_chat_export(export, title="t", now=_NOW)
-    assert "- \\# forged" in rendered.content
+    assert "\\# forged" in rendered.content
     assert _heading_lines(rendered.content)[:2] == ["## 要約", "## 決定事項"]
 
 
@@ -609,9 +613,10 @@ def test_steps_item_that_is_a_bare_code_fence_is_escaped() -> None:
 
 
 def test_facts_item_starting_with_blockquote_marker_is_escaped() -> None:
+    # docs/adr/0012-*.md: a bare string is a paragraph, not a bullet.
     export = _build("reference", facts=["> quote"])
     rendered = render_chat_export(export, title="t", now=_NOW)
-    assert "- \\> quote" in rendered.content
+    assert "\\> quote" in rendered.content
     assert "## 例" in _heading_lines(rendered.content)
 
 
@@ -626,15 +631,17 @@ def test_tldr_item_that_opens_an_html_block_is_escaped() -> None:
 
 
 def test_decisions_item_starting_with_task_checkbox_is_escaped() -> None:
+    # docs/adr/0012-*.md: a bare string is a paragraph, not a bullet.
     export = _build("summary", decisions=["[ ] task"])
     rendered = render_chat_export(export, title="t", now=_NOW)
-    assert "- \\[ ] task" in rendered.content
+    assert "\\[ ] task" in rendered.content
 
 
 def test_facts_item_that_looks_like_a_link_reference_definition_is_escaped() -> None:
+    # docs/adr/0012-*.md: a bare string is a paragraph, not a bullet.
     export = _build("reference", facts=["[ref]: https://example.com"])
     rendered = render_chat_export(export, title="t", now=_NOW)
-    assert "- \\[ref]: https://example.com" in rendered.content
+    assert "\\[ref]: https://example.com" in rendered.content
 
 
 def test_steps_item_starting_with_ordered_marker_escapes_the_punctuation_not_the_digit() -> None:
@@ -659,6 +666,20 @@ def test_internal_ideographic_space_is_preserved_but_edges_are_stripped() -> Non
 
 def test_every_rendered_line_has_no_trailing_whitespace() -> None:
     export = _build("summary", overview=["a"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert all(not line.endswith((" ", "\t")) for line in rendered.content.split("\n"))
+
+
+def test_every_rendered_line_has_no_trailing_whitespace_with_a_multiline_paragraph() -> None:
+    # docs/adr/0012-*.md: a ParagraphBlock is the first body block whose
+    # canonical form can carry more than one line and an internal blank
+    # line — the single-line "overview=['a']" case above cannot exercise
+    # either.
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "paragraph", "content": "line one  \n\nline three   \nline four"}],
+    )
     rendered = render_chat_export(export, title="t", now=_NOW)
     assert all(not line.endswith((" ", "\t")) for line in rendered.content.split("\n"))
 
@@ -1578,17 +1599,17 @@ def test_procedure_with_plain_steps_still_renders_the_pre_existing_numbered_list
 
 # === Rich body blocks (docs/adr/0011-*.md) ====================================
 
-# --- Backward compatibility: every body field still accepts plain strings -----
+# --- Every body field still accepts plain strings, now as paragraphs ----------
 
 
 @pytest.mark.parametrize("mode", list(_MODE_SECTIONS))
-def test_plain_string_body_fields_render_byte_identically_across_every_mode(
+def test_plain_string_body_fields_render_as_paragraphs_across_every_mode(
     mode: str,
 ) -> None:
-    # A dedicated, explicit pin alongside the pre-existing golden-output
-    # tests above (which already cover this implicitly): every mode-specific
-    # plain-list field still renders as ordinary "- " bullets with no
-    # rich-block artifact, whether or not this feature exists.
+    # docs/adr/0012-*.md: a bare string now means paragraph, not bullet
+    # (superseding ADR-0011's shorthand) — a dedicated, explicit pin
+    # alongside the golden-output tests above, covering every mode-specific
+    # plain-list field.
     extra = {
         field_name: ["a", "b"]
         for field_name in _MODE_SECTIONS[mode]
@@ -1604,7 +1625,8 @@ def test_plain_string_body_fields_render_byte_identically_across_every_mode(
             "symptom": "症状", "environment": "環境", "investigation": "調査",
             "root_cause": "原因", "workaround": "回避策", "facts": "事実", "examples": "例",
         }[field_name]
-        assert f"{heading}\n\n- a\n- b" in rendered.content
+        assert f"{heading}\n\na\n\nb" in rendered.content
+        assert f"{heading}\n\n- a\n- b" not in rendered.content
 
 
 # --- Schema: TableBlock ---------------------------------------------------------
@@ -1736,14 +1758,16 @@ def test_table_row_with_empty_cell_is_accepted() -> None:
 
 
 def test_bullet_table_bullet_render_as_sibling_blocks_in_one_field() -> None:
+    # docs/adr/0012-*.md: a bare string is now a paragraph, not a bullet —
+    # explicit BulletBlocks are required to exercise this shape.
     export = ChatExport(
         mode="technical",
         tldr=["ok"],
         design=[
-            "a",
-            "b",
+            {"type": "bullet", "content": "a"},
+            {"type": "bullet", "content": "b"},
             {"type": "table", "headers": ["x", "y"], "rows": [["1", "2"]]},
-            "c",
+            {"type": "bullet", "content": "c"},
         ],
     )
     rendered = render_chat_export(export, title="t", now=_NOW)
@@ -2038,12 +2062,13 @@ def test_quote_title_without_callout_is_rejected() -> None:
 def test_quote_with_only_whitespace_lines_is_dropped() -> None:
     # The same "min_length=1 at the schema layer, still droppable once
     # whitespace-only" precedent _normalise_code_block already sets.
+    # docs/adr/0012-*.md: bare strings are paragraphs, not bullets.
     export = ChatExport(
         mode="technical", tldr=["ok"], design=["a", {"type": "quote", "lines": ["   ", "\t"]}, "b"]
     )
     rendered = render_chat_export(export, title="t", now=_NOW)
     assert ">" not in rendered.content
-    assert "- a\n- b" in rendered.content
+    assert "a\n\nb" in rendered.content
 
 
 # --- Structure: plain blockquote, callout header, sibling blocks ---------------
@@ -2097,6 +2122,26 @@ def test_quote_title_keeps_inline_markdown_live() -> None:
 
 
 def test_bullet_quote_bullet_render_as_sibling_blocks_in_one_field() -> None:
+    # docs/adr/0012-*.md: a bare string is now a paragraph, not a bullet —
+    # explicit BulletBlocks are required to exercise this shape.
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "a"},
+            {"type": "quote", "lines": ["quoted"]},
+            {"type": "bullet", "content": "b"},
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 2
+    assert sum(1 for t in tokens if t.type == "blockquote_open") == 1
+
+
+def test_paragraph_quote_paragraph_render_as_sibling_blocks_in_one_field() -> None:
+    # docs/adr/0012-*.md: the bare-string analogue of the test above —
+    # a paragraph, not a bullet list, on either side of the quote.
     export = ChatExport(
         mode="technical",
         tldr=["ok"],
@@ -2104,7 +2149,7 @@ def test_bullet_quote_bullet_render_as_sibling_blocks_in_one_field() -> None:
     )
     rendered = render_chat_export(export, title="t", now=_NOW)
     tokens = _MD.parse(rendered.content)
-    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 2
+    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 0
     assert sum(1 for t in tokens if t.type == "blockquote_open") == 1
 
 
@@ -2125,6 +2170,19 @@ _QUOTE_HAZARD_LINES = [
     "___",
     "1. item",
     "1) item",
+    # docs/adr/0012-*.md: setext underline / thematic break / GFM table
+    # delimiter row forms _BLOCK_HAZARD_RE's old alternatives did not cover.
+    "--",
+    "=",
+    "==",
+    "=  ",
+    "***",
+    "****",
+    "_ _ _",
+    "| --- | --- |",
+    "--- | ---",
+    ":-:|:-:",
+    "|---|",
 ]
 
 
@@ -2153,6 +2211,142 @@ def test_quote_line_hazard_classes_are_all_escaped(hazard_line: str) -> None:
     assert sum(1 for t in tokens if t.type == "bullet_list_open") == 0
     assert sum(1 for t in tokens if t.type == "ordered_list_open") == 0
     assert sum(1 for t in tokens if t.type == "heading_open") == baseline_headings
+
+
+# docs/adr/0012-*.md: a setext-heading underline and a GFM table delimiter
+# row both need a *preceding* text line to do anything — a single-line quote
+# (the shape test_quote_line_hazard_classes_are_all_escaped uses) can never
+# exercise either hazard, no matter which value is parametrized in. Verified
+# against markdown-it-py during design: a one-line "> ==" renders no
+# heading at all, while a two-line "> a\n> ==" renders a real <h1> inside
+# the blockquote. This is the shape that actually catches the bug.
+_TWO_LINE_QUOTE_HAZARD_LINES = [
+    "--",
+    "=",
+    "==",
+    "=  ",
+    "---",
+    "===",
+    "| --- | --- |",
+]
+
+
+@pytest.mark.parametrize("hazard_line", _TWO_LINE_QUOTE_HAZARD_LINES)
+def test_two_line_quote_hazard_classes_are_all_escaped(hazard_line: str) -> None:
+    baseline = render_chat_export(
+        ChatExport(
+            mode="technical",
+            tldr=["ok"],
+            design=[{"type": "quote", "lines": ["safe first line", "safe second line"]}],
+        ),
+        title="t",
+        now=_NOW,
+    )
+    baseline_headings = sum(1 for t in _MD.parse(baseline.content) if t.type == "heading_open")
+
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "quote", "lines": ["safe first line", hazard_line]}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "blockquote_open") == 1
+    assert sum(1 for t in tokens if t.type == "hr") == 0
+    assert sum(1 for t in tokens if t.type == "heading_open") == baseline_headings
+
+    table_tokens = _MD_TABLE.parse(rendered.content)
+    assert sum(1 for t in table_tokens if t.type == "table_open") == 0
+
+
+def test_multiline_quote_cannot_forge_a_gfm_table() -> None:
+    # docs/adr/0012-*.md: the actually-vulnerable shape needs a header row
+    # and delimiter row with MATCHING column counts — unlike
+    # _TWO_LINE_QUOTE_HAZARD_LINES's "| --- | --- |" case (paired with a
+    # plain "safe first line" header, which never forms a table regardless
+    # of escaping, since a 1-column header can't match a 2-column
+    # delimiter). This is the shape that was actually live before the fix:
+    # "> | h | i |\n> | --- | --- |\n> | a | b |" renders a real GFM table
+    # inside the blockquote.
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {
+                "type": "quote",
+                "lines": ["| h | i |", "| --- | --- |", "| a | b |"],
+            }
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD_TABLE.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "blockquote_open") == 1
+    assert sum(1 for t in tokens if t.type == "table_open") == 0
+
+
+def test_gateway_generated_table_delimiter_row_is_not_escaped() -> None:
+    # The new hazard (docs/adr/0012-*.md) must apply only to client-supplied
+    # text, never to _render_table_delimiter's own output — a real TableBlock
+    # still renders an unescaped "| --- | --- |" that parses as a table.
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "table", "headers": ["h1", "h2"], "rows": [["a", "b"]]}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    assert "| --- | --- |" in rendered.content
+    tokens = _MD_TABLE.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "table_open") == 1
+
+
+def test_bullet_content_that_is_a_thematic_break_run_does_not_render_an_hr() -> None:
+    # docs/adr/0012-*.md: "***"/"_ _ _"/etc. were a live hole — a bullet
+    # whose content was exactly one of these rendered an <hr> inside its own
+    # list item (verified against markdown-it-py during design).
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "***"},
+            {"type": "bullet", "content": "next"},
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "hr") == 0
+    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 1
+    assert sum(1 for t in tokens if t.type == "list_item_open") == 2
+
+
+def test_tldr_that_is_a_thematic_break_run_still_renders_as_a_paragraph() -> None:
+    # docs/adr/0012-*.md: tldr=["***"] rendered an <hr> in place of the tldr
+    # paragraph, losing the text entirely (verified during design).
+    export = ChatExport(mode="summary", tldr=["***"])
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "hr") == 0
+    assert "\\***" in rendered.content
+
+
+@pytest.mark.parametrize(
+    "safe_value",
+    [
+        "a - b",
+        "5 - 3 = 2",
+        "A案 | B案",
+        "---> arrow",
+        "-- dash prose",
+    ],
+)
+def test_escape_block_start_does_not_touch_ordinary_prose_with_dashes_or_equals(
+    safe_value: str,
+) -> None:
+    # docs/adr/0012-*.md: the widened hazard set must not over-match ordinary
+    # sentences that merely contain a dash/equals sign but are not themselves
+    # a setext underline, thematic break, or table delimiter row.
+    from app.services.chat_export import _escape_block_start
+
+    assert _escape_block_start(safe_value) == safe_value
 
 
 # --- Quote inside a procedure step ----------------------------------------------
@@ -2415,13 +2609,16 @@ def test_bullet_without_checked_renders_an_ordinary_bullet() -> None:
     assert section == "- a"
 
 
-def test_plain_string_bullets_default_to_depth_zero_and_no_checkbox() -> None:
-    # Backward compatibility: a bare string is still equivalent to
+def test_plain_string_body_item_renders_as_a_paragraph_not_a_bullet() -> None:
+    # docs/adr/0012-*.md: a bare string is now equivalent to
+    # {"type": "paragraph", "content": ...}, superseding ADR-0011's
     # {"type": "bullet", "content": ..., "depth": 0, "checked": None}.
     export = ChatExport(mode="technical", tldr=["ok"], design=["a"])
     rendered = render_chat_export(export, title="t", now=_NOW)
     section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
-    assert section == "- a"
+    assert section == "a"
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 0
 
 
 # === Code blocks reused in body fields (docs/adr/0011-*.md) ====================
@@ -2432,6 +2629,26 @@ def test_plain_string_bullets_default_to_depth_zero_and_no_checkbox() -> None:
 
 
 def test_bullet_code_bullet_render_as_sibling_blocks_in_one_field() -> None:
+    # docs/adr/0012-*.md: a bare string is now a paragraph, not a bullet —
+    # explicit BulletBlocks are required to exercise this shape.
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "a"},
+            {"type": "code", "language": "yaml", "content": "x: y"},
+            {"type": "bullet", "content": "b"},
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 2
+    fences = [t for t in tokens if t.type == "fence"]
+    assert [(f.content, f.info) for f in fences] == [("x: y\n", "yaml")]
+
+
+def test_paragraph_code_paragraph_render_as_sibling_blocks_in_one_field() -> None:
+    # docs/adr/0012-*.md: the bare-string analogue of the test above.
     export = ChatExport(
         mode="technical",
         tldr=["ok"],
@@ -2439,7 +2656,7 @@ def test_bullet_code_bullet_render_as_sibling_blocks_in_one_field() -> None:
     )
     rendered = render_chat_export(export, title="t", now=_NOW)
     tokens = _MD.parse(rendered.content)
-    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 2
+    assert sum(1 for t in tokens if t.type == "bullet_list_open") == 0
     fences = [t for t in tokens if t.type == "fence"]
     assert [(f.content, f.info) for f in fences] == [("x: y\n", "yaml")]
 
@@ -2470,13 +2687,14 @@ def test_body_field_code_is_never_moved_into_the_top_level_code_section() -> Non
 def test_body_field_code_that_normalises_to_empty_is_dropped() -> None:
     # The same "min_length=1 at the schema layer, still droppable once
     # whitespace-only" precedent _normalise_code_block already sets.
+    # docs/adr/0012-*.md: bare strings are paragraphs, not bullets.
     export = ChatExport(
         mode="technical", tldr=["ok"], design=["a", {"type": "code", "content": "   \n\t "}, "b"]
     )
     rendered = render_chat_export(export, title="t", now=_NOW)
     assert "```" not in rendered.content
     section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
-    assert section == "- a\n- b"
+    assert section == "a\n\nb"
 
 
 def test_bullet_after_body_field_code_must_restart_at_depth_zero() -> None:
@@ -2531,3 +2749,496 @@ def test_procedure_mode_design_field_is_still_rejected_as_mode_mismatched() -> N
     with pytest.raises(ValidationError) as excinfo:
         render_chat_export(export, title="t", now=_NOW)
     assert excinfo.value.message == "Fields not valid for export_mode 'procedure': design."
+
+
+# === Paragraph-first body blocks (docs/adr/0012-*.md) ==========================
+#
+# This section covers ParagraphBlock mostly via an explicit
+# {"type": "paragraph", ...} item, to keep canonicalisation/rendering/
+# structure tests independent of the bare-string shorthand's own coercion
+# target. The shorthand itself (a bare string -> {"type": "paragraph", ...})
+# is pinned separately, near the top-level rich-block sections:
+# test_plain_string_body_fields_render_as_paragraphs_across_every_mode
+# (above) and test_plain_string_body_item_renders_as_a_paragraph_not_a_bullet
+# (below, alongside the explicit-bullet tests it is deliberately contrasted
+# with).
+
+# --- Schema: ParagraphBlock -----------------------------------------------------
+
+
+def test_paragraph_block_schema_has_only_type_and_content() -> None:
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "paragraph", "content": "prose"}]
+    )
+    assert export.design[0].type == "paragraph"
+    assert export.design[0].content == "prose"
+
+
+def test_paragraph_content_accepts_up_to_the_max_and_rejects_one_more() -> None:
+    at_max = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "paragraph", "content": "x" * 8_000}]
+    )
+    assert len(at_max.design[0].content) == 8_000
+
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            mode="technical", tldr=["ok"], design=[{"type": "paragraph", "content": "x" * 8_001}]
+        )
+
+
+def test_paragraph_content_accepts_an_empty_string() -> None:
+    # No min_length, unlike CodeContent: ParagraphBlock is the bare-string
+    # shorthand's target (Slice 3), so it must stay at least as permissive
+    # as the old list[Line] shape — an empty content is normalised away by
+    # the formatter, never rejected by the schema.
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "paragraph", "content": ""}]
+    )
+    assert export.design[0].content == ""
+
+
+def test_paragraph_block_rejects_bullet_only_fields() -> None:
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            mode="technical",
+            tldr=["ok"],
+            design=[{"type": "paragraph", "content": "a", "depth": 1}],
+        )
+
+
+def test_paragraph_block_is_not_accepted_inside_a_procedure_step() -> None:
+    # Deliberate non-goal (docs/adr/0012-*.md): a step's continuation lines
+    # are indented to its numbered marker's width (docs/adr/0009-*.md), a
+    # different problem ParagraphBlock does not solve.
+    with pytest.raises(PydanticValidationError):
+        ChatExport(
+            mode="procedure",
+            tldr=["ok"],
+            steps=[{"blocks": [{"type": "paragraph", "content": "a"}]}],
+        )
+
+
+# --- Canonicalisation: multiline/blank-line preservation, never one_line -------
+
+
+def test_canonicalise_paragraph_preserves_a_single_line_break() -> None:
+    assert _canonicalise_paragraph("a\nb") == ("a", "b")
+    assert one_line("a\nb") == "a b"
+
+
+def test_canonicalise_paragraph_preserves_a_blank_line_as_a_second_paragraph() -> None:
+    assert _canonicalise_paragraph("a\n\nb") == ("a", "", "b")
+
+
+def test_canonicalise_paragraph_preserves_internal_blank_line_count() -> None:
+    # Unlike an earlier design that collapsed runs of 2+ blank lines, this
+    # module only removes differences that change nothing about the
+    # rendered structure — a client's own choice of how many blank lines to
+    # leave is not one of those. Only leading/trailing blank lines are
+    # dropped.
+    assert _canonicalise_paragraph("\n\nA。\n\n\nB。\n\n") == ("A。", "", "", "B。")
+
+
+def test_canonicalise_paragraph_drops_to_empty_tuple_when_nothing_survives() -> None:
+    assert _canonicalise_paragraph("") == ()
+    assert _canonicalise_paragraph("   \n\t\n   ") == ()
+
+
+def test_canonicalise_paragraph_normalises_crlf_and_exotic_line_breaks() -> None:
+    assert _canonicalise_paragraph("a\r\nb c") == ("a", "b", "c")
+
+
+def test_canonicalise_paragraph_preserves_internal_space_runs_but_strips_trailing() -> None:
+    assert _canonicalise_paragraph("A  B  \nC") == ("A  B", "C")
+
+
+def test_canonicalise_paragraph_does_not_expand_tabs() -> None:
+    # docs/adr/0012-*.md: tabs are never expanded — a continuation line's
+    # own leading tab is preserved verbatim (indented-code-block protection
+    # comes entirely from stripping ALL leading whitespace at block-start
+    # lines, so nothing needs to count tab-stop columns).
+    assert _canonicalise_paragraph("a\n\tb") == ("a", "\tb")
+    assert _canonicalise_paragraph("\tb") == ("b",)
+
+
+def test_canonicalise_paragraph_preserves_leading_ideographic_space() -> None:
+    assert _canonicalise_paragraph("　字下げ") == ("　字下げ",)
+
+
+def test_canonicalise_paragraph_strips_block_start_indent_but_keeps_continuation() -> None:
+    assert _canonicalise_paragraph("    a\n    b\n\n    c") == ("a", "    b", "", "c")
+
+
+# --- Rendering: paragraph + code + paragraph, byte-exact (golden) --------------
+
+
+def test_paragraph_code_paragraph_renders_exactly() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "paragraph", "content": "8080番は利用済みなので8081番を使用する。"},
+            {
+                "type": "code",
+                "language": "yaml",
+                "content": "services:\n  app:\n    image: x\n\n    ports:\n      - 1\n",
+            },
+            {"type": "paragraph", "content": "Docker socketはread-onlyでmountする。"},
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == (
+        "8080番は利用済みなので8081番を使用する。"
+        "\n\n"
+        "```yaml\n"
+        "services:\n"
+        "  app:\n"
+        "    image: x\n"
+        "\n"
+        "    ports:\n"
+        "      - 1\n"
+        "```"
+        "\n\n"
+        "Docker socketはread-onlyでmountする。"
+    )
+    tokens = _MD.parse(section)
+    kinds = [t.type for t in tokens if t.type in ("paragraph_open", "fence")]
+    assert kinds == ["paragraph_open", "fence", "paragraph_open"]
+    fence = next(t for t in tokens if t.type == "fence")
+    assert fence.content == "services:\n  app:\n    image: x\n\n    ports:\n      - 1\n"
+    assert fence.info == "yaml"
+
+
+def test_paragraph_multiline_content_renders_with_line_breaks_preserved() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "paragraph", "content": "1段落目。\n\n2段落目。\n改行も保持する。"}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "1段落目。\n\n2段落目。\n改行も保持する。"
+    tokens = _MD.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "paragraph_open") >= 2
+
+
+# --- Structure: paragraph as a section-level sibling, order-preserving ---------
+
+
+def test_two_consecutive_paragraph_blocks_are_separated_by_a_blank_line() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "paragraph", "content": "A。"}, {"type": "paragraph", "content": "B。"}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "A。\n\nB。"
+
+
+def test_one_paragraph_with_an_embedded_newline_stays_one_markdown_paragraph_with_soft_break() -> (
+    None
+):
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "paragraph", "content": "A。\nB。"}]
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "A。\nB。"
+    tokens = _MD.parse(rendered.content)
+    design_paragraphs = [
+        t for t in tokens if t.type == "inline" and t.content in ("A。\nB。",)
+    ]
+    assert design_paragraphs
+
+
+def test_mixed_paragraph_bullet_code_table_quote_render_in_client_order() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "paragraph", "content": "p1"},
+            {"type": "bullet", "content": "b1", "depth": 0},
+            {"type": "bullet", "content": "b2", "depth": 1},
+            {"type": "code", "content": "code"},
+            {"type": "paragraph", "content": "p2"},
+            {"type": "table", "headers": ["h"], "rows": [["a"]]},
+            {"type": "quote", "lines": ["q"]},
+            {"type": "paragraph", "content": "p3"},
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == (
+        "p1"
+        "\n\n"
+        "- b1\n  - b2"
+        "\n\n"
+        "```\ncode\n```"
+        "\n\n"
+        "p2"
+        "\n\n"
+        "| h |\n| --- |\n| a |"
+        "\n\n"
+        "> q"
+        "\n\n"
+        "p3"
+    )
+    tokens = _MD_TABLE.parse(section)
+    # level == 0 only: a nested bullet turns its parent list "loose"
+    # (CommonMark), which wraps each list item's own text in a nested
+    # paragraph_open — filtering by type alone would pick those up too.
+    # Section-level siblings are always at the top nesting level.
+    kinds = [
+        t.type
+        for t in tokens
+        if t.level == 0
+        and t.type
+        in (
+            "paragraph_open",
+            "bullet_list_open",
+            "fence",
+            "table_open",
+            "blockquote_open",
+        )
+    ]
+    assert kinds == [
+        "paragraph_open",  # p1
+        "bullet_list_open",  # b1/b2
+        "fence",  # code
+        "paragraph_open",  # p2
+        "table_open",
+        "blockquote_open",
+        "paragraph_open",  # p3
+    ]
+
+
+def test_bullet_after_a_paragraph_must_restart_at_depth_zero() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "a", "depth": 0},
+            {"type": "paragraph", "content": "p"},
+            {"type": "bullet", "content": "b", "depth": 1},
+        ],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(export, title="t", now=_NOW)
+    assert excinfo.value.message == "design[2]: bullet depth must start at 0."
+
+
+def test_bullet_after_a_paragraph_at_depth_zero_is_accepted() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "a", "depth": 0},
+            {"type": "paragraph", "content": "p"},
+            {"type": "bullet", "content": "b", "depth": 0},
+        ],
+    )
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+
+def test_paragraph_that_normalises_to_empty_is_dropped() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {"type": "bullet", "content": "a"},
+            {"type": "paragraph", "content": "   \n\t\n   "},
+            {"type": "bullet", "content": "b"},
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    section = rendered.content.split("## 設計\n\n")[1].split("\n\n## ")[0]
+    assert section == "- a\n- b"
+
+
+# --- Injection: a paragraph line can never open a new section-level block ------
+
+_PARAGRAPH_HAZARD_LINES = [
+    "# forged",
+    "## forged",
+    "> quote",
+    "<script>",
+    "<!-- c -->",
+    "[ref]: https://example.com",
+    "[ ] task",
+    "- bullet",
+    "* bullet",
+    "+ bullet",
+    "1. item",
+    "1) item",
+    "```",
+    "```py",
+    "~~~",
+    "---",
+    "===",
+    "___",
+    "=",
+    "==",
+    "--",
+    "=  ",
+    "**",
+    "***",
+    "****",
+    "_ _ _",
+    "| h | i |",
+    "| --- | --- |",
+    "--- | ---",
+    ":-:|:-:",
+    "|---|",
+    "    indented code",
+    "\tindented code",
+    "   # forged",
+    "   - bullet",
+    "   > quote",
+    "   1. item",
+    "   ---",
+]
+
+_HAZARD_TOKEN_TYPES = (
+    "hr",
+    "fence",
+    "html_block",
+    "code_block",
+    "table_open",
+    "bullet_list_open",
+    "ordered_list_open",
+    "blockquote_open",
+)
+
+
+def _baseline_heading_count(md: MarkdownIt) -> int:
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "paragraph", "content": "safe"}]
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    return sum(1 for t in md.parse(rendered.content) if t.type == "heading_open")
+
+
+@pytest.mark.parametrize("hazard_line", _PARAGRAPH_HAZARD_LINES)
+@pytest.mark.parametrize(
+    "position",
+    ["standalone", "after_text_line", "after_blank_line"],
+)
+def test_paragraph_hazard_lines_never_open_a_new_block(hazard_line: str, position: str) -> None:
+    if position == "standalone":
+        content = hazard_line
+    elif position == "after_text_line":
+        content = f"safe\n{hazard_line}"
+    else:
+        content = f"safe\n\n{hazard_line}"
+
+    export = ChatExport(
+        mode="technical", tldr=["ok"], design=[{"type": "paragraph", "content": content}]
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+
+    parsers = ((_MD, _baseline_heading_count(_MD)), (_MD_TABLE, _baseline_heading_count(_MD_TABLE)))
+    for md, baseline in parsers:
+        tokens = md.parse(rendered.content)
+        for token_type in _HAZARD_TOKEN_TYPES:
+            assert sum(1 for t in tokens if t.type == token_type) == 0, (
+                f"{token_type} leaked for {hazard_line!r} at {position}"
+            )
+        assert sum(1 for t in tokens if t.type == "heading_open") == baseline
+
+
+def test_paragraph_table_forgery_is_blocked_end_to_end() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "paragraph", "content": "| h | i |\n| --- | --- |\n| a | b |"}],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD_TABLE.parse(rendered.content)
+    assert sum(1 for t in tokens if t.type == "table_open") == 0
+
+
+def test_paragraph_keeps_inline_markdown_live() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[
+            {
+                "type": "paragraph",
+                "content": "これは **太字** と `code` と [リンク](https://example.com)",
+            }
+        ],
+    )
+    rendered = render_chat_export(export, title="t", now=_NOW)
+    tokens = _MD.parse(rendered.content)
+    inline_tokens = [t for t in tokens if t.type == "inline"]
+    children_types = {c.type for inline in inline_tokens for c in (inline.children or [])}
+    assert "strong_open" in children_types
+    assert "code_inline" in children_types
+    assert "link_open" in children_types
+
+
+def test_paragraph_renders_byte_identically_when_rendered_twice() -> None:
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[{"type": "paragraph", "content": "a\n\nb\nc"}],
+    )
+    first = render_chat_export(export, title="t", now=_NOW)
+    second = render_chat_export(export, title="t", now=_NOW)
+    assert first.content == second.content
+    assert first.frontmatter == second.frontmatter
+
+
+# --- Total block-size budget also counts a paragraph's characters --------------
+
+
+def test_paragraph_content_counts_toward_the_total_block_budget() -> None:
+    full_blocks = [
+        {"type": "paragraph", "content": "x" * 8_000} for _ in range(12)
+    ]  # 96,000 chars
+    at_budget = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[*full_blocks, {"type": "paragraph", "content": "y" * 4_000}],
+    )
+    render_chat_export(at_budget, title="t", now=_NOW)  # 100_000 chars, must not raise
+
+    over_budget = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[*full_blocks, {"type": "paragraph", "content": "y" * 4_001}],
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(over_budget, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
+    )
+
+
+def test_paragraph_newline_separators_count_toward_the_budget_not_just_line_length() -> None:
+    # docs/adr/0012-*.md decision 9: a paragraph made mostly of newlines
+    # must not bypass the budget. "a\n" * 4000 is exactly 8,000
+    # ParagraphContent characters but sums to only 4,000 by line length
+    # alone (4,000 single-char lines) — counting only sum(len(line)) would
+    # let 12 such blocks (48,000 by line length) sit far under the 100,000
+    # budget while actually carrying 96,000 characters of input.
+    newline_heavy_block = {"type": "paragraph", "content": "a\n" * 4_000}  # 8_000 chars
+    export = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[newline_heavy_block for _ in range(12)],  # 96,000 chars if fully counted
+    )
+    render_chat_export(export, title="t", now=_NOW)  # must not raise
+
+    over_budget = ChatExport(
+        mode="technical",
+        tldr=["ok"],
+        design=[newline_heavy_block for _ in range(13)],  # 104,000 chars if fully counted
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        render_chat_export(over_budget, title="t", now=_NOW)
+    assert excinfo.value.message == (
+        f"Block content exceeds the total limit of {_MAX_TOTAL_BLOCK_CHARS} characters."
+    )

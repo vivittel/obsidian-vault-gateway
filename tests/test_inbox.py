@@ -174,7 +174,9 @@ def test_create_note_with_structured_export(
     written = (inbox_root / "Structured export test.md").read_text(encoding="utf-8")
     assert "export_mode: summary" in written
     assert "## 決定事項" in written
-    assert "- d1" in written
+    # docs/adr/0012-*.md: a bare string is a paragraph, not a bullet.
+    assert "d1" in written
+    assert "- d1" not in written
 
 
 # --- Verbatim/structure-preserving code content (docs/adr/0009-*.md) -----------
@@ -362,13 +364,19 @@ def test_create_note_with_nested_bullets_and_task_list(
     # inside a mode-specific body field.
     from app.models import ChatExport
 
+    # docs/adr/0012-*.md: a bare string is now a paragraph, not a bullet, so
+    # a depth-1 bullet immediately after one would fail
+    # _check_bullet_depth's "the first bullet in a run must start at 0"
+    # rule (the run only "continues" a preceding bullet, never a
+    # paragraph) — the item that used to be a bare "設定手順" bullet must
+    # now be sent as an explicit BulletBlock to keep this nested-list shape.
     application.create_chat_export_note(
         title="Nested bullets test",
         export=ChatExport(
             mode="technical",
             tldr=["ok"],
             design=[
-                "設定手順",
+                {"type": "bullet", "content": "設定手順"},
                 {"type": "bullet", "content": "compose.yaml を編集する", "depth": 1},
                 {"type": "bullet", "content": "テストを実行する", "checked": False},
                 {"type": "bullet", "content": "レビューを依頼する", "checked": True},
