@@ -637,6 +637,14 @@ ADR-0009がコードの集約を避けた理由と同じ。本文フィールド
 `_MAX_TOTAL_BLOCK_CHARS`へ算入する（算入しないと予算を迂回できてしまうため）。
 `ProcedureStep`は無変更。詳細はADR-0012参照。
 
+**`full`エクスポートの件数上限（ADR-0013、issue #23）**: `topics`の上限を
+`_MAX_TOPIC_ITEMS`で20→50に、`topics[].points`の上限を汎用`_MAX_LIST_ITEMS`
+（30、他フィールドは変更なし）から新設の`_MAX_TOPIC_POINT_ITEMS`（100）へ分離。
+実運用で29 topics・37 pointsが上限に達した報告への対応。環境変数化はしない
+（`Field(max_length=...)`がMCP tool schemaの`maxItems`をそのまま構成するため）。
+`MAX_REQUEST_BYTES`・`_MAX_TOTAL_BLOCK_CHARS`等の既存サイズ系保護は無変更。
+詳細はADR-0013参照。
+
 **frontmatterキー順**: `title` → `created` → `updated` → `source`（常に`chatgpt`）
 → `export_mode` → `project`（任意、省略可）→ `conversation_type`（任意、省略可）
 → `tags`。
@@ -972,6 +980,21 @@ commonmark preset）に加え、`_MD_TABLE = MarkdownIt("commonmark").enable("ta
 - 破壊的変更の固定: bare stringがbulletでなくparagraphとして描画されること
   （全モード）、procedure.stepsは無変更でバイト一致のまま保たれること、
   `ParagraphBlock`が`ProcedureStep.blocks`に受理されないこと
+
+**`full`エクスポートの件数上限（ADR-0013、issue #23）**:
+
+- 境界値: `topics`50件で成功・51件で`pydantic.ValidationError`、
+  `topics[].points`100件で成功・101件で`pydantic.ValidationError`
+- 非回帰: 汎用`_MAX_LIST_ITEMS`（30）を使う代表フィールド
+  （`decisions`/`next_actions`/`overview`/`facts`）が30件で成功・31件で
+  拒否されること——`topics[].points`の分離が他フィールドの上限に影響しないこと
+  の直接証明
+- MCP schema: `create_inbox_note`の`input_schema`で
+  `ChatExport.topics.maxItems == 50`・`TopicSection.points.maxItems == 100`が
+  公開されること、汎用フィールド（例: `decisions`）の`maxItems`が30のまま
+  であること
+- schemaと実際のvalidationの一致: `mcp.call_tool("create_inbox_note", ...)`
+  経由で51 topics・101 pointsがそれぞれ`ToolError`として拒否されること
 
 ### 検証済み関連ノートwikilink（`tests/test_related_notes.py`、issue #13）
 

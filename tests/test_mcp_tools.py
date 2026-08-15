@@ -113,6 +113,20 @@ async def test_create_inbox_note_export_schema_related_notes_is_bounded() -> Non
     assert "search_notes" in related_notes_schema["description"]
 
 
+async def test_create_inbox_note_export_schema_topic_limits_are_raised_and_split() -> None:
+    # docs/adr/0013-*.md, issue #23: topics 20 -> 50, and topics[].points
+    # split off the shared _MAX_LIST_ITEMS (30) into its own 100.
+    tools = {t.name: t for t in await mcp.list_tools()}
+    schema = tools["create_inbox_note"].input_schema
+    export_schema = schema["$defs"]["ChatExport"]["properties"]
+    assert export_schema["topics"]["maxItems"] == 50
+    topic_section_schema = schema["$defs"]["TopicSection"]["properties"]
+    assert topic_section_schema["points"]["maxItems"] == 100
+    # The shared cap other list[BodyItem]/list[Line] fields still use is
+    # unaffected by the split.
+    assert export_schema["decisions"]["maxItems"] == 30
+
+
 async def test_create_inbox_note_export_schema_orders_related_notes_field() -> None:
     tools = {t.name: t for t in await mcp.list_tools()}
     schema = tools["create_inbox_note"].input_schema
@@ -706,6 +720,38 @@ async def test_create_inbox_note_rejects_too_many_related_notes(env: None) -> No
                 "export": {
                     "tldr": ["y"],
                     "related_notes": [f"Knowledge/{i}.md" for i in range(11)],
+                },
+            },
+        )
+
+
+async def test_create_inbox_note_rejects_too_many_topics(env: None) -> None:
+    # docs/adr/0013-*.md, issue #23: proves the raised schema maxItems (50)
+    # and the actual pydantic validation agree — 51 is still rejected.
+    with pytest.raises(ToolError):
+        await mcp.call_tool(
+            "create_inbox_note",
+            {
+                "title": "x",
+                "export": {
+                    "mode": "full",
+                    "tldr": ["y"],
+                    "topics": [{"heading": f"h{i}", "points": ["p"]} for i in range(51)],
+                },
+            },
+        )
+
+
+async def test_create_inbox_note_rejects_too_many_topic_points(env: None) -> None:
+    with pytest.raises(ToolError):
+        await mcp.call_tool(
+            "create_inbox_note",
+            {
+                "title": "x",
+                "export": {
+                    "mode": "full",
+                    "tldr": ["y"],
+                    "topics": [{"heading": "h", "points": [f"p{i}" for i in range(101)]}],
                 },
             },
         )

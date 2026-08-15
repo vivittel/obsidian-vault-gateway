@@ -152,7 +152,16 @@ _MAX_LIST_ITEMS = 30
 _MAX_TLDR_ITEMS = 8
 _MAX_TIMELINE_ITEMS = 50
 _MAX_STEP_ITEMS = 50
-_MAX_TOPIC_ITEMS = 20
+
+# `full` mode's own pair (docs/adr/0013-*.md), deliberately not shared with
+# _MAX_LIST_ITEMS: `topics[].points` is a list[BodyItem] — paragraph/bullet/
+# code/table/quote — so it grows faster per topic than the plain list[Line]
+# fields that _MAX_LIST_ITEMS still bounds (decisions, next_actions, etc.).
+# Both were raised from production reports of a single `full` export hitting
+# the old 20/30 caps (29 topics, 37 points in one topic).
+_MAX_TOPIC_ITEMS = 50
+_MAX_TOPIC_POINT_ITEMS = 100
+
 _MAX_DEFINITION_ITEMS = 50
 _MAX_TAG_ITEMS = 20
 
@@ -249,7 +258,8 @@ CodeContent = Annotated[str, Field(min_length=1, max_length=_MAX_CODE_CHARS)]
 # The right sibling is CodeContent, the other multiline-capable type, hence
 # the same 8_000. This is not the binding constraint in practice: 8_000 x
 # _MAX_LIST_ITEMS (30) = 240_000 in a single field already exceeds
-# _MAX_TOTAL_BLOCK_CHARS (100_000), so the shared budget
+# _MAX_TOTAL_BLOCK_CHARS (100_000) — and 8_000 x _MAX_TOPIC_POINT_ITEMS (100)
+# = 800_000 for topics[].points does too — so the shared budget
 # (app/services/chat_export.py's _paragraph_chars) binds first — see that
 # module for why paragraph content, unlike a bullet's, must be counted
 # there.
@@ -608,7 +618,7 @@ class TopicSection(BaseModel):
     )
     points: list[BodyItem] = Field(
         default_factory=list,
-        max_length=_MAX_LIST_ITEMS,
+        max_length=_MAX_TOPIC_POINT_ITEMS,
         description="What was covered under this topic.",
     )
 
