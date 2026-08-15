@@ -1,6 +1,11 @@
 # ADR-0011: Rich body blocks (tables, quotes/callouts, nested/task-list bullets) in structured chat exports
 
-- Status: Accepted
+- Status: Accepted — **partially superseded by
+  [`docs/adr/0012-paragraph-first-body-blocks-in-structured-exports.md`](0012-paragraph-first-body-blocks-in-structured-exports.md)**.
+  Decision 1's `BodyItem` shape and decision 5's bare-string-is-a-bullet
+  shorthand are superseded (a bare string is now a paragraph, not a
+  bullet); decisions 2-4 and 6-8, and the rest of decision 5 (`depth`,
+  `checked`, the depth-jump rule, `source_index`), stand unchanged.
 - Date: 2026-08-10
 - Decision owners: Repository owner
 - Repository: `vivittel/obsidian-vault-gateway`
@@ -59,7 +64,11 @@ continuation and disappears from the rendered output entirely.
    `app.models.BodyItem` (a bare string, or a discriminated
    `BulletBlock | CodeBlock | TableBlock | QuoteBlock`) replaces `Line` as
    the item type for twenty existing `list[Line]` fields plus
-   `TopicSection.points`. `CodeBlock` is reused from ADR-0009 unchanged —
+   `TopicSection.points`. **Superseded by
+   [ADR-0012](0012-paragraph-first-body-blocks-in-structured-exports.md)
+   decision 1: `BodyBlock` gains a fifth variant, `ParagraphBlock`, and the
+   union is `ParagraphBlock | BulletBlock | CodeBlock | TableBlock |
+   QuoteBlock`.** `CodeBlock` is reused from ADR-0009 unchanged —
    the same model `ProcedureStep.blocks` and the top-level `code_blocks`
    already use — not a new type introduced here.
    `app.services.chat_export._render_body_items` is the grouping renderer:
@@ -150,11 +159,16 @@ continuation and disappears from the rendered output entirely.
    them the same wire value for different meanings would be confusing, not
    merely redundant; `TextBlock` gains neither `depth` nor `checked`, and
    `extra="forbid"` rejects either at the schema layer with no runtime
-   check required. A bare string is still a backward-compatible shorthand
-   for `{"type": "bullet", "content": ..., "depth": 0}` via
-   `app.models._coerce_body_item`, the direct analogue of `_coerce_step`
-   (ADR-0009 decision 13) — every export that used a plain string list
-   before this change renders byte-identical Markdown. `checked` set to
+   check required. **Superseded by
+   [ADR-0012](0012-paragraph-first-body-blocks-in-structured-exports.md)
+   decision 1: a bare string is now a shorthand for `{"type": "paragraph",
+   "content": ...}` instead — the sentence below describing the old
+   `"bullet"` shorthand is historical.** ~~A bare string is still a
+   backward-compatible shorthand for `{"type": "bullet", "content": ...,
+   "depth": 0}` via `app.models._coerce_body_item`, the direct analogue of
+   `_coerce_step` (ADR-0009 decision 13) — every export that used a plain
+   string list before this change renders byte-identical Markdown.~~
+   `checked` set to
    `false`/`true` renders `- [ ] `/`- [x] ` (a GFM task-list item) in place
    of the plain `- ` marker; omitted, it renders exactly as before.
    `depth` is rendered as two spaces of indent per level (verified against

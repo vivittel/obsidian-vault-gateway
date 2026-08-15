@@ -603,9 +603,10 @@ continuation indent・Obsidian固有inline構文（`#`タグ/`^`ブロックID�
 escapeするcaption描画の詳細はADR-0009参照。手順に直接属さないコードは
 全モード共通の任意フィールド`export.code_blocks`に置ける。
 
-**本文フィールドのrich block化（ADR-0011）**: `decisions`/`design`/
-`topics[].points`等の既存`list[Line]`フィールド20個を`list[BodyItem]`へ
-一般化。`BodyItem`はbare stringまたは`{"type": "bullet"|"code"|"table"|"quote", ...}`。
+**本文フィールドのrich block化（ADR-0011、ADR-0012でbare stringの意味を変更）**:
+`decisions`/`design`/`topics[].points`等の既存`list[Line]`フィールド20個を
+`list[BodyItem]`へ一般化。`BodyItem`はbare stringまたは
+`{"type": "paragraph"|"bullet"|"code"|"table"|"quote", ...}`。
 `code`はADR-0009の`CodeBlock`を再利用（新規モデルではない）——`procedure.steps`・
 `code_blocks`と同じ型が本文フィールドでも使えるようになった。
 `bullet`は`depth`（ネスト深さ、直前bulletの深さ+1を超えるjumpは拒否——clampはしない）
@@ -613,13 +614,28 @@ escapeするcaption描画の詳細はADR-0009参照。手順に直接属さな�
 （生Markdown文字列は受理しない——tableはfenceと異なり自己閉鎖しないため、列数不一致は
 明示的にエラーとし、静かな劣化を防ぐ）。`quote`は`callout`（パターン検証のみ、
 語彙固定なし）と`title`（`callout`必須）、各`lines`に`_escape_block_start`を適用。
-code/table/quoteはbulletリストを終了させ、セクション直下の兄弟blockとしてその場に
-レンダリングされる（`## 表`/`## 引用`という別セクションへは集約しない——ADR-0009が
-コードの集約を避けた理由と同じ。本文フィールド内のcodeも同様に`## コード`へは
+paragraph/code/table/quoteはbulletリストを終了させ、セクション直下の兄弟blockとして
+その場にレンダリングされる（`## 表`/`## 引用`という別セクションへは集約しない——
+ADR-0009がコードの集約を避けた理由と同じ。本文フィールド内のcodeも同様に`## コード`へは
 移動しない）。前後は空行で区切る（区切らないと直前のbulletリストのlazy continuation
-に吸収され消失する）。`ProcedureStep.blocks`も`table`/`quote`を受理するが`bullet`は
-受理しない。`_MAX_TOTAL_CODE_CHARS`は`_MAX_TOTAL_BLOCK_CHARS`へ改名し、table/quoteの
-文字列とcode blockの`label`も合算対象に加える（値は100,000のまま）。詳細はADR-0011参照。
+に吸収され消失する）。`ProcedureStep.blocks`も`table`/`quote`を受理するが
+`paragraph`/`bullet`は受理しない。`_MAX_TOTAL_CODE_CHARS`は`_MAX_TOTAL_BLOCK_CHARS`へ
+改名し、table/quoteの文字列とcode blockの`label`も合算対象に加える（値は100,000のまま）。
+詳細はADR-0011参照。
+
+**段落ブロック（ADR-0012）**: bare stringのcoerce先を`bullet`から`paragraph`へ変更
+（意図した破壊的変更、既存Vaultノートのmigrationはしない）。`ParagraphBlock.content`
+（`ParagraphContent`、上限8,000文字——`Line`の1,000ではなく`CodeContent`と同じ）は
+`one_line`を通さない専用の`_canonicalise_paragraph`で正規化する:
+改行・空行は保持（内部の空行数も畳まない）、行末空白は除去、ブロック先頭行
+（先頭行・内部空行の直後）のみASCII空白/タブを除去し継続行のインデントは保持
+（`expandtabs`は行わない）。各行に`_escape_block_start`をインデント分離後に適用し、
+インライン Markdownは生かす（`_escape_inline`は適用しない）。この変更に合わせ
+`_escape_block_start`のhazard集合へsetext見出し下線・thematic break・GFM表区切り行を
+追加し、`QuoteBlock`/`BulletBlock`/`tldr`に既存していた同種の穴も同時に閉じた
+（既存出力への影響なし）。paragraphの文字数は改行separatorも含めて
+`_MAX_TOTAL_BLOCK_CHARS`へ算入する（算入しないと予算を迂回できてしまうため）。
+`ProcedureStep`は無変更。詳細はADR-0012参照。
 
 **frontmatterキー順**: `title` → `created` → `updated` → `source`（常に`chatgpt`）
 → `export_mode` → `project`（任意、省略可）→ `conversation_type`（任意、省略可）
@@ -923,8 +939,39 @@ commonmark preset）に加え、`_MD_TABLE = MarkdownIt("commonmark").enable("ta
   codeが`## コード`へ移動しないこと
 - 予算: `_MAX_TOTAL_CODE_CHARS`改名後の`_MAX_TOTAL_BLOCK_CHARS`に本文フィールド内の
   code/table/quoteの文字列とcode blockの`label`が算入されること（境界値テスト）
-- 後方互換: 全モードでbare stringのみのexportがバイト一致で不変であること
-  （既存golden outputを含む）
+- 破壊的変更: bare stringのみのexportは、ADR-0012によりbullet列からparagraph列へ
+  出力が変わる（下記参照）。この節自身の「後方互換」記述はADR-0012時点で無効
+
+**段落ブロック（ADR-0012）**: 既存の`_MD`/`_MD_TABLE`パーサーをそのまま再利用。
+
+- schema: `ParagraphBlock`のフィールド検証（`type`/`content`のみ、`min_length`なし、
+  `max_length=8_000`）、未知フィールド拒否、bare stringのcoerce先が`bullet`から
+  `paragraph`へ変わったこと（`json_schema_input_type`のmaxLengthが1,000→8,000へ
+  広がることを含む）
+- canonicalization: 単一改行・空行（複数段落化）の保持、内部の連続空行数が畳まれず
+  保持されること、CRLF/U+2028等の改行系文字がすべて`\n`へ正規化されること、内部の
+  ASCII空白連続の保持と行末空白の除去、タブが展開されず入力どおり保持されること、
+  ブロック先頭行（先頭行・内部空行の直後）のみインデントが除去され継続行は保持
+  されること、U+3000等の非ASCII空白は常に保持されること、`one_line`とは異なる
+  正規化であることの直接比較
+- 構造: paragraph/bullet/code/table/quoteが兄弟blockとしてネストせず登場順で並ぶこと、
+  連続するparagraph同士も空行で区切られること、bullet直後のparagraphが
+  bulletリストを終了させること（生存後にdepthが0から再開する成功・失敗両ケース）、
+  paragraphが正規化後に空へcollapseした場合はdropされ前後のbulletが連続扱いになること
+- 注入防御: `_escape_block_start`のhazard集合へ追加したsetext見出し下線
+  （`--`/`=`/`==`等）・thematic break（`***`/`_ _ _`等）・GFM表区切り行
+  （`--- | ---`等）が、standalone・テキスト行直後・空行直後の3位置いずれでも
+  section-level blockを開かないこと。既存の`QuoteBlock`（2行以上）・`BulletBlock`・
+  `tldr`でも同じhazardが防がれることを確認する回帰テストを含む。paragraph内の
+  inline Markdown（`**bold**`・code span・link）は生きたまま残ること
+- golden: paragraph + YAML code + paragraphのバイト厳密な出力（コードの
+  インデント・内部空行が完全一致すること）
+- 予算: paragraphの文字数を改行separatorも含めて`_MAX_TOTAL_BLOCK_CHARS`へ
+  算入すること（改行主体のparagraphで`sum(len(line))`のみだと予算を迂回できて
+  しまうことの直接テストを含む）
+- 破壊的変更の固定: bare stringがbulletでなくparagraphとして描画されること
+  （全モード）、procedure.stepsは無変更でバイト一致のまま保たれること、
+  `ParagraphBlock`が`ProcedureStep.blocks`に受理されないこと
 
 ### 検証済み関連ノートwikilink（`tests/test_related_notes.py`、issue #13）
 

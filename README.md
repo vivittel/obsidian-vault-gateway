@@ -38,7 +38,9 @@ bare `/mcp` path is normalized in-scope rather than redirected,
 reduced to `GET /api/v1/health`,
 `docs/adr/0011-rich-body-blocks-in-structured-exports.md` for how every
 body field can carry a table, a blockquote/callout, or a nested/task-list
-bullet, and `docs/MCP_IMPLEMENTATION_PLAN.md` for the MCP design in full. Phase 1 and Phase 1.5 (the REST-only and
+bullet, `docs/adr/0012-paragraph-first-body-blocks-in-structured-exports.md`
+for why a plain string in a body field is a paragraph rather than a bullet,
+and `docs/MCP_IMPLEMENTATION_PLAN.md` for the MCP design in full. Phase 1 and Phase 1.5 (the REST-only and
 MCP-introduction predecessors) are documented as completed history in
 `docs/PHASE1_PLAN.md` and `docs/IMPLEMENTATION_PLAN.md`.
 
@@ -168,13 +170,26 @@ the top-level `export.code_blocks`, available in every mode, rendered as the
 optional `## コード` section above — never both: code that belongs to a step
 stays in that step, so the procedure keeps its order.
 
-**Every body field can carry a code block, a table, a blockquote/Obsidian
-callout, or a nested/task-list bullet, in the order the client sent them**
-(`docs/adr/0011-*.md`). A bare string is still an ordinary bullet
-(backward-compatible, byte-identical to before this feature existed), but
-any item in a list such as `decisions`, `design`, or `topics[].points` can
-instead be:
+**Every body field can carry a paragraph, a code block, a table, a
+blockquote/Obsidian callout, or a nested/task-list bullet, in the order the
+client sent them** (`docs/adr/0011-*.md`, `docs/adr/0012-*.md`). A bare
+string is a **paragraph** — prose, with its line breaks and blank lines
+preserved (`docs/adr/0012-*.md`, superseding ADR-0011's bare-string-is-a-
+bullet shorthand: a bare string used to render as an ordinary bullet, and
+now renders as a paragraph instead — a deliberate breaking change, not a
+byte-identical one). Any item in a list such as `decisions`, `design`, or
+`topics[].points` can instead be:
 
+- `{"type": "paragraph", "content": ...}` — the same shape a bare string
+  is shorthand for; send this explicitly when the item sits alongside
+  other rich blocks and you want to be unambiguous. Line breaks (`\n`)
+  and blank lines (`\n\n`) inside `content` are preserved and rendered as
+  such; inline Markdown (`**bold**`, `` `code` ``, links) stays live.
+- `{"type": "bullet", "content": ..., "depth": ..., "checked": ...}` — use
+  this for an actual list item, not for prose. `depth` nests it under the
+  previous bullet (at most one level deeper at a time — a bigger jump is
+  rejected, never silently flattened), and `checked` (`true`/`false`)
+  renders a GFM task-list checkbox instead of a plain marker.
 - `{"type": "code", "language": ..., "label": ..., "content": ...}` — the
   same `CodeBlock` `procedure.steps` and `code_blocks` already use
   (`docs/adr/0009-*.md`), now usable in any body field too, rendered as its
@@ -188,19 +203,19 @@ instead be:
   plain blockquote when `callout` is omitted, or an Obsidian callout
   (`> [!warning] title`) when it is set. `title` is only valid together
   with `callout`.
-- `{"type": "bullet", "content": ..., "depth": ..., "checked": ...}` — an
-  ordinary bullet by default; `depth` nests it under the previous bullet
-  (at most one level deeper at a time — a bigger jump is rejected, never
-  silently flattened), and `checked` (`true`/`false`) renders a GFM
-  task-list checkbox instead of a plain marker.
 
-A code block, table, or blockquote/callout ends the current bullet list and
-renders as its own block, directly under the field's heading, at the point
-the client placed it — a body field's own code never gets collected into
-the top-level `## コード` section either, the same rule that already
-applies to a procedure step's code. `ProcedureStep.blocks` accepts the same
-table/quote options alongside `text`/`code`, but not `bullet` — a step's
-own numbered-list structure already has its own indent rules.
+A paragraph, code block, table, or blockquote/callout ends the current
+bullet list and renders as its own block, directly under the field's
+heading, at the point the client placed it — a body field's own code never
+gets collected into the top-level `## コード` section either, the same rule
+that already applies to a procedure step's code. Two consecutive
+paragraphs are separated by a blank line, the same rule every other
+section-level block already follows: a client wanting one Markdown
+paragraph with an internal line break puts `\n` inside a single item's
+`content` instead of sending two items. `ProcedureStep.blocks` accepts the
+same table/quote options alongside `text`/`code`, but not `paragraph` or
+`bullet` — a step's own numbered-list structure already has its own indent
+rules.
 
 **Related notes are client-selected, Gateway-verified** (issue #13 /
 `docs/adr/0006-*.md`). The client calls `search_notes`, picks relevant
@@ -520,11 +535,15 @@ step numbering never breaks (including step 10 and beyond, whose 4-character
 marker needs a wider continuation indent than steps 1-9), a code fence never
 closes early on embedded backtick runs, and a step's later text stays in the
 same list item as its earlier code. The same parser confirms every rich
-body block (`docs/adr/0011-*.md`) — a bullet/table/quote sequence renders
-as siblings, never nested; a mismatched table row or an empty header is
-rejected rather than silently degraded; a bullet's nesting-depth jump is
+body block (`docs/adr/0011-*.md`) — a paragraph/bullet/table/quote sequence
+renders as siblings, never nested; a mismatched table row or an empty header
+is rejected rather than silently degraded; a bullet's nesting-depth jump is
 rejected, never clamped; and every block-forgery hazard `_escape_block_start`
-guards against holds inside a quote line, not only inside a bullet.
+guards against — including a setext heading underline, a thematic break, and
+a GFM table delimiter row (`docs/adr/0012-*.md`) — holds inside a paragraph
+or a quote line, not only inside a bullet. A bare string's rendering as a
+paragraph rather than a bullet (`docs/adr/0012-*.md`) is its own dedicated
+pin, alongside a byte-exact paragraph+code+paragraph golden test.
 
 `tests/test_related_notes.py` covers `app/services/related_notes.py` —
 verified related-note wikilink resolution (issue #13 / `docs/adr/0006-*.md`)

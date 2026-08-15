@@ -77,6 +77,28 @@ section-level blocks, each surrounded by blank lines — without them, a table
 or quote immediately after a bullet list is swallowed into the list item's
 lazy continuation and silently disappears (verified against markdown-it-py
 during design).
+
+Paragraph-first body blocks (docs/adr/0012-paragraph-first-body-blocks-in-
+structured-exports.md) add ``ParagraphBlock`` as a fifth ``BodyBlock``
+variant and change what a bare string in a body field means: paragraph, not
+bullet (see ``app.models._coerce_body_item``). Unlike every other
+plain-string field, a paragraph's ``content`` is never run through
+``one_line`` — ``_canonicalise_paragraph`` preserves its line breaks and
+blank lines instead, since flattening prose into one line is the exact
+problem this feature exists to fix. It is still escaped per line by
+``_render_paragraph`` (via ``_escape_block_start``, with each line's own
+leading indentation split off first so the "^"-anchored hazard regexes can
+see past it), for the same block-forgery reasons a bullet or a quote line
+is. A paragraph is a section-level sibling exactly like a table, quote, or
+code block — it ends the current bullet run and is joined to its neighbours
+with a blank line, so two consecutive ``ParagraphBlock``s always render as
+two Markdown paragraphs (a client wanting one paragraph with a soft line
+break puts "\\n" inside a single block's ``content`` instead). This ADR also
+completes ``_escape_block_start``'s hazard set with a setext-heading
+underline, a thematic break, and a GFM table delimiter row — closing three
+pre-existing holes (a multi-line ``QuoteBlock``, a ``BulletBlock``, and
+``tldr`` could all forge a heading or an ``<hr>`` before this change) that a
+multi-line ``ParagraphBlock`` would otherwise inherit and newly reach.
 """
 
 from __future__ import annotations
@@ -97,6 +119,7 @@ from app.models import (
     CodeBlock,
     ExportMode,
     FrontmatterValue,
+    ParagraphBlock,
     ProcedureStep,
     QuoteBlock,
     TableBlock,
@@ -206,10 +229,43 @@ _ORDERED_MARKER_RE = re.compile(r"^(\d+)([.)])(?=\s|$)")
 # definitions ("[foo]: url", which would silently disappear as list content
 # and rewire any other "[foo]" reference in the same note) and task-list
 # checkboxes ("[ ] "/"[x] ", a GFM/Obsidian extension). The digit+punctuation
-# case is handled separately by _ORDERED_MARKER_RE above, not here.
-_BLOCK_HAZARD_RE = re.compile(
-    r"^(?:#{1,6}(?:\s|$)|>|<|\[|[-*+](?:\s|$)|```|~~~|-{3,}$|={3,}$|_{3,}$)"
-)
+# case is handled separately by _ORDERED_MARKER_RE above, not here. The old
+# "-{3,}$|={3,}$|_{3,}$" thematic-break/setext alternatives were removed
+# (docs/adr/0012-*.md) — each is a strict subset of _SETEXT_UNDERLINE_RE or
+# _THEMATIC_BREAK_RE below, which also cover the shorter/spaced forms this
+# set never did (e.g. "--", "==", "***", "_ _ _"). Do not re-add them here.
+_BLOCK_HAZARD_RE = re.compile(r"^(?:#{1,6}(?:\s|$)|>|<|\[|[-*+](?:\s|$)|```|~~~)")
+
+# A setext heading underline is ANY run of "=" or "-" (not a mix — "-=-" is
+# neither), optionally trailing-whitespace-padded, directly under a text
+# line. Verified against markdown-it-py during design: "text\n=="/"text\n--"
+# render a real <h1>/<h2> — this was a live, untested hole in a multi-line
+# QuoteBlock ("> a\n> ==" renders an <h1> inside the blockquote) and is newly
+# reachable through a multi-line ParagraphBlock (docs/adr/0012-*.md).
+_SETEXT_UNDERLINE_RE = re.compile(r"^(?:=+|-+)[ \t]*$")
+
+# A thematic break is 3+ of the same "-", "_", or "*", optionally separated
+# by spaces/tabs. The old _BLOCK_HAZARD_RE alternatives only caught the
+# unspaced "-{3,}"/"_{3,}" forms (plus whatever its own list-marker
+# alternative happened to catch): "***", "****", "_ _ _", and "-  -  -" all
+# rendered a live <hr> — verified against markdown-it-py during design,
+# including "- ***" (an <hr> inside a bullet's own list item) and
+# "tldr=['***']" (an <hr> in place of the tldr paragraph, losing the text).
+_THEMATIC_BREAK_RE = re.compile(r"^([-_*])(?:[ \t]*\1){2,}[ \t]*$")
+
+# A GFM table needs a delimiter row directly under a header row with the
+# same column count; leading/trailing pipes are both optional, so
+# "a | b" + "--- | ---" is a table too. Escaping only the header row does
+# not help (the header alone still renders as an ordinary paragraph line,
+# and the delimiter row below it still completes a table) — escaping the
+# *delimiter* row neutralises every variant (verified against
+# markdown-it-py, with the table rule enabled, during design). Deliberately
+# a conservative superset (any line made only of "|", ":", "-", and
+# horizontal whitespace, containing at least one "-") rather than a
+# transcription of GFM's exact delimiter grammar, so it cannot drift from
+# Obsidian's own (non-markdown-it) table parser. Ordinary prose ("A | B",
+# "- item", "5 - 3", "a-b") does not have this shape.
+_TABLE_DELIMITER_RE = re.compile(r"^[|:\- \t]*-[|:\- \t]*$")
 
 # app.services.path_security._check_syntax accepts all five of these
 # characters in a filename — verified empirically against a real, resolvable
@@ -229,6 +285,24 @@ _MARKDOWN_SUFFIX = ".md"
 _CODE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _BACKTICK_RUN_RE = re.compile(r"`+")
 _LANGUAGE_RE = re.compile(_LANGUAGE_PATTERN)
+
+# Paragraph line breaks (docs/adr/0012-*.md): unlike _LINE_BREAK_RE (which
+# collapses every line-breaking character to a single space for one_line), a
+# paragraph *keeps* its newlines — so every line-breaking character maps TO
+# "\n" instead, which is what puts the text after it on its own line and
+# therefore through _escape_block_start. "\r\n" is matched first so a CRLF
+# becomes one newline, not two.
+_PARAGRAPH_LINE_BREAK_RE = re.compile(r"\r\n|[\r\v\f\x1c-\x1e\x85  ]")
+
+# CommonMark indentation is ASCII space/tab only — verified against
+# markdown-it-py during design: a leading U+3000/U+00A0 is NOT indentation
+# and cannot open an indented code block, so it is preserved (the same
+# deliberate U+3000 preservation one_line already makes, and a real Japanese
+# paragraph-indent convention). Used both to strip a paragraph's
+# block-start indentation (_canonicalise_paragraph) and to split a
+# continuation line's own indentation off before escaping it
+# (_render_paragraph).
+_LEADING_INDENT_RE = re.compile(r"^[ \t]*")
 
 # _MAX_TOTAL_BLOCK_CHARS (imported above) is the shared budget across every
 # rich block's client-supplied strings in one export — code content/label
@@ -299,6 +373,15 @@ class _NormalisedQuote:
     lines: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _NormalisedParagraph:
+    # Same shape as _NormalisedQuote.lines: ``lines`` is exactly what
+    # _render_paragraph walks, so _canonicalise_paragraph owns the
+    # block-start-indent decision and _paragraph_chars counts exactly the
+    # characters that actually get emitted (docs/adr/0012-*.md).
+    lines: tuple[str, ...]
+
+
 _NormalisedStepBlock = (
     _NormalisedTextBlock | _NormalisedCodeBlock | _NormalisedTable | _NormalisedQuote
 )
@@ -326,14 +409,19 @@ class _NormalisedBullet:
 # of the normalised sequence (a structural problem raises instead of
 # silently degrading — see _normalise_table), so its position in the
 # normalised sequence and its position in the client's input are the same.
-# A quote or a code block can drop out (an all-whitespace quote, or a code
-# block whose content is whitespace-only, both normalise to nothing — the
-# same "min_length=1 at the schema layer, still droppable" precedent
-# _normalise_code_block already sets for a step's own CodeBlock), but a
-# dropped item is never the target of a later sequence check the way a
-# bullet's depth is, so neither needs a source_index either.
+# A paragraph, quote, or code block can drop out (canonicalises to nothing,
+# an all-whitespace quote, or a code block whose content is whitespace-only
+# all normalise to nothing — the same "min_length=1 at the schema layer,
+# still droppable" precedent _normalise_code_block already sets for a
+# step's own CodeBlock), but a dropped item is never the target of a later
+# sequence check the way a bullet's depth is, so none of the three needs a
+# source_index either.
 _NormalisedBodyItem = (
-    _NormalisedBullet | _NormalisedCodeBlock | _NormalisedTable | _NormalisedQuote
+    _NormalisedParagraph
+    | _NormalisedBullet
+    | _NormalisedCodeBlock
+    | _NormalisedTable
+    | _NormalisedQuote
 )
 
 
@@ -461,6 +549,86 @@ def _normalise_lines(values: list[str]) -> list[str]:
     return [line for value in values if (line := one_line(value))]
 
 
+def _canonicalise_paragraph(content: str) -> tuple[str, ...]:
+    """Canonicalise paragraph prose into its rendered lines
+    (docs/adr/0012-*.md).
+
+    Deliberately NOT :func:`one_line`: a paragraph's whole point is that its
+    line breaks and blank lines survive. Ordered steps, each collapsing a
+    difference that carries no rendered information:
+
+    1. Unicode NFC, like every other client string in this module.
+    2. Every line-breaking character -> "\\n" (CRLF first, so it becomes one
+       newline, not two). Nothing is *removed*: a character some renderer
+       might treat as a break becomes a real newline, so the text after it
+       goes through :func:`_escape_block_start` like any other line.
+    3. Control characters other than tab/newline are stripped
+       (:data:`_CODE_CONTROL_RE`'s set — tab and newline must survive here
+       for the same reason they must survive in code content, and reusing
+       that regex keeps one definition of "the keep set" instead of two).
+    4. Each line is ``rstrip()``ed — Unicode-aware, and mandatory: trailing
+       whitespace is both a hard-line-break forgery (a line ending in two
+       spaces is a Markdown hard break) and a violation of this module's
+       own no-trailing-whitespace invariant. A line that is whitespace-only
+       becomes "" (i.e. a blank line).
+    5. Leading and trailing blank lines are dropped. Internal blank lines
+       are *not* collapsed — this module's canonicalisation only removes
+       differences that change nothing about the rendered structure; a
+       client's own choice of how many blank lines to leave between two
+       paragraphs is not one of those (only "same input -> same output" is
+       required here, not "equivalent input -> identical output").
+    6. Leading ASCII space/tab is removed from every *block-start* line
+       (the first line, and the first line after each blank line) —
+       4+ columns there would open an indented code block, and even 1-3
+       columns puts a hazard (e.g. "   # h") where :data:`_BLOCK_HAZARD_RE`'s
+       "^" anchor cannot see it. A continuation line keeps its own leading
+       whitespace: CommonMark discards it when rendering (it cannot
+       interrupt a paragraph, verified against markdown-it-py during
+       design), so keeping it costs nothing and preserves the source's
+       shape — no ``str.expandtabs()`` is applied, since nothing here needs
+       to count columns once the indent is simply carried through unchanged.
+
+    Returns ``()`` when nothing survives, in which case the block is
+    dropped. Internal ASCII space runs are NOT collapsed (unlike
+    :func:`one_line`): inside prose, "A  B" is the author's own spacing,
+    and every structural hazard is handled per line by
+    :func:`_escape_block_start` in :func:`_render_paragraph`, not by
+    collapsing whitespace here.
+
+    Step 5 must run after step 4 (a whitespace-only line is not recognised
+    as blank until it has been rstripped), and step 6's block-start
+    classification is computed on the line list step 5 already produced —
+    getting this order wrong could reintroduce the indented-code-block
+    hazard step 6 exists to close.
+    """
+    text = unicodedata.normalize("NFC", content)
+    text = _PARAGRAPH_LINE_BREAK_RE.sub("\n", text)
+    text = _CODE_CONTROL_RE.sub("", text)
+    lines = [line.rstrip() for line in text.split("\n")]
+
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    if not lines:
+        return ()
+
+    result: list[str] = []
+    at_block_start = True
+    for line in lines:
+        if not line:
+            result.append("")
+            at_block_start = True
+            continue
+        if at_block_start:
+            indent_end = _LEADING_INDENT_RE.match(line).end()
+            result.append(line[indent_end:])
+        else:
+            result.append(line)
+        at_block_start = False
+    return tuple(result)
+
+
 def _normalise_table(table: TableBlock, *, field_name: str, index: int) -> _NormalisedTable:
     """Normalise one ``TableBlock`` (docs/adr/0011-*.md).
 
@@ -577,30 +745,38 @@ def _check_bullet_depth(
 
 
 def _normalise_body_items(
-    items: list[BulletBlock | CodeBlock | TableBlock | QuoteBlock], field_name: str
+    items: list[ParagraphBlock | BulletBlock | CodeBlock | TableBlock | QuoteBlock],
+    field_name: str,
 ) -> list[_NormalisedBodyItem]:
-    """Normalise a body field's rich block sequence (docs/adr/0011-*.md).
+    """Normalise a body field's rich block sequence (docs/adr/0011-*.md;
+    ``ParagraphBlock`` added by docs/adr/0012-*.md).
 
     A bullet that normalises to empty content is dropped, matching
     :func:`_normalise_lines`'s "empty after normalisation -> dropped"
     convention for the plain string list this generalises. A code block can
     drop the same way (see :func:`_normalise_code_block`); so can a quote
-    (see :func:`_normalise_quote`). A table is never dropped (see
+    (see :func:`_normalise_quote`) or a paragraph (see
+    :func:`_canonicalise_paragraph`). A table is never dropped (see
     :func:`_normalise_table`). ``index`` is the *client's* item index, taken
     before any drop — this is what makes :func:`_check_bullet_depth`'s error
     message point at the item the client actually sent, not at whatever now
     sits in that position once empty bullets have been removed.
 
-    ``previous_depth`` only resets to ``None`` when a table/quote/code block
-    actually survives into the result: a section-level block that itself
-    normalises away to nothing never breaks the rendered list, so the
-    depth-jump check must not treat it as one either — the surrounding
-    bullets are adjacent in what actually gets rendered.
+    ``previous_depth`` only resets to ``None`` when a paragraph/table/quote/
+    code block actually survives into the result: a section-level block
+    that itself normalises away to nothing never breaks the rendered list,
+    so the depth-jump check must not treat it as one either — the
+    surrounding bullets are adjacent in what actually gets rendered.
     """
     result: list[_NormalisedBodyItem] = []
     previous_depth: int | None = None
     for index, item in enumerate(items):
-        if isinstance(item, BulletBlock):
+        if isinstance(item, ParagraphBlock):
+            lines = _canonicalise_paragraph(item.content)
+            if lines:
+                result.append(_NormalisedParagraph(lines=lines))
+                previous_depth = None
+        elif isinstance(item, BulletBlock):
             content = one_line(item.content)
             if not content:
                 continue
@@ -756,10 +932,33 @@ def _quote_chars(quote: _NormalisedQuote) -> int:
     return total
 
 
+def _paragraph_chars(paragraph: _NormalisedParagraph) -> int:
+    """Count a paragraph's characters for the shared budget
+    (docs/adr/0012-*.md), including the newline *separators* between its
+    lines — deliberately not the same shape as :func:`_quote_chars`.
+
+    ``QuoteBlock.lines`` is a ``list[Line]``, so its newlines are never part
+    of the client's input; ``ParagraphBlock.content`` is a single string,
+    where a newline *is* client-supplied content. Counting only
+    ``sum(len(line) for line in lines)`` would let every line-break in a
+    canonicalised paragraph vanish from the budget — verified during
+    design: a 4,000-line, ``"a\\n"``-repeated ``ParagraphContent`` of
+    exactly 8,000 characters sums to only 4,000 by line length alone, so 12
+    such blocks (96,000 by this function's count) would total 200,000 by
+    the naive count, twice ``_MAX_TOTAL_BLOCK_CHARS`` — exactly the
+    ``ParagraphBlock``-introduced budget bypass decision 8 exists to
+    prevent. ``max(len(lines) - 1, 0)`` adds back one separator per
+    boundary between lines (zero for an empty or single-line paragraph).
+    """
+    return sum(len(line) for line in paragraph.lines) + max(len(paragraph.lines) - 1, 0)
+
+
 def _body_items_chars(items: list[_NormalisedBodyItem]) -> int:
     total = 0
     for item in items:
-        if isinstance(item, _NormalisedCodeBlock):
+        if isinstance(item, _NormalisedParagraph):
+            total += _paragraph_chars(item)
+        elif isinstance(item, _NormalisedCodeBlock):
             total += _code_chars(item)
         elif isinstance(item, _NormalisedTable):
             total += _table_chars(item)
@@ -776,13 +975,22 @@ def _total_block_chars(
 ) -> int:
     """Sum every client-supplied string inside every rich block in one
     export (docs/adr/0011-*.md, superseding docs/adr/0009-*.md's
-    code-only ``_total_code_chars``): code content/label wherever a
-    ``CodeBlock`` appears (steps, top-level ``code_blocks``), table
-    label/headers/rows wherever a table appears, and quote title/lines
-    wherever a quote appears — a body field, ``topics[].points``, or a
-    step, in every case. A plain bullet's ``content`` is not counted — it
-    was never budgeted before this change either, being already bounded by
-    ``Line``'s own per-item cap and the field's own item-count cap.
+    code-only ``_total_code_chars``; ``ParagraphBlock`` added by
+    docs/adr/0012-*.md): code content/label wherever a ``CodeBlock``
+    appears (steps, top-level ``code_blocks``), table label/headers/rows
+    wherever a table appears, quote title/lines wherever a quote appears,
+    and a paragraph's lines (plus its line-break separators — see
+    :func:`_paragraph_chars`) wherever a paragraph appears — a body field,
+    ``topics[].points``, or a step, in every case.
+
+    A plain bullet's ``content`` is not counted — it was never budgeted
+    before this change either, being already bounded by ``Line``'s own
+    per-item cap and the field's own item-count cap. A paragraph's content
+    is NOT analogous: ``ParagraphContent``'s own cap is 8x ``Line``'s (see
+    ``_MAX_PARAGRAPH_CHARS``), so leaving it uncounted would let a single
+    body field carry far more prose than code/table/quote content ever
+    could under the same per-item cap — this is the bypass decision 8
+    exists to close, not a gap this budget already tolerated.
     """
     total = sum(_code_chars(block) for block in code_blocks)
     for step in steps:
@@ -1035,8 +1243,10 @@ def _join_sentences(items: list[str]) -> str:
 def _escape_block_start(value: str) -> str:
     """Escape ``value`` so it cannot be misread as the start of a new
     Markdown block (heading, blockquote, HTML block, link reference
-    definition, list marker, fence, thematic break) once it is placed after
-    a bullet/ordered marker or rendered as a bare paragraph (``tldr``).
+    definition, list marker, fence, thematic break, setext heading
+    underline, GFM table delimiter row) once it is placed after a
+    bullet/ordered marker or rendered as a bare paragraph (``tldr``,
+    ``ParagraphBlock``).
 
     A bullet or numbered prefix ("- "/"N. ") does not, by itself, stop a
     client value from opening a *nested* block — CommonMark list items may
@@ -1049,7 +1259,12 @@ def _escape_block_start(value: str) -> str:
     if ordered:
         number, punctuation = ordered.groups()
         return f"{number}\\{punctuation}{value[ordered.end():]}"
-    if _BLOCK_HAZARD_RE.match(value):
+    if (
+        _BLOCK_HAZARD_RE.match(value)
+        or _SETEXT_UNDERLINE_RE.match(value)
+        or _THEMATIC_BREAK_RE.match(value)
+        or _TABLE_DELIMITER_RE.match(value)
+    ):
         return f"\\{value}"
     return value
 
@@ -1203,6 +1418,45 @@ def _render_indented_quote(quote: _NormalisedQuote, *, indent: str) -> list[str]
     return [f"{indent}{line}" if line else "" for line in _render_quote(quote).split("\n")]
 
 
+def _render_paragraph(paragraph: _NormalisedParagraph) -> str:
+    """Render one paragraph block (docs/adr/0012-*.md): every line escaped
+    against block-start hazards, blank lines kept so one block can carry
+    several Markdown paragraphs, and each continuation line's own leading
+    indentation kept.
+
+    Every line is escaped unconditionally, not only the lines where a
+    hazard could actually fire — a "\\#" that was not strictly necessary
+    still renders as a literal "#", so the cost is nil, and correctness
+    then does not depend on the block-start classification being right,
+    the same fail-closed choice :func:`_render_quote` already makes for a
+    quote line.
+
+    The escape runs on the line's own content, with its leading
+    indentation split off first and re-attached after:
+    :data:`_BLOCK_HAZARD_RE` and friends are "^"-anchored, so "   # forged"
+    would otherwise slip past them — and 1-3 spaces of indentation is
+    still a valid ATX heading in CommonMark (verified against
+    markdown-it-py during design). A block-start line has no indentation
+    left to split off (:func:`_canonicalise_paragraph` already removed
+    it); a continuation line keeps its own, which CommonMark discards when
+    rendering the paragraph, so re-attaching it costs nothing and
+    preserves the source's shape.
+    """
+    rendered: list[str] = []
+    at_block_start = True
+    for line in paragraph.lines:
+        if not line:
+            rendered.append("")
+            at_block_start = True
+            continue
+        indent_end = _LEADING_INDENT_RE.match(line).end()
+        indent, rest = line[:indent_end], line[indent_end:]
+        escaped = _escape_block_start(rest)
+        rendered.append(escaped if at_block_start else f"{indent}{escaped}")
+        at_block_start = False
+    return "\n".join(rendered)
+
+
 def _render_bullet(bullet: _NormalisedBullet) -> str:
     """Render one bullet line, indented two spaces per ``depth`` level —
     verified against markdown-it-py during design as the indent CommonMark
@@ -1218,11 +1472,12 @@ def _render_bullet(bullet: _NormalisedBullet) -> str:
 
 
 def _render_body_items(items: list[_NormalisedBodyItem]) -> str:
-    """Render a body field's rich block sequence (docs/adr/0011-*.md):
-    consecutive bullets become one Markdown bullet list (nested per
-    ``depth``, marked as a task item when ``checked`` is set); a code
-    block, table, or quote breaks the list and becomes a section-level
-    sibling block. Every block — the bullet run as a whole, and each code
+    """Render a body field's rich block sequence (docs/adr/0011-*.md;
+    ``ParagraphBlock`` added by docs/adr/0012-*.md): consecutive bullets
+    become one Markdown bullet list (nested per ``depth``, marked as a
+    task item when ``checked`` is set); a paragraph, code block, table, or
+    quote breaks the list and becomes a section-level sibling block. Every
+    block — the bullet run as a whole, and each paragraph/code
     block/table/quote — is joined with a blank line on both sides: without
     one, a table or quote immediately following a bullet list is swallowed
     into the preceding list item's lazy continuation and silently
@@ -1230,6 +1485,9 @@ def _render_body_items(items: list[_NormalisedBodyItem]) -> str:
     code block always interrupts a paragraph on its own (CommonMark core),
     but the blank line is added for it too, for the same one-shape-fits-
     every-section-level-block simplicity the grouping logic below relies on.
+    Two consecutive ``ParagraphBlock``s are therefore always separated by a
+    blank line too — a client wanting two lines inside one Markdown
+    paragraph puts "\\n" inside a single block's ``content`` instead.
     """
     blocks: list[str] = []
     bullet_run: list[str] = []
@@ -1244,7 +1502,9 @@ def _render_body_items(items: list[_NormalisedBodyItem]) -> str:
             bullet_run.append(_render_bullet(item))
         else:
             _flush_bullet_run()
-            if isinstance(item, _NormalisedCodeBlock):
+            if isinstance(item, _NormalisedParagraph):
+                blocks.append(_render_paragraph(item))
+            elif isinstance(item, _NormalisedCodeBlock):
                 blocks.append(_render_top_level_code_block(item))
             elif isinstance(item, _NormalisedTable):
                 blocks.append(_render_table(item))

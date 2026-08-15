@@ -238,6 +238,27 @@ NotePath = str
 # symmetric).
 CodeContent = Annotated[str, Field(min_length=1, max_length=_MAX_CODE_CHARS)]
 
+# Bound for a body field's paragraph prose (docs/adr/0012-*.md). Deliberately
+# NOT Line's 1_000 — Line's cap exists because "every string field renders
+# as exactly one Markdown line" (see the comment above _MAX_LINE_CHARS), and
+# a paragraph is deliberately *not* one line, so that premise does not apply.
+# The right sibling is CodeContent, the other multiline-capable type, hence
+# the same 8_000. This is not the binding constraint in practice: 8_000 x
+# _MAX_LIST_ITEMS (30) = 240_000 in a single field already exceeds
+# _MAX_TOTAL_BLOCK_CHARS (100_000), so the shared budget
+# (app/services/chat_export.py's _paragraph_chars) binds first — see that
+# module for why paragraph content, unlike a bullet's, must be counted
+# there.
+_MAX_PARAGRAPH_CHARS = 8_000
+
+# No min_length, unlike CodeContent: ParagraphBlock is the bare-string
+# shorthand's target (see _coerce_body_item below), so it must stay at least
+# as permissive as the plain list[Line] shape it replaces, including an
+# empty ""  — dropped by app/services/chat_export.py's normalisation, the
+# same "pydantic allows it, the formatter drops it" convention every other
+# plain-string field already follows (TextBlock.content, BulletBlock.content).
+ParagraphContent = Annotated[str, Field(max_length=_MAX_PARAGRAPH_CHARS)]
+
 
 class TextBlock(BaseModel):
     """One paragraph of ordinary text inside a `ProcedureStep`.
@@ -436,6 +457,42 @@ StepInput = Annotated[
 ]
 
 
+class ParagraphBlock(BaseModel):
+    """One or more paragraphs of ordinary prose inside a body field's rich
+    block sequence (docs/adr/0012-*.md) — what a bare string in a body field
+    means (see `_coerce_body_item` below).
+
+    Line breaks and blank lines in `content` are preserved: a single "\\n"
+    stays a line break inside one Markdown paragraph, "\\n\\n" starts a
+    second paragraph. Unlike every other plain-string field in this module,
+    `content` is deliberately not run through the single-line canonicaliser
+    (app/services/chat_export.one_line) — a paragraph's whole point is that
+    its structure survives. Inline Markdown (`**bold**`, `` `code` ``,
+    links) renders live; a line that would otherwise open a new Markdown
+    block (a leading '#', '>', '-', a fence, a setext underline, a table
+    delimiter row) is escaped so it renders as literal text instead.
+
+    Not part of `StepBlock`: a `ProcedureStep`'s continuation lines are
+    indented to its numbered marker's width (docs/adr/0009-*.md), a
+    different problem with its own indent rules that this block does not
+    solve.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["paragraph"]
+    content: ParagraphContent = Field(
+        description=(
+            "Prose. Line breaks and blank lines are preserved — a single "
+            "'\\n' stays a line break, '\\n\\n' starts a second paragraph. "
+            "Inline Markdown (**bold**, `code`, links) renders live; text "
+            "that would open a new Markdown block (a leading '#', '>', "
+            "'-', a fence, a table delimiter row) is escaped so it renders "
+            "literally."
+        )
+    )
+
+
 class BulletBlock(BaseModel):
     """One bullet-list item inside a body field's rich block sequence
     (docs/adr/0011-*.md) — the direct analogue of `TextBlock` for a body
@@ -446,12 +503,12 @@ class BulletBlock(BaseModel):
     but a continuation paragraph, never a bullet) already uses `"text"` for
     a different rendering — reusing the same discriminator value for two
     models with different meaning would be confusing, not merely redundant.
+    `ParagraphBlock` (docs/adr/0012-*.md) is the analogue for prose instead;
+    use this only for an actual list item.
 
-    `content` reuses `Line` (no `min_length`) for exactly the reason
-    `TextBlock.content` does: the bare-string shorthand (`_coerce_body_item`)
-    must stay at least as permissive as the plain `list[Line]` shape it
-    replaces, and an empty/whitespace-only `content` is dropped by
-    app/services/chat_export.py's normalisation like every other plain
+    `content` reuses `Line` (no `min_length`) for the same reason
+    `TextBlock.content` does: an empty/whitespace-only `content` is dropped
+    by app/services/chat_export.py's normalisation like every other plain
     string list already is.
 
     `depth` is validated only for its own range here; the *sequence* rule —
@@ -493,24 +550,30 @@ class BulletBlock(BaseModel):
 
 
 BodyBlock = Annotated[
-    BulletBlock | CodeBlock | TableBlock | QuoteBlock, Field(discriminator="type")
+    ParagraphBlock | BulletBlock | CodeBlock | TableBlock | QuoteBlock,
+    Field(discriminator="type"),
 ]
 
 
 def _coerce_body_item(value: object) -> object:
-    """Backward-compatible shorthand: a bare string becomes a `BulletBlock`
-    (docs/adr/0011-*.md) — the direct analogue of `_coerce_step` for a body
-    field's rich block sequence. Existing callers sending a plain
-    `list[str]` keep working unchanged.
+    """Shorthand: a bare string becomes a `ParagraphBlock`
+    (docs/adr/0012-*.md, superseding ADR-0011's bare-string-is-a-bullet
+    shorthand) — the direct analogue of `_coerce_step` for a body field's
+    rich block sequence. A client wanting an actual list item must send an
+    explicit `{"type": "bullet", ...}` instead.
+
+    This is a deliberate breaking change to what a bare string renders as
+    (bullet -> paragraph); no migration of already-written Vault notes is
+    performed, since only new exports are affected.
     """
     if isinstance(value, str):
-        return {"type": "bullet", "content": value}
+        return {"type": "paragraph", "content": value}
     return value
 
 
 BodyItem = Annotated[
     BodyBlock,
-    BeforeValidator(_coerce_body_item, json_schema_input_type=Line | BodyBlock),
+    BeforeValidator(_coerce_body_item, json_schema_input_type=ParagraphContent | BodyBlock),
 ]
 
 
@@ -542,7 +605,7 @@ class TopicSection(BaseModel):
     points: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
-        description="What was covered under this topic, one point per item.",
+        description="What was covered under this topic.",
     )
 
 
@@ -621,10 +684,9 @@ class ChatExport(BaseModel):
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description=(
-            "Concrete things someone will do next, one per item. Keep this "
-            "separate from unresolved_issues — a task is not an open question, "
-            "and the two must never be merged. Leave empty when there is nothing "
-            "to do next."
+            "Concrete things someone will do next. Keep this separate from "
+            "unresolved_issues — a task is not an open question, and the two "
+            "must never be merged. Leave empty when there is nothing to do next."
         ),
     )
     related_notes: list[NotePath] = Field(
@@ -644,8 +706,8 @@ class ChatExport(BaseModel):
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
         description=(
-            "Where the information came from: a URL, a document name, a command "
-            "that was run. One per item."
+            "Where the information came from: a URL, a document name, a "
+            "command that was run."
         ),
     )
     code_blocks: list[CodeBlock] = Field(
@@ -663,15 +725,19 @@ class ChatExport(BaseModel):
     )
 
     # --- summary mode only -----------------------------------------------------
+    # Note (docs/adr/0012-*.md): keep the "<mode> mode only." prefix on any
+    # future edit to these descriptions — tests/test_mcp_tools.py's
+    # _FIELD_OWNER_MODES-driven check asserts every mode-specific field's
+    # description names its owning mode(s).
     overview: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
-        description="summary mode only. What the conversation was about, in a few points.",
+        description="summary mode only. What the conversation was about.",
     )
     key_points: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
-        description="summary mode only. The points worth remembering, one per item.",
+        description="summary mode only. What is worth remembering.",
     )
 
     # --- technical mode only ---------------------------------------------------
@@ -683,7 +749,7 @@ class ChatExport(BaseModel):
     design: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
-        description="technical mode only. The design or approach itself, one point per item.",
+        description="technical mode only. The design or approach itself.",
     )
     implementation_notes: list[BodyItem] = Field(
         default_factory=list,
@@ -805,7 +871,7 @@ class ChatExport(BaseModel):
     examples: list[BodyItem] = Field(
         default_factory=list,
         max_length=_MAX_LIST_ITEMS,
-        description="reference mode only. Concrete examples, one per item.",
+        description="reference mode only. Concrete examples.",
     )
 
     # --- metadata (frontmatter) --------------------------------------------------
