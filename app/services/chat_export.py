@@ -949,11 +949,14 @@ def _paragraph_chars(paragraph: _NormalisedParagraph) -> int:
     canonicalised paragraph vanish from the budget — verified during
     design: a 4,000-line, ``"a\\n"``-repeated ``ParagraphContent`` of
     exactly 8,000 characters sums to only 4,000 by line length alone, so 12
-    such blocks (96,000 by this function's count) would total 200,000 by
-    the naive count, twice ``_MAX_TOTAL_BLOCK_CHARS`` — exactly the
-    ``ParagraphBlock``-introduced budget bypass decision 8 exists to
-    prevent. ``max(len(lines) - 1, 0)`` adds back one separator per
-    boundary between lines (zero for an empty or single-line paragraph).
+    such blocks would count as only 48,000 by that naive calculation —
+    comfortably under ``_MAX_TOTAL_BLOCK_CHARS`` — while this function
+    counts the same 12 blocks at 95,988 (7,999 each, including separators),
+    which correctly binds against the budget. Leaving the separators
+    uncounted is exactly the ``ParagraphBlock``-introduced budget bypass
+    decision 8 exists to prevent. ``max(len(lines) - 1, 0)`` adds back one
+    separator per boundary between lines (zero for an empty or
+    single-line paragraph).
     """
     return sum(len(line) for line in paragraph.lines) + max(len(paragraph.lines) - 1, 0)
 
